@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AIO — Free Processing Analysis</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8fafc;color:#1e293b;min-height:100vh}
+    input,select,textarea{font-family:inherit}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+    .fade-up{animation:fadeUp .4s ease forwards}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  (function(){var k=localStorage.getItem("cr_api_key");if(k)window.__CR_API_KEY=k;})();
+</script>
+<script type="text/babel">
+const {useState,useRef,useCallback} = React;
+
+// ─── AIO Margin Requirements ─────────────────────────────────────────────────
+const MARGIN_REQS = [
+  { maxVol: 20000,    takeRate: 0.015,  minMRR: 300    },
+  { maxVol: 50000,    takeRate: 0.006,  minMRR: 300    },
+  { maxVol: 75000,    takeRate: 0.005,  minMRR: 375    },
+  { maxVol: 100000,   takeRate: 0.004,  minMRR: 400    },
+  { maxVol: 125000,   takeRate: 0.0035, minMRR: 437.5  },
+  { maxVol: 150000,   takeRate: 0.003,  minMRR: 450    },
+  { maxVol: 175000,   takeRate: 0.0025, minMRR: 437.5  },
+  { maxVol: 200000,   takeRate: 0.002,  minMRR: 400    },
+  { maxVol: 250000,   takeRate: 0.0018, minMRR: 450    },
+  { maxVol: 300000,   takeRate: 0.0016, minMRR: 480    },
+  { maxVol: 350000,   takeRate: 0.0014, minMRR: 490    },
+  { maxVol: 400000,   takeRate: 0.0012, minMRR: 480    },
+  { maxVol: 500000,   takeRate: 0.001,  minMRR: 500    },
+  { maxVol: Infinity, takeRate: 0.0008, minMRR: 480    },
+];
+function getMarginFloor(vol) {
+  return MARGIN_REQS.find(t => vol <= t.maxVol) || MARGIN_REQS[MARGIN_REQS.length - 1];
+}
+
+const fmt$ = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:0}).format(n||0);
+const fmtPct = n => `${((n||0)*100).toFixed(2)}%`;
+
+function parseJSON(text){
+  try{
+    const c=text.replace(/```json|```/g,"").trim();
+    const s=c.indexOf("{"),e=c.lastIndexOf("}");
+    if(s!==-1&&e!==-1)return JSON.parse(c.slice(s,e+1));
+  }catch{}
+  return null;
+}
+
+const T = {
+  blue:"#0ea5e9", blueDark:"#0284c7", green:"#22c55e", greenDark:"#16a34a",
+  text:"#1e293b", muted:"#64748b", border:"#e2e8f0", bg:"#f8fafc", white:"#ffffff",
+  card:"#ffffff", red:"#ef4444"
+};
+
+// ── Nav ──────────────────────────────────────────────────────────────────────
+function Nav(){
+  return (
+    <nav style={{background:T.white,borderBottom:`1px solid ${T.border}`,padding:"0 24px",height:64,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#0ea5e9,#6366f1)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>⚡</div>
+        <span style={{fontSize:18,fontWeight:800,color:T.text,letterSpacing:"-0.5px"}}>AIO</span>
+      </div>
+      <a href="https://aioapp.com" target="_blank" rel="noreferrer" style={{fontSize:13,color:T.muted,textDecoration:"none"}}>aioapp.com</a>
+    </nav>
+  );
+}
+
+// ── Progress Bar ──────────────────────────────────────────────────────────────
+function Progress({step}){
+  const steps = ["Your Info","Upload Statement","Your Quote"];
+  const idx = {contact:0,upload:1,result:2}[step] ?? -1;
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:0,padding:"28px 24px 0"}}>
+      {steps.map((s,i)=>(
+        <React.Fragment key={i}>
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+            <div style={{width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700,
+              background:i<idx?"#0ea5e9":i===idx?"#0ea5e9":"#e2e8f0",
+              color:i<=idx?"#fff":"#94a3b8",
+              transition:"all .3s"}}>
+              {i<idx?"✓":i+1}
+            </div>
+            <span style={{fontSize:11,fontWeight:i===idx?700:400,color:i<=idx?T.blue:T.muted,whiteSpace:"nowrap"}}>{s}</span>
+          </div>
+          {i<steps.length-1&&<div style={{flex:1,height:2,background:i<idx?T.blue:"#e2e8f0",margin:"0 8px",marginBottom:20,transition:"all .3s"}}/>}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+// ── Landing ───────────────────────────────────────────────────────────────────
+function LandingStep({onStart}){
+  return (
+    <div>
+      <Nav/>
+      {/* Hero */}
+      <div style={{background:"linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#0f172a 100%)",padding:"80px 24px 100px",textAlign:"center"}}>
+        <div className="fade-up" style={{maxWidth:680,margin:"0 auto"}}>
+          <div style={{display:"inline-flex",alignItems:"center",gap:8,background:"rgba(14,165,233,0.15)",border:"1px solid rgba(14,165,233,0.3)",borderRadius:20,padding:"6px 16px",fontSize:12,color:"#7dd3fc",letterSpacing:1,textTransform:"uppercase",marginBottom:24,fontWeight:600}}>
+            Free for Merchants · No Obligation
+          </div>
+          <h1 style={{fontSize:"clamp(32px,5vw,56px)",fontWeight:900,color:"#fff",lineHeight:1.1,marginBottom:20,letterSpacing:"-1px"}}>
+            See What You're<br/>
+            <span style={{color:"#38bdf8"}}>Actually Paying</span> to Process
+          </h1>
+          <p style={{fontSize:"clamp(16px,2.5vw,20px)",color:"#94a3b8",lineHeight:1.6,marginBottom:40,maxWidth:520,margin:"0 auto 40px"}}>
+            Upload your latest merchant statement and get a free, instant analysis—plus a clear quote showing exactly what AIO would charge.
+          </p>
+          <button onClick={onStart} style={{background:"linear-gradient(135deg,#0ea5e9,#0284c7)",color:"#fff",border:"none",borderRadius:12,padding:"18px 48px",fontSize:18,fontWeight:700,cursor:"pointer",boxShadow:"0 8px 32px rgba(14,165,233,0.4)",letterSpacing:"-0.3px"}}>
+            Get My Free Quote →
+          </button>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:24,marginTop:24,flexWrap:"wrap"}}>
+            {["Takes 2 minutes","No commitment","100% confidential"].map(f=>(
+              <div key={f} style={{display:"flex",alignItems:"center",gap:6,fontSize:13,color:"#64748b"}}>
+                <span style={{color:"#22c55e",fontWeight:700}}>✓</span> {f}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Features */}
+      <div style={{maxWidth:900,margin:"0 auto",padding:"64px 24px"}}>
+        <h2 style={{textAlign:"center",fontSize:26,fontWeight:800,color:T.text,marginBottom:8}}>What you'll get</h2>
+        <p style={{textAlign:"center",color:T.muted,marginBottom:48,fontSize:15}}>A clear breakdown of your current costs and what AIO would charge—no fluff.</p>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:24}}>
+          {[
+            {icon:"🔍",title:"Statement Breakdown",desc:"We'll decode every line of your current statement—interchange, markup, fees—in plain English."},
+            {icon:"💰",title:"Instant Savings Estimate",desc:"See your estimated annual savings with AIO's all-in flat rate, calculated from your actual volume."},
+            {icon:"⚡",title:"One Platform Quote",desc:"Payments, POS, ordering, and back-office—AIO quotes everything together so there are no surprises."},
+            {icon:"📊",title:"No-Surprise Pricing",desc:"AIO's flat rate covers everything. No monthly minimums, no PCI fees, no hidden markups."}
+          ].map(f=>(
+            <div key={f.title} style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:16,padding:28}}>
+              <div style={{fontSize:32,marginBottom:14}}>{f.icon}</div>
+              <div style={{fontSize:16,fontWeight:700,color:T.text,marginBottom:8}}>{f.title}</div>
+              <div style={{fontSize:14,color:T.muted,lineHeight:1.6}}>{f.desc}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{textAlign:"center",marginTop:48}}>
+          <button onClick={onStart} style={{background:T.blue,color:"#fff",border:"none",borderRadius:10,padding:"16px 40px",fontSize:16,fontWeight:700,cursor:"pointer"}}>
+            Start Free Analysis →
+          </button>
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div style={{borderTop:`1px solid ${T.border}`,padding:"24px",textAlign:"center",fontSize:12,color:T.muted}}>
+        AIO — AI for Restaurants · aioapp.com · Your statement is analyzed securely and never stored on our servers.
+      </div>
+    </div>
+  );
+}
+
+// ── Contact Form ──────────────────────────────────────────────────────────────
+function ContactStep({contact,setContact,onNext,onBack}){
+  const [errors,setErrors] = useState({});
+  const fields = [
+    {key:"dba",label:"Business Name (DBA)",placeholder:"e.g. Main Street Bistro",type:"text"},
+    {key:"name",label:"Your Full Name",placeholder:"e.g. Jane Smith",type:"text"},
+    {key:"email",label:"Email Address",placeholder:"jane@yourbusiness.com",type:"email"},
+    {key:"phone",label:"Phone Number",placeholder:"(555) 000-0000",type:"tel"},
+  ];
+  const validate = () => {
+    const e={};
+    if(!contact.dba.trim()) e.dba="Required";
+    if(!contact.name.trim()) e.name="Required";
+    if(!contact.email.trim()||!/\S+@\S+\.\S+/.test(contact.email)) e.email="Valid email required";
+    if(!contact.phone.trim()) e.phone="Required";
+    setErrors(e);
+    return Object.keys(e).length===0;
+  };
+  const handleNext = () => { if(validate()) onNext(); };
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <Nav/>
+      <Progress step="contact"/>
+      <div className="fade-up" style={{maxWidth:520,margin:"32px auto",padding:"0 24px 48px"}}>
+        <h2 style={{fontSize:26,fontWeight:800,color:T.text,marginBottom:8,textAlign:"center"}}>Tell us about your business</h2>
+        <p style={{color:T.muted,textAlign:"center",marginBottom:32,fontSize:15}}>We'll use this to personalize your quote and follow up.</p>
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:16,padding:32,display:"flex",flexDirection:"column",gap:20}}>
+          {fields.map(f=>(
+            <div key={f.key}>
+              <label style={{display:"block",fontSize:13,fontWeight:600,color:T.text,marginBottom:6}}>{f.label}</label>
+              <input
+                type={f.type}
+                placeholder={f.placeholder}
+                value={contact[f.key]}
+                onChange={e=>setContact(p=>({...p,[f.key]:e.target.value}))}
+                style={{width:"100%",padding:"12px 14px",borderRadius:8,border:`1.5px solid ${errors[f.key]?T.red:T.border}`,fontSize:15,outline:"none",background:T.white,color:T.text,transition:"border .2s"}}
+                onFocus={e=>e.target.style.borderColor=T.blue}
+                onBlur={e=>e.target.style.borderColor=errors[f.key]?T.red:T.border}
+              />
+              {errors[f.key]&&<div style={{fontSize:12,color:T.red,marginTop:4}}>{errors[f.key]}</div>}
+            </div>
+          ))}
+          <button onClick={handleNext} style={{background:T.blue,color:"#fff",border:"none",borderRadius:10,padding:"14px",fontSize:15,fontWeight:700,cursor:"pointer",marginTop:4}}>
+            Continue → Upload Statement
+          </button>
+        </div>
+        <p style={{textAlign:"center",fontSize:12,color:T.muted,marginTop:16}}>
+          🔒 Your information is kept private and only used to prepare your quote.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Upload Step ───────────────────────────────────────────────────────────────
+function UploadStep({file,setFile,error,onBack,onAnalyze}){
+  const inputRef = useRef();
+  const [dragging,setDragging] = useState(false);
+
+  const handleDrop = useCallback(e=>{
+    e.preventDefault(); setDragging(false);
+    const f = e.dataTransfer.files[0];
+    if(f) setFile(f);
+  },[setFile]);
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <Nav/>
+      <Progress step="upload"/>
+      <div className="fade-up" style={{maxWidth:560,margin:"32px auto",padding:"0 24px 48px"}}>
+        <h2 style={{fontSize:26,fontWeight:800,color:T.text,marginBottom:8,textAlign:"center"}}>Upload your merchant statement</h2>
+        <p style={{color:T.muted,textAlign:"center",marginBottom:32,fontSize:15}}>
+          We accept PDF statements from any processor. Your most recent month works best.
+        </p>
+
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:16,padding:32}}>
+          {/* Drop zone */}
+          <div
+            onDragOver={e=>{e.preventDefault();setDragging(true)}}
+            onDragLeave={()=>setDragging(false)}
+            onDrop={handleDrop}
+            onClick={()=>inputRef.current?.click()}
+            style={{border:`2px dashed ${dragging?T.blue:file?"#22c55e":T.border}`,borderRadius:12,padding:"40px 24px",textAlign:"center",cursor:"pointer",background:dragging?"#eff6ff":file?"#f0fdf4":"#fafafa",transition:"all .2s"}}>
+            <input ref={inputRef} type="file" accept=".pdf,image/*" style={{display:"none"}} onChange={e=>setFile(e.target.files[0]||null)}/>
+            {file ? (
+              <div>
+                <div style={{fontSize:40,marginBottom:12}}>✅</div>
+                <div style={{fontSize:15,fontWeight:700,color:T.greenDark,marginBottom:4}}>{file.name}</div>
+                <div style={{fontSize:13,color:T.muted}}>{(file.size/1024/1024).toFixed(1)} MB · Click to change</div>
+              </div>
+            ) : (
+              <div>
+                <div style={{fontSize:48,marginBottom:16}}>📄</div>
+                <div style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:6}}>Drop your statement here</div>
+                <div style={{fontSize:13,color:T.muted,marginBottom:16}}>or click to browse files</div>
+                <div style={{display:"inline-block",background:T.blue,color:"#fff",borderRadius:8,padding:"8px 20px",fontSize:13,fontWeight:600}}>Browse Files</div>
+              </div>
+            )}
+          </div>
+
+          {error && <div style={{marginTop:16,padding:"12px 16px",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,fontSize:13,color:T.red}}>{error}</div>}
+
+          <div style={{display:"flex",gap:12,marginTop:24}}>
+            <button onClick={onBack} style={{flex:"0 0 auto",background:"transparent",color:T.muted,border:`1px solid ${T.border}`,borderRadius:10,padding:"14px 20px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
+              ← Back
+            </button>
+            <button onClick={onAnalyze} disabled={!file} style={{flex:1,background:file?T.blue:"#e2e8f0",color:file?"#fff":T.muted,border:"none",borderRadius:10,padding:"14px",fontSize:15,fontWeight:700,cursor:file?"pointer":"not-allowed",transition:"all .2s"}}>
+              Analyze My Statement →
+            </button>
+          </div>
+        </div>
+
+        <div style={{marginTop:20,padding:"16px 20px",background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,fontSize:13,color:"#1e40af",lineHeight:1.6}}>
+          <strong>Accepted formats:</strong> PDF merchant processing statements from any processor (Square, Stripe, Heartland, First Data, TSYS, Chase, etc.)
+        </div>
+        <p style={{textAlign:"center",fontSize:12,color:T.muted,marginTop:12}}>
+          🔒 Your statement is analyzed in your browser and never uploaded to our servers.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Analyzing ─────────────────────────────────────────────────────────────────
+function AnalyzingStep(){
+  const [msgIdx,setMsgIdx] = useState(0);
+  const msgs = ["Reading your statement...","Identifying interchange costs...","Calculating processor markup...","Building your quote..."];
+  React.useEffect(()=>{
+    const t = setInterval(()=>setMsgIdx(i=>(i+1)%msgs.length),2000);
+    return ()=>clearInterval(t);
+  },[]);
+  return (
+    <div style={{minHeight:"100vh",background:T.bg,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:24,padding:24}}>
+      <div style={{width:64,height:64,borderRadius:"50%",border:`4px solid #e2e8f0`,borderTop:`4px solid ${T.blue}`,animation:"spin 1s linear infinite"}}/>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:20,fontWeight:700,color:T.text,marginBottom:8}}>Analyzing your statement</div>
+        <div style={{fontSize:14,color:T.muted,height:20}}>{msgs[msgIdx]}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Result ────────────────────────────────────────────────────────────────────
+function ResultStep({contact,analysis,quote,isReferral}){
+  if(isReferral){
+    return (
+      <div style={{minHeight:"100vh",background:T.bg}}>
+        <Nav/>
+        <div className="fade-up" style={{maxWidth:560,margin:"60px auto",padding:"0 24px"}}>
+          <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:20,padding:48,textAlign:"center"}}>
+            <div style={{fontSize:56,marginBottom:20}}>🙏</div>
+            <h2 style={{fontSize:26,fontWeight:800,color:T.text,marginBottom:16}}>Thank you, {contact.name.split(" ")[0]}!</h2>
+            <p style={{fontSize:16,color:T.muted,lineHeight:1.7,marginBottom:24}}>
+              Thank you for submitting your statement. Someone from our team will be in touch with you shortly to discuss your options.
+            </p>
+            <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:12,padding:"16px 20px",fontSize:13,color:"#0369a1",textAlign:"left",marginBottom:24}}>
+              <strong>What happens next:</strong><br/>
+              A member of our team will review your account and reach out within 1 business day to walk through your options personally.
+            </div>
+            <div style={{fontSize:14,color:T.muted}}>
+              Questions? Email us at <a href="mailto:hello@aioapp.com" style={{color:T.blue,textDecoration:"none"}}>hello@aioapp.com</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const {flatRate,monthlyCost,annualCost,savings} = quote;
+  const currentMonthly = analysis.totalFees || 0;
+  const currentRate = analysis.effectiveRate || 0;
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <Nav/>
+      <div className="fade-up" style={{maxWidth:680,margin:"0 auto",padding:"32px 24px 64px"}}>
+        {/* Header */}
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{fontSize:13,color:T.muted,marginBottom:6}}>
+            Prepared for <strong style={{color:T.text}}>{contact.dba}</strong>
+          </div>
+          <h2 style={{fontSize:30,fontWeight:900,color:T.text,marginBottom:8,letterSpacing:"-0.5px"}}>Your AIO Quote</h2>
+          <p style={{color:T.muted,fontSize:15}}>Based on your {analysis.processingMonth} statement from {analysis.currentProcessorName || "your current processor"}</p>
+        </div>
+
+        {/* Savings hero */}
+        <div style={{background:"linear-gradient(135deg,#052e16,#14532d)",border:"1px solid #22c55e40",borderRadius:20,padding:"40px 32px",textAlign:"center",marginBottom:24}}>
+          <div style={{fontSize:12,color:"#4ade80",letterSpacing:2,textTransform:"uppercase",marginBottom:12,fontWeight:600}}>Estimated Annual Savings</div>
+          <div style={{fontSize:64,fontWeight:900,color:"#22c55e",lineHeight:1,marginBottom:8}}>{fmt$(savings.annual)}</div>
+          <div style={{fontSize:15,color:"#4ade80",opacity:0.8,marginBottom:32}}>{fmtPct(savings.pct)} reduction in processing costs</div>
+          <div style={{display:"flex",gap:24,justifyContent:"center",flexWrap:"wrap"}}>
+            {[
+              {val:fmt$(savings.monthly),lbl:"Monthly Savings"},
+              {val:fmtPct(flatRate),lbl:"AIO Flat Rate"},
+              {val:fmtPct(currentRate),lbl:"Your Current Rate"},
+            ].map((s,i)=>(
+              <React.Fragment key={i}>
+                {i>0&&<div style={{width:1,height:36,background:"rgba(255,255,255,0.1)"}}/>}
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:20,fontWeight:700,color:"#fff"}}>{s.val}</div>
+                  <div style={{fontSize:11,color:"#94a3b8",marginTop:3}}>{s.lbl}</div>
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+
+        {/* Comparison table */}
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:16,overflow:"hidden",marginBottom:24}}>
+          <div style={{padding:"16px 24px",borderBottom:`1px solid ${T.border}`,fontSize:14,fontWeight:700,color:T.text}}>Fee Comparison</div>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:14}}>
+            <thead>
+              <tr style={{background:"#f8fafc"}}>
+                {["","Current","With AIO","Savings"].map(h=><th key={h} style={{padding:"10px 20px",textAlign:h?"right":"left",fontSize:12,color:T.muted,fontWeight:600,borderBottom:`1px solid ${T.border}`}}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                {label:"Monthly Processing",curr:currentMonthly,proposed:monthlyCost,diff:savings.monthly},
+                {label:"Annual Total",curr:currentMonthly*12,proposed:annualCost,diff:savings.annual},
+              ].map((r,i)=>(
+                <tr key={i} style={{borderBottom:i<1?`1px solid ${T.border}`:"none"}}>
+                  <td style={{padding:"14px 20px",fontWeight:600,color:T.text}}>{r.label}</td>
+                  <td style={{padding:"14px 20px",textAlign:"right",color:"#ef4444",fontWeight:500}}>{fmt$(r.curr)}</td>
+                  <td style={{padding:"14px 20px",textAlign:"right",color:"#0ea5e9",fontWeight:600}}>{fmt$(r.proposed)}</td>
+                  <td style={{padding:"14px 20px",textAlign:"right",color:T.greenDark,fontWeight:700}}>{fmt$(r.diff)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* AIO pitch */}
+        <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:16,padding:"24px 28px",marginBottom:24}}>
+          <div style={{fontSize:14,color:"#0369a1",lineHeight:1.7}}>
+            <strong>AIO is more than payments.</strong> Payments are just one part of the system—AIO connects your POS, ordering, staffing, and back-office tools into a single platform, reducing manual work and giving you a clearer view of your business.
+          </div>
+        </div>
+
+        {/* Value bullets */}
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:16,padding:24,marginBottom:28}}>
+          <div style={{fontSize:14,fontWeight:700,color:T.text,marginBottom:16}}>What's included with AIO</div>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {[
+              "One flat rate covers all card types — no interchange tiers, no surprises",
+              "Integrated POS, online ordering, and kitchen display system",
+              "Real-time sales, cost, and performance dashboards",
+              "Staffing tools, tip management, and automated reporting",
+            ].map((b,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,fontSize:14,color:T.muted,lineHeight:1.5}}>
+                <span style={{color:T.green,fontWeight:700,flexShrink:0}}>✓</span>{b}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* CTA */}
+        <div style={{background:"linear-gradient(135deg,#0f172a,#1e3a5f)",borderRadius:16,padding:"32px",textAlign:"center"}}>
+          <div style={{fontSize:18,fontWeight:800,color:"#fff",marginBottom:8}}>Ready to make the switch?</div>
+          <div style={{fontSize:14,color:"#94a3b8",marginBottom:24}}>A member of our team will reach out to walk you through the next steps.</div>
+          <div style={{fontSize:13,color:"#64748b",marginTop:16}}>
+            Or email us directly: <a href="mailto:hello@aioapp.com" style={{color:"#38bdf8",textDecoration:"none"}}>hello@aioapp.com</a>
+          </div>
+        </div>
+
+        <p style={{textAlign:"center",fontSize:12,color:T.muted,marginTop:24}}>
+          This quote is an estimate based on your submitted statement. Final rates may vary. AIO · aioapp.com
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App(){
+  const [step,setStep] = useState("landing");
+  const [contact,setContact] = useState({dba:"",name:"",email:"",phone:""});
+  const [file,setFile] = useState(null);
+  const [analysis,setAnalysis] = useState(null);
+  const [quote,setQuote] = useState(null);
+  const [isReferral,setIsReferral] = useState(false);
+  const [error,setError] = useState(null);
+
+  const getKey = () => window.__CR_API_KEY || localStorage.getItem("cr_api_key") || "";
+
+  const analyzeStatement = async () => {
+    if(!file) return;
+    setStep("analyzing");
+    setError(null);
+    try {
+      const fileData = await new Promise((res,rej)=>{
+        const r=new FileReader();
+        r.onload=e=>res(e.target.result.split(",")[1]);
+        r.onerror=rej;
+        r.readAsDataURL(file);
+      });
+      const apiKey = getKey();
+      if(!apiKey){ setError("Configuration error. Please contact AIO support."); setStep("upload"); return; }
+
+      const resp = await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514", max_tokens:1200,
+          messages:[{role:"user",content:[
+            {type:"document",source:{type:"base64",media_type:file.type||"application/pdf",data:fileData}},
+            {type:"text",text:`Analyze this merchant processing statement and return ONLY valid JSON:
+{
+  "merchantName": string,
+  "processingMonth": string (e.g. "January 2025"),
+  "totalVolume": number (monthly processing volume in USD),
+  "totalTransactions": number,
+  "totalFees": number (total monthly fees paid in USD),
+  "interchangeFees": number (interchange + network fees in USD),
+  "processorFees": number (processor markup fees above interchange in USD),
+  "otherFees": number (monthly fees, PCI, statement, other in USD),
+  "effectiveRate": number (totalFees / totalVolume as decimal e.g. 0.027),
+  "interchangeRate": number (interchangeFees / totalVolume as decimal),
+  "processorMarkup": number (processorFees / totalVolume as decimal),
+  "currentProcessorName": string,
+  "currentPricingModel": string (e.g. "interchange-plus", "flat-rate", "tiered"),
+  "confidence": "high|medium|low"
+}
+Never use null — use 0 for missing numbers. Rates as decimals (0.027 = 2.7%).`}
+          ]}]
+        })
+      });
+      const data = await resp.json();
+      if(data.type==="error"||data.error){ throw new Error(data.error?.message||"Analysis failed"); }
+      const parsed = parseJSON(data.content?.map(b=>b.text||"").join("")||"");
+      if(!parsed) throw new Error("Could not read statement data. Please try a clearer PDF.");
+
+      // Quote calculation: save merchant 25% of what processor earns above interchange
+      const vol             = parsed.totalVolume || 0;
+      const processorMargin = (parsed.processorFees||0) + (parsed.otherFees||0);
+      const targetSavings   = processorMargin * 0.25;
+      let   proposedCost    = (parsed.totalFees||0) - targetSavings;
+
+      // Enforce AIO minimum take rate — never quote below our margin floor
+      const marginFloor     = getMarginFloor(vol);
+      const minFlatRate     = (parsed.interchangeRate||0) + marginFloor.takeRate;
+      const minCostByRate   = vol > 0 ? minFlatRate * vol : proposedCost;
+      const minCostByMRR    = marginFloor.minMRR + (parsed.interchangeFees||0);
+      proposedCost          = Math.max(proposedCost, minCostByRate, minCostByMRR);
+
+      const flatRate        = vol > 0 ? proposedCost / vol : 0;
+      const actualSavings   = (parsed.totalFees||0) - proposedCost;
+      const savingsPct      = (parsed.totalFees||0) > 0 ? actualSavings / (parsed.totalFees||0) : 0;
+      const isRef           = savingsPct < 0.05;
+
+      const quoteData = isRef
+        ? { type:"referral" }
+        : { type:"quote", flatRate, monthlyCost:proposedCost, annualCost:proposedCost*12,
+            savings:{ monthly:actualSavings, annual:actualSavings*12, pct:savingsPct } };
+
+      // Save submission to localStorage for admin page
+      const submission = {
+        id: Date.now(),
+        submittedAt: new Date().toISOString(),
+        contact,
+        analysis: parsed,
+        quote: quoteData
+      };
+      try {
+        const existing = JSON.parse(localStorage.getItem("aio_submissions")||"[]");
+        existing.unshift(submission);
+        localStorage.setItem("aio_submissions", JSON.stringify(existing.slice(0,500)));
+      } catch(e){}
+
+      setAnalysis(parsed); setQuote(quoteData); setIsReferral(isRef);
+      setStep("result");
+    } catch(err){
+      setError(err.message);
+      setStep("upload");
+    }
+  };
+
+  if(step==="landing")   return <LandingStep onStart={()=>setStep("contact")}/>;
+  if(step==="contact")   return <ContactStep contact={contact} setContact={setContact} onNext={()=>setStep("upload")} onBack={()=>setStep("landing")}/>;
+  if(step==="upload")    return <UploadStep file={file} setFile={setFile} error={error} onBack={()=>setStep("contact")} onAnalyze={analyzeStatement}/>;
+  if(step==="analyzing") return <AnalyzingStep/>;
+  if(step==="result")    return <ResultStep contact={contact} analysis={analysis} quote={quote} isReferral={isReferral}/>;
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

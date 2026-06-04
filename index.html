@@ -1,0 +1,1618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClearRate Proposal Engine</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0f1e; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- API key config — set once and stored in localStorage -->
+  <script>
+    (function() {
+      var saved = localStorage.getItem("cr_api_key");
+      if (saved) { window.__CR_API_KEY = saved; return; }
+      var key = prompt("Enter your Anthropic API key to use ClearRate:");
+      if (key && key.trim()) {
+        window.__CR_API_KEY = key.trim();
+        localStorage.setItem("cr_api_key", key.trim());
+      }
+    })();
+  </script>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useRef, useEffect } = React;
+
+
+const STEPS = ["upload", "analysis", "pricing", "proposal"];
+
+const fmt$ = (n) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(n || 0);
+const fmtPct  = (n) => `${((n || 0) * 100).toFixed(4)}%`;
+const fmtPct2 = (n) => `${((n || 0) * 100).toFixed(2)}%`;
+const fmtBps  = (n) => `${Math.round((n || 0) * 10000)} bps`;
+
+function parseJSON(text) {
+  try {
+    const clean = text.replace(/```json|```/g, "").trim();
+    const s = clean.indexOf("{"), e = clean.lastIndexOf("}");
+    if (s !== -1 && e !== -1) return JSON.parse(clean.slice(s, e + 1));
+  } catch {}
+  return null;
+}
+
+function calcAdyenCost(tier, volume, txnCount) {
+  if (!tier) return 0;
+  return volume * (tier.processingBps || 0) + txnCount * (tier.perTxnFee || 0) + volume * (tier.schemeBps || 0) + (tier.monthlyFee || 0);
+}
+
+function adyenRateOnVolume(tier, volume, txnCount) {
+  if (!tier || !volume) return 0;
+  return calcAdyenCost(tier, volume, txnCount) / volume;
+}
+
+// ─── Default empty state ──────────────────────────────────────────────────────
+const defaultSettings = {
+  processors: [],
+  users: [],
+  activeProcessorId: null,
+};
+
+const newProcessor = () => ({
+  id: Date.now().toString(),
+  name: "New Processor",
+  contractFile: null,
+  rates: null,
+  activeTierId: null,
+  createdAt: new Date().toISOString(),
+});
+
+const newUser = () => ({
+  id: Date.now().toString(),
+  name: "",
+  email: "",
+  role: "Sales Rep",
+  createdAt: new Date().toISOString(),
+});
+
+// ─── Storage helpers ──────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const raw = localStorage.getItem("clearrate:settings"); const r = raw ? { value: raw } : null;
+    return r ? JSON.parse(r.value) : defaultSettings;
+  } catch { return defaultSettings; }
+}
+
+async function saveSettings(s) {
+  try { localStorage.setItem("clearrate:settings", JSON.stringify(s)); } catch {}
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+function App() {
+  const [page, setPage] = useState("proposal"); // "proposal" | "settings"
+  const [settings, setSettings] = useState(null);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null); // logged-in user
+
+  // Proposal flow
+  const [step, setStep] = useState("upload");
+  const [file, setFile] = useState(null);
+  const [fileData, setFileData] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
+  const [pricingModel, setPricingModel] = useState(null);
+  const [targetMargin, setTargetMargin] = useState(0.005);
+  const [proposal, setProposal] = useState(null);
+  const [feeOverrides, setFeeOverrides] = useState({ monthlyFee: 0, perTxnFee: 0, cpPerTxnFee: 0, cnpPerTxnFee: 0 });
+  const [dragOver, setDragOver] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState("");
+  const fileRef = useRef();
+
+  // Load settings on mount
+  useEffect(() => {
+    loadSettings().then(s => { setSettings(s); setSettingsLoaded(true); });
+  }, []);
+
+  const persistSettings = (updated) => {
+    setSettings(updated);
+    saveSettings(updated);
+  };
+
+  // Active processor + tier
+  const activeProcessor = settings?.processors?.find(p => p.id === settings?.activeProcessorId) || null;
+  const activeTier = activeProcessor?.rates?.isTiered
+    ? activeProcessor.rates.tiers?.find(t => t.id === activeProcessor.activeTierId) || activeProcessor.rates.tiers?.[0]
+    : activeProcessor?.rates ? { ...activeProcessor.rates, id: "flat", label: "Standard Rate" } : null;
+
+  const adyenCostRate = (activeTier && analysis)
+    ? adyenRateOnVolume(activeTier, analysis.totalVolume, analysis.totalTransactions)
+    : 0;
+  const netMargin = targetMargin - adyenCostRate;
+  const belowFloor = netMargin < 0;
+
+  const readFile = (f, cb) => {
+    const r = new FileReader();
+    r.onload = e => cb(e.target.result.split(",")[1]);
+    r.readAsDataURL(f);
+  };
+
+  const analyzeStatement = async () => {
+    if (!fileData) return;
+    setLoading(true); setLoadingMsg("Analyzing merchant statement...");
+    const isImage = file.type.startsWith("image/");
+    try {
+      const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
+        method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          messages: [{ role: "user", content: [
+            { type: isImage ? "image" : "document", source: { type: "base64", media_type: isImage ? file.type : "application/pdf", data: fileData } },
+            { type: "text", text: `Analyze this merchant statement. Return ONLY JSON (no markdown):
+{"merchantName":"string","processingMonth":"string","totalVolume":number,"totalTransactions":number,"totalFees":number,"interchangeFees":number,"processorFees":number,"otherFees":number,"effectiveRate":number,"interchangeRate":number,"processorMarkup":number,"averageTicket":number,"cardPresentVolume":number,"cardNotPresentVolume":number,"cardPresentPct":number,"cardNotPresentPct":number,"visaVolume":number,"mastercardVolume":number,"amexVolume":number,"discoverVolume":number,"rewardCardPct":number,"corporateCardPct":number,"currentPricingModel":"tiered|interchange-plus|flat-rate|unknown","currentProcessorName":"string","annualVolume":number,"confidence":"high|medium|low","notes":"string"}
+Use 0 for unknown numerics.` }
+          ]}]
+        })
+      });
+      const data = await res.json();
+      const parsed = parseJSON(data.content?.map(b => b.text || "").join("") || "");
+      if (parsed) {
+        // Normalize: if any rate field looks like a percentage (>0.5) convert to decimal
+        const rateFields = ["effectiveRate","interchangeRate","processorMarkup","cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"];
+        rateFields.forEach(f => {
+          if (parsed[f] != null && parsed[f] > 0.5) parsed[f] = parsed[f] / 100;
+        });
+        // Volume-derived pcts: recalculate from volumes if total is available
+        if (parsed.totalVolume > 0) {
+          if (parsed.cardPresentVolume > 0)   parsed.cardPresentPct   = parsed.cardPresentVolume   / parsed.totalVolume;
+          if (parsed.cardNotPresentVolume > 0) parsed.cardNotPresentPct = parsed.cardNotPresentVolume / parsed.totalVolume;
+          // Sanity-check pct fields — if still > 1 after normalization, zero them
+          ["cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"].forEach(f => {
+            if (parsed[f] > 1) parsed[f] = 0;
+          });
+          // Recalculate effective rate from actual numbers as a cross-check
+          if (parsed.totalFees > 0) {
+            const derived = parsed.totalFees / parsed.totalVolume;
+            // If AI rate is wildly off from derived, trust the derived value
+            if (Math.abs((parsed.effectiveRate || 0) - derived) > 0.01) parsed.effectiveRate = derived;
+          }
+          // Same cross-check for interchange
+          if (parsed.interchangeFees > 0) {
+            const derivedIC = parsed.interchangeFees / parsed.totalVolume;
+            if (Math.abs((parsed.interchangeRate || 0) - derivedIC) > 0.01) parsed.interchangeRate = derivedIC;
+          }
+        }
+        parsed.currentMargin = (parsed.effectiveRate || 0) - (parsed.interchangeRate || 0);
+        setAnalysis(parsed);
+        setStep("analysis");
+      }
+      else alert("Could not parse statement.");
+    } catch (err) { alert("Error: " + err.message); }
+    setLoading(false);
+  };
+
+  const generateProposal = async () => {
+    if (!analysis || !pricingModel) return;
+    setLoading(true); setLoadingMsg("Building your proposal...");
+
+    // Re-derive the exact same rates PricingStep shows, so the AI uses them verbatim
+    const vol = analysis.totalVolume || 0;
+    const txns = analysis.totalTransactions || 0;
+    const icRate = analysis.interchangeRate || 0;
+
+    const annVol = vol * 12; // always derive from monthly
+    const cpPct  = analysis.cardPresentPct    || 0.7;
+    const cnpPct = analysis.cardNotPresentPct || 0.3;
+    const cpVol  = analysis.cardPresentVolume  || vol * cpPct;
+    const cnpVol = analysis.cardNotPresentVolume || vol * cnpPct;
+    const cpIcRate  = cpVol  > 0 ? (icRate * vol * cpPct)  / cpVol  : icRate * 0.85;
+    const cnpIcRate = cnpVol > 0 ? (icRate * vol * cnpPct) / cnpVol : icRate * 1.15;
+
+    const flatRevNeeded    = vol * targetMargin;
+    const flatFeeRevenue   = txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+    const flatPctRevNeeded = Math.max(0, flatRevNeeded - flatFeeRevenue);
+    const derivedFlatRate  = icRate + flatPctRevNeeded / (vol || 1);
+
+    const cpRevNeeded  = cpVol  * targetMargin;
+    const cnpRevNeeded = cnpVol * targetMargin;
+    const cpFeeRev     = txns * cpPct  * (feeOverrides.cpPerTxnFee  || 0) + (feeOverrides.monthlyFee || 0) * cpPct;
+    const cnpFeeRev    = txns * cnpPct * (feeOverrides.cnpPerTxnFee || 0) + (feeOverrides.monthlyFee || 0) * cnpPct;
+    const derivedCPRate  = cpIcRate  + Math.max(0, cpRevNeeded  - cpFeeRev)  / (cpVol  || 1);
+    const derivedCNPRate = cnpIcRate + Math.max(0, cnpRevNeeded - cnpFeeRev) / (cnpVol || 1);
+
+    // Proposed monthly fees (same formula as PricingStep)
+    let proposedMonthly = 0;
+    if (pricingModel === "flat-rate") {
+      proposedMonthly = vol * derivedFlatRate + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+    } else if (pricingModel === "2-tier") {
+      proposedMonthly = cpVol * derivedCPRate + txns * cpPct * (feeOverrides.cpPerTxnFee || 0)
+        + cnpVol * derivedCNPRate + txns * cnpPct * (feeOverrides.cnpPerTxnFee || 0)
+        + (feeOverrides.monthlyFee || 0);
+    } else {
+      proposedMonthly = vol * icRate + vol * targetMargin + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+    }
+
+    // Build the exact rates object to inject — AI must use these numbers, not invent its own
+    const exactRates = pricingModel === "flat-rate"
+      ? { flatRate: derivedFlatRate, perTransaction: feeOverrides.perTxnFee || 0, monthlyFee: feeOverrides.monthlyFee || 0 }
+      : pricingModel === "2-tier"
+      ? { cardPresentRate: derivedCPRate, cardPresentPerTxn: feeOverrides.cpPerTxnFee || 0, cardNotPresentRate: derivedCNPRate, cardNotPresentPerTxn: feeOverrides.cnpPerTxnFee || 0, monthlyFee: feeOverrides.monthlyFee || 0 }
+      : { basisPoints: Math.round(targetMargin * 10000), perTransaction: feeOverrides.perTxnFee || 0, monthlyFee: feeOverrides.monthlyFee || 0 };
+
+    const exactProjected = { monthly: proposedMonthly, annual: proposedMonthly * 12, effectiveRate: vol > 0 ? proposedMonthly / vol : 0 };
+    const savingsMonthly = (analysis.totalFees || 0) - proposedMonthly;
+
+    try {
+      const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
+        method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          messages: [{ role: "user", content: `Generate a payment processing proposal. Use EXACTLY the rates and fees provided — do not recalculate or change any numbers.
+
+MERCHANT: ${JSON.stringify({       merchantName: analysis.merchantName, totalVolume: vol, totalTransactions: txns, totalFees: analysis.totalFees, effectiveRate: analysis.effectiveRate, currentProcessorName: analysis.currentProcessorName, currentPricingModel: analysis.currentPricingModel, annualVolume: annVol })}
+PRICING MODEL: ${pricingModel}
+PROPOSED RATES (use exactly): ${JSON.stringify(exactRates)}
+PROJECTED FEES (use exactly): ${JSON.stringify(exactProjected)}
+SAVINGS MONTHLY: ${savingsMonthly.toFixed(2)}
+SAVINGS ANNUAL: ${(savingsMonthly * 12).toFixed(2)}
+
+Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72):
+{"pricingModel":"${pricingModel}","proposedRates":${JSON.stringify(exactRates)},"projectedFees":${JSON.stringify(exactProjected)},"currentFees":{"monthly":${(analysis.totalFees||0).toFixed(2)},"annual":${((analysis.totalFees||0)*12).toFixed(2)},"effectiveRate":${(analysis.effectiveRate||0).toFixed(6)}},"savings":{"monthly":${savingsMonthly.toFixed(2)},"annual":${(savingsMonthly*12).toFixed(2)},"savingsPct":${(analysis.totalFees > 0 ? savingsMonthly/analysis.totalFees : 0).toFixed(6)}},"sellingPoints":["string","string","string","string"],"proposalSummary":"2-3 sentence summary for the merchant"}` }]
+        })
+      });
+      const data = await res.json();
+      const parsed = parseJSON(data.content?.map(b => b.text || "").join("") || "");
+      if (parsed) {
+        // Force the exact computed values regardless of what AI returned
+        parsed.proposedRates   = exactRates;
+        parsed.projectedFees   = exactProjected;
+        parsed.currentFees     = { monthly: analysis.totalFees || 0, annual: (analysis.totalFees || 0) * 12, effectiveRate: analysis.effectiveRate || 0 };
+        parsed.savings         = { monthly: savingsMonthly, annual: savingsMonthly * 12, savingsPct: analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0 };
+        setProposal(parsed);
+        setStep("proposal");
+      } else alert("Could not generate proposal.");
+    } catch (err) { alert("Error: " + err.message); }
+    setLoading(false);
+  };
+
+  if (!settingsLoaded) return (
+    <div style={{...S.root, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
+      <div style={{textAlign:"center"}}><div style={S.spinner} className="spin"/><p style={{color:T.muted,marginTop:16}}>Loading ClearRate...</p></div>
+      <style>{css}</style>
+    </div>
+  );
+
+  if (!currentUser) return (
+    <LoginPage
+      settings={settings}
+      persistSettings={persistSettings}
+      onLogin={setCurrentUser}
+    />
+  );
+
+  return (
+    <div style={S.root}>
+      <style>{css}</style>
+      <header style={S.header}>
+        <div style={S.headerInner}>
+          <div style={S.logo}>
+            <svg width="72" height="40" viewBox="0 0 72 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              {/* A — chevron with rounded ends and curved base */}
+              <path d="M4 34 L14 6 L24 34" stroke="#f9674e" strokeWidth="5.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <path d="M4 34 Q14 28 24 34" stroke="#f9674e" strokeWidth="5.5" strokeLinecap="round" fill="none"/>
+              {/* i — rounded pill stem */}
+              <rect x="29.5" y="14" width="5" height="20" rx="2.5" fill="#f9674e"/>
+              {/* i — circle dot */}
+              <circle cx="32" cy="7" r="3.5" fill="#f9674e"/>
+              {/* o — rounded rectangle outline */}
+              <rect x="39" y="13" width="29" height="21" rx="7" stroke="#f9674e" strokeWidth="5.5" fill="none"/>
+            </svg>
+            <span style={S.logoSub}>Proposal Engine</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:24}}>
+            {page === "proposal" && (
+              <nav style={S.stepNav}>
+                {[{id:"upload",label:"01 Upload"},{id:"analysis",label:"02 Analysis"},{id:"pricing",label:"03 Pricing"},{id:"proposal",label:"04 Proposal"}].map(s=>(
+                  <div key={s.id} style={{...S.stepItem,...(step===s.id?S.stepActive:{}),...(STEPS.indexOf(step)>STEPS.indexOf(s.id)?S.stepDone:{})}}>{s.label}</div>
+                ))}
+              </nav>
+            )}
+            <div style={S.pageNav}>
+              <button style={{...S.pageBtn,...(page==="proposal"?S.pageBtnActive:{})}} onClick={()=>setPage("proposal")}>Proposals</button>
+              <button style={{...S.pageBtn,...(page==="settings"?S.pageBtnActive:{})}} onClick={()=>setPage("settings")}>⚙ Settings</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main style={S.main}>
+        {loading && (
+          <div style={S.overlay}><div style={S.overlayCard}><div style={S.spinner} className="spin"/><p style={S.spinMsg}>{loadingMsg}</p></div></div>
+        )}
+
+        {page === "settings" && (
+          <SettingsPage settings={settings} persistSettings={persistSettings} />
+        )}
+
+        {page === "proposal" && (
+          <>
+            {/* Active processor banner — only show outside of proposal step */}
+            {step !== "proposal" && activeProcessor && activeTier && (
+              <div style={S.procBanner}>
+                <span style={{color:T.green}}>◈</span>
+                <span style={{color:T.muted,fontSize:13}}>Acquirer:</span>
+                <span style={{color:T.white,fontWeight:600,fontSize:13}}>{activeProcessor.name}</span>
+                <span style={{color:T.muted,fontSize:13}}>·</span>
+                <span style={{color:T.gold,fontSize:13}}>Tier: {activeTier.label || "Standard"}</span>
+                <span style={{color:T.muted,fontSize:12}}>{fmtBps(activeTier.processingBps)} + ${(activeTier.perTxnFee||0).toFixed(4)}/txn</span>
+                <button style={S.bannerLink} onClick={()=>setPage("settings")}>Change</button>
+              </div>
+            )}
+            {step !== "proposal" && !activeProcessor && (
+              <div style={{...S.procBanner, borderColor:`${T.gold}40`, background:`${T.gold}08`}}>
+                <span style={{color:T.gold}}>⚠</span>
+                <span style={{color:T.muted,fontSize:13}}>No acquirer contract loaded — proposals will not include your cost layer.</span>
+                <button style={{...S.bannerLink,color:T.gold}} onClick={()=>setPage("settings")}>Add in Settings →</button>
+              </div>
+            )}
+
+            {/* ══ UPLOAD ══ */}
+            {step === "upload" && (
+              <div style={S.panel}>
+                <h1 style={S.h1}>Upload Merchant Statement</h1>
+                <p style={S.sub}>Upload a PDF or image of any merchant processing statement.</p>
+                <div style={{...S.dropzone,...(dragOver?S.dropzoneActive:{}),...(file?S.dropzoneDone:{})}}
+                  onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)}
+                  onDrop={e=>{e.preventDefault();setDragOver(false);const f=e.dataTransfer.files[0];if(f){setFile(f);readFile(f,setFileData);}}}
+                  onClick={()=>fileRef.current.click()}>
+                  <input ref={fileRef} type="file" accept=".pdf,image/*" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];if(f){setFile(f);readFile(f,setFileData);}}}/>
+                  {file?(<><div style={S.fileIcon}>✓</div><p style={S.fileName}>{file.name}</p><p style={S.fileMeta}>{(file.size/1024).toFixed(1)} KB · Click to replace</p></>)
+                  :(<><div style={S.uploadIcon}>⬆</div><p style={S.dropLabel}>Drop statement here or click to browse</p><p style={S.dropMeta}>PDF or image · Any processor format</p></>)}
+                </div>
+                <div style={S.chips}>{["Stripe","Square","First Data","TSYS","Heartland","Worldpay","Chase Paymentech","Elavon"].map(p=><div key={p} style={S.chip}>{p}</div>)}</div>
+                <button style={{...S.btn,...S.btnPrimary,opacity:file?1:0.4}} disabled={!file||loading} onClick={analyzeStatement}>Analyze Statement →</button>
+              </div>
+            )}
+
+            {/* ══ ANALYSIS ══ */}
+            {step === "analysis" && analysis && (
+              <div style={S.panel}>
+                <div style={S.panelHeader}>
+                  <div><h1 style={S.h1}>{analysis.merchantName||"Merchant"} — Analysis</h1>
+                    <p style={S.sub}>{analysis.processingMonth} · {analysis.currentProcessorName} · Confidence: <span style={{color:analysis.confidence==="high"?T.green:analysis.confidence==="medium"?T.gold:T.red}}>{analysis.confidence}</span></p>
+                  </div>
+                  <div style={S.badge}>{analysis.currentPricingModel?.replace("-"," ").toUpperCase()}</div>
+                </div>
+                <div style={S.grid4}>
+                  {[{label:"Monthly Volume",val:fmt$(analysis.totalVolume)},{label:"Total Fees",val:fmt$(analysis.totalFees),accent:true},{label:"Effective Rate",val:fmtPct2(analysis.effectiveRate),accent:true},{label:"Avg Ticket",val:fmt$(analysis.averageTicket)}].map(m=>(
+                    <div key={m.label} style={{...S.metricCard,...(m.accent?S.metricAccent:{})}}><div style={S.metricVal}>{m.val}</div><div style={S.metricLbl}>{m.label}</div></div>
+                  ))}
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Fee Structure — 3-Way Split</h2>
+                  {activeTier ? (()=>{
+                    const adyenCost = calcAdyenCost(activeTier, analysis.totalVolume, analysis.totalTransactions);
+                    const adyenRate = adyenCost/(analysis.totalVolume||1);
+                    const myMarkup = Math.max(0,(analysis.processorFees||0)-adyenCost);
+                    const myRate = myMarkup/(analysis.totalVolume||1);
+                    const totalMarkup = myMarkup+(analysis.otherFees||0);
+                    const totalMarkupRate = totalMarkup/(analysis.totalVolume||1);
+                    const rows=[
+                      {name:"Interchange",note:"Card network cost — non-negotiable",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6"},
+                      {name:`${activeProcessor.name} Cost`,note:"Your acquirer cost — processing + txn + scheme",amt:adyenCost,rate:adyenRate,color:T.gold},
+                      {name:"Your Markup",note:"Processor markup above interchange & acquirer",amt:myMarkup,rate:myRate,color:T.green},
+                      {name:"Other Fees",note:"Monthly, PCI, misc. — pure margin, no cost to you",amt:analysis.otherFees,rate:(analysis.otherFees||0)/(analysis.totalVolume||1),color:T.green},
+                    ];
+                    return(<div style={S.feeTable}>
+                      {rows.map(r=>(<div key={r.name} style={S.feeRow}>
+                        <div style={S.feeName}><span style={{color:r.color,fontWeight:600}}>{r.name}</span><span style={S.feeNote}>{r.note}</span></div>
+                        <div style={S.feeAmt}>{fmt$(r.amt)}</div><div style={S.feeRate}>{fmtPct(r.rate)}</div>
+                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
+                      </div>))}
+                      <div style={{...S.feeRow,background:`${T.green}08`,borderTop:`2px solid ${T.green}30`}}>
+                        <div style={S.feeName}><span style={{color:T.green,fontWeight:700}}>Total Margin Opportunity</span><span style={S.feeNote}>Everything above interchange & acquirer cost</span></div>
+                        <div style={{...S.feeAmt,color:T.green,fontWeight:700}}>{fmt$(totalMarkup)}</div>
+                        <div style={{...S.feeRate,color:T.green,fontWeight:700}}>{fmtPct(totalMarkupRate)}</div>
+                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min((totalMarkup/(analysis.totalFees||1))*100,100)}%`,background:T.green}}/></div>
+                      </div>
+                    </div>);
+                  })() : (
+                    <div style={S.feeTable}>
+                      {[{name:"Interchange",note:"Pass-through",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6"},{name:"Processor Markup",note:"Where savings are found",amt:analysis.processorFees,rate:analysis.processorMarkup,color:"#f97316"},{name:"Other Fees",note:"Monthly, PCI, misc. — pure margin",amt:analysis.otherFees,rate:(analysis.otherFees||0)/(analysis.totalVolume||1),color:T.green}].map(r=>(
+                        <div key={r.name} style={S.feeRow}>
+                          <div style={S.feeName}><span style={{color:r.color,fontWeight:600}}>{r.name}</span><span style={S.feeNote}>{r.note}</span></div>
+                          <div style={S.feeAmt}>{fmt$(r.amt)}</div><div style={S.feeRate}>{fmtPct(r.rate)}</div>
+                          <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div style={S.highlightBox}>
+                  <div style={S.hlLeft}>
+                    <div style={S.hlTitle}>Total Margin Opportunity Above Interchange & Acquirer</div>
+                    <div style={S.hlValue}>{fmtPct2((analysis.currentMargin||0)+((analysis.otherFees||0)/(analysis.totalVolume||1)))}</div>
+                    <div style={S.hlSub}>Everything the merchant pays above hard costs</div>
+                  </div>
+                  <div style={S.hlRight}>
+                    <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$((analysis.processorFees||0)+(analysis.otherFees||0))}</span><span style={S.hlStatLbl}>Monthly Opportunity</span></div>
+                    <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$(((analysis.processorFees||0)+(analysis.otherFees||0))*12)}</span><span style={S.hlStatLbl}>Annual Opportunity</span></div>
+                  </div>
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Volume Mix</h2>
+                  <div style={S.grid4}>
+                    {[{label:"Card Present",pct:analysis.cardPresentPct,amt:analysis.cardPresentVolume},{label:"Card Not Present",pct:analysis.cardNotPresentPct,amt:analysis.cardNotPresentVolume},{label:"Reward Cards",pct:analysis.rewardCardPct,amt:(analysis.totalVolume||0)*(analysis.rewardCardPct||0)},{label:"Corporate Cards",pct:analysis.corporateCardPct,amt:(analysis.totalVolume||0)*(analysis.corporateCardPct||0)}].map(m=>(
+                      <div key={m.label} style={S.mixCard}><div style={S.mixLbl}>{m.label}</div><div style={S.mixPct}>{fmtPct2(m.pct||0)}</div><div style={S.mixAmt}>{fmt$(m.amt)}</div></div>
+                    ))}
+                  </div>
+                </div>
+                {analysis.notes && <div style={S.notesBox}><strong>AI Notes:</strong> {analysis.notes}</div>}
+                <div style={S.btnRow}>
+                  <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setStep("upload")}>← Re-upload</button>
+                  <button style={{...S.btn,...S.btnPrimary}} onClick={()=>setStep("pricing")}>Select Pricing Model →</button>
+                </div>
+              </div>
+            )}
+
+            {step === "pricing" && analysis && activeTier !== undefined && (
+              <PricingStep
+                analysis={analysis}
+                activeTier={activeTier || null}
+                activeProcessor={activeProcessor || null}
+                adyenCostRate={adyenCostRate || 0}
+                targetMargin={targetMargin}
+                setTargetMargin={setTargetMargin}
+                pricingModel={pricingModel}
+                setPricingModel={setPricingModel}
+                feeOverrides={feeOverrides}
+                setFeeOverrides={setFeeOverrides}
+                loading={loading}
+                onBack={()=>setStep("analysis")}
+                onGenerate={generateProposal}
+              />
+            )}
+
+            {/* ══ PROPOSAL ══ */}
+            {step === "proposal" && proposal && analysis && (() => {
+          // Compute effective rates directly from dollar amounts — never trust AI-returned rate fields
+          const pVol = analysis.totalVolume || 1;
+          const currentEffRate = (analysis.totalFees || 0) / pVol;
+          const proposedEffRate = (proposal.projectedFees?.monthly || 0) / pVol;
+          const savingsMonthly = (analysis.totalFees || 0) - (proposal.projectedFees?.monthly || 0);
+          const savingsAnnual  = savingsMonthly * 12;
+          const savingsPct     = (analysis.totalFees || 0) > 0 ? savingsMonthly / (analysis.totalFees || 1) : 0;
+          return (
+              <div style={S.panel}>
+                <div style={{textAlign:"center",marginBottom:48,paddingTop:40}}>
+                  <div style={S.proposalBadge}>MERCHANT PROPOSAL</div>
+                  <h1 style={{fontSize:42,fontWeight:800,color:T.white,margin:"12px 0",letterSpacing:-1}}>{analysis.merchantName||"Merchant"}</h1>
+                  <p style={{fontSize:16,color:T.muted,maxWidth:600,margin:"0 auto",lineHeight:1.7}}>{proposal.proposalSummary}</p>
+                </div>
+                <div style={S.savingsHero}>
+                  <div style={{flex:1,minWidth:240}}>
+                    <div style={{fontSize:12,color:T.green,letterSpacing:2,textTransform:"uppercase",marginBottom:12}}>Annual Savings for Merchant</div>
+                    <div style={{fontSize:56,fontWeight:900,color:T.green,lineHeight:1}}>{fmt$(savingsAnnual)}</div>
+                    <div style={{fontSize:14,color:T.green+"80",marginTop:8}}>{fmtPct2(Math.abs(savingsPct))} reduction in costs</div>
+                  </div>
+                  <div style={{display:"flex",gap:24,alignItems:"center",flexWrap:"wrap"}}>
+                    {[{val:fmt$(savingsMonthly),lbl:"Monthly Savings"},{val:fmtPct2(proposedEffRate),lbl:"New Effective Rate"},{val:fmtPct2(currentEffRate),lbl:"Current Rate"}].map((s,i)=>(
+                      <div key={i} style={{display:"flex",gap:24,alignItems:"center"}}>
+                        {i>0&&<div style={{width:1,height:40,background:T.cardBorder}}/>}
+                        <div style={{textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:T.white}}>{s.val}</div><div style={{fontSize:11,color:T.muted,marginTop:4}}>{s.lbl}</div></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Proposed Rates</h2>
+                  <div style={S.grid4}>
+                    {proposal.pricingModel==="2-tier"&&(<><div style={S.rateCard}><div style={S.rateLbl}>Card Present</div><div style={S.rateVal}>{fmtPct2(proposal.proposedRates?.cardPresentRate||0)}</div><div style={S.rateSub}>+${(proposal.proposedRates?.cardPresentPerTxn||0).toFixed(2)}/txn</div></div><div style={S.rateCard}><div style={S.rateLbl}>Card Not Present</div><div style={S.rateVal}>{fmtPct2(proposal.proposedRates?.cardNotPresentRate||0)}</div><div style={S.rateSub}>+${(proposal.proposedRates?.cardNotPresentPerTxn||0).toFixed(2)}/txn</div></div></>)}
+                    {proposal.pricingModel==="interchange-plus"&&(<><div style={S.rateCard}><div style={S.rateLbl}>Markup</div><div style={S.rateVal}>{proposal.proposedRates?.basisPoints||0} BPS</div><div style={S.rateSub}>above interchange</div></div><div style={S.rateCard}><div style={S.rateLbl}>Per Transaction</div><div style={S.rateVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={S.rateSub}>auth fee</div></div>{proposal.proposedRates?.monthlyFee>0&&<div style={S.rateCard}><div style={S.rateLbl}>Monthly</div><div style={S.rateVal}>{fmt$(proposal.proposedRates?.monthlyFee)}</div><div style={S.rateSub}>platform fee</div></div>}</>)}
+                    {proposal.pricingModel==="flat-rate"&&(<><div style={S.rateCard}><div style={S.rateLbl}>All Cards</div><div style={S.rateVal}>{fmtPct2(proposal.proposedRates?.flatRate||0)}</div><div style={S.rateSub}>single flat rate</div></div><div style={S.rateCard}><div style={S.rateLbl}>Per Transaction</div><div style={S.rateVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={S.rateSub}>auth fee</div></div></>)}
+                  </div>
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Fee Comparison</h2>
+                  <div style={S.compareTable}>
+                    <div style={S.compareHead}>{["Category","Current","Proposed","Savings"].map(h=><div key={h} style={S.compareCell}>{h}</div>)}</div>
+                    {[
+                  {category:"Monthly Processing Fees", current:analysis.totalFees, proposed:proposal.projectedFees?.monthly, savings:savingsMonthly},
+                  {category:"Annual Processing Fees",  current:(analysis.totalFees||0)*12, proposed:(proposal.projectedFees?.monthly||0)*12, savings:savingsAnnual},
+                  {category:"Effective Rate", current:currentEffRate, proposed:proposedEffRate, savings:currentEffRate-proposedEffRate, isRate:true},
+                ].map((r,i)=>(
+                      <div key={i} style={{...S.compareRow,...(i%2===0?{background:"#0f162808"}:{})}}>
+                        <div style={S.compareCell}>{r.category}</div>
+                        <div style={{...S.compareCell,color:T.red}}>{r.isRate ? fmtPct2(r.current) : fmt$(r.current)}</div>
+                        <div style={{...S.compareCell,color:"#3b82f6"}}>{r.isRate ? fmtPct2(r.proposed) : fmt$(r.proposed)}</div>
+                        <div style={{...S.compareCell,color:T.green,fontWeight:700}}>{r.isRate ? fmtPct2(r.savings) : fmt$(r.savings)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+
+
+                {proposal.sellingPoints?.length>0&&(
+                  <div style={S.section}>
+                    <h2 style={S.h2}>Key Value Points</h2>
+                    <div style={S.vpGrid}>
+                      {proposal.sellingPoints.map((p,i)=>(
+                        <div key={i} style={S.vpCard}><span style={{fontSize:20,fontWeight:800,color:T.accent+"60",flexShrink:0}}>{String(i+1).padStart(2,"0")}</span><span style={{fontSize:14,color:T.text,lineHeight:1.5}}>{p}</span></div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div style={S.btnRow}>
+                  <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setStep("pricing")}>← Adjust Pricing</button>
+                  <button style={{...S.btn,...S.btnPrimary}} onClick={()=>printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$)}>Print / Export PDF</button>
+                  <button style={{...S.btn,...S.btnGhost}} onClick={()=>{setStep("upload");setFile(null);setFileData(null);setAnalysis(null);setProposal(null);setPricingModel(null);}}>New Proposal</button>
+                </div>
+              </div>
+          );
+        })()}
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ─── Print / Export ───────────────────────────────────────────────────────────
+function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
+  const vol = analysis.totalVolume || 1;
+  const currentEffRate = (analysis.totalFees || 0) / vol;
+  const proposedEffRate = (proposal.projectedFees?.monthly || 0) / vol;
+  const savingsMonthly = (analysis.totalFees || 0) - (proposal.projectedFees?.monthly || 0);
+  const savingsAnnual = savingsMonthly * 12;
+  const savingsPct = analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0;
+
+  const ratesHtml = proposal.pricingModel === "flat-rate" ? `
+    <div class="rate-card"><div class="rate-lbl">All Cards</div><div class="rate-val">${fmtPct2(proposal.proposedRates?.flatRate||0)}</div><div class="rate-sub">single flat rate</div></div>
+    <div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div class="rate-sub">auth fee</div></div>
+    ${(proposal.proposedRates?.monthlyFee||0)>0?`<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">${fmt$(proposal.proposedRates?.monthlyFee)}</div><div class="rate-sub">service fee</div></div>`:''}
+  ` : proposal.pricingModel === "2-tier" ? `
+    <div class="rate-card"><div class="rate-lbl">Card Present</div><div class="rate-val">${fmtPct2(proposal.proposedRates?.cardPresentRate||0)}</div><div class="rate-sub">+ ${(proposal.proposedRates?.cardPresentPerTxn||0).toFixed(2)}/txn</div></div>
+    <div class="rate-card"><div class="rate-lbl">Card Not Present</div><div class="rate-val">${fmtPct2(proposal.proposedRates?.cardNotPresentRate||0)}</div><div class="rate-sub">+ ${(proposal.proposedRates?.cardNotPresentPerTxn||0).toFixed(2)}/txn</div></div>
+    ${(proposal.proposedRates?.monthlyFee||0)>0?`<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">${fmt$(proposal.proposedRates?.monthlyFee)}</div><div class="rate-sub">service fee</div></div>`:''}
+  ` : `
+    <div class="rate-card"><div class="rate-lbl">Markup</div><div class="rate-val">${proposal.proposedRates?.basisPoints||0} BPS</div><div class="rate-sub">above interchange</div></div>
+    <div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div class="rate-sub">auth fee</div></div>
+    ${(proposal.proposedRates?.monthlyFee||0)>0?`<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">${fmt$(proposal.proposedRates?.monthlyFee)}</div><div class="rate-sub">service fee</div></div>`:''}
+  `;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <title>AIO Proposal — ${analysis.merchantName||'Merchant'}</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Helvetica Neue',Arial,sans-serif;color:#1a1a1a;background:#fff;padding:48px;font-size:14px;line-height:1.5}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:40px;padding-bottom:24px;border-bottom:2px solid #e8614a}
+    .logo{display:flex;align-items:center;gap:10px}
+    .logo-text{font-size:22px;font-weight:800;letter-spacing:2px;color:#1a1a1a}
+    .logo-sub{font-size:11px;color:#888;letter-spacing:3px;text-transform:uppercase}
+    .date{font-size:12px;color:#888}
+    .merchant-name{font-size:36px;font-weight:800;color:#1a1a1a;margin-bottom:6px}
+    .proposal-badge{display:inline-block;background:#e8614a;color:#fff;font-size:10px;letter-spacing:3px;padding:4px 14px;border-radius:20px;margin-bottom:12px}
+    .summary{font-size:15px;color:#555;margin-bottom:40px;max-width:600px;line-height:1.7}
+    .savings-box{background:#f0faf4;border:1.5px solid #22c55e;border-radius:12px;padding:28px 32px;display:flex;gap:40px;align-items:center;margin-bottom:36px}
+    .savings-big{font-size:48px;font-weight:900;color:#16a34a;line-height:1}
+    .savings-lbl{font-size:11px;color:#16a34a;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
+    .savings-pct{font-size:13px;color:#4ade80;margin-top:6px}
+    .savings-stats{display:flex;gap:28px;align-items:center}
+    .stat{text-align:center}
+    .stat-val{font-size:20px;font-weight:700;color:#1a1a1a}
+    .stat-lbl{font-size:11px;color:#888;margin-top:3px}
+    .divider{width:1px;height:36px;background:#ccc}
+    h2{font-size:11px;font-weight:700;color:#888;letter-spacing:2px;text-transform:uppercase;margin:0 0 14px}
+    .section{margin-bottom:36px}
+    .rates-grid{display:flex;gap:14px;flex-wrap:wrap}
+    .rate-card{background:#f7f7f7;border-radius:8px;padding:18px 20px;min-width:140px;text-align:center}
+    .rate-lbl{font-size:10px;color:#888;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
+    .rate-val{font-size:26px;font-weight:800;color:#e8614a}
+    .rate-sub{font-size:11px;color:#888;margin-top:5px}
+    table{width:100%;border-collapse:collapse}
+    th{text-align:left;font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;padding:10px 16px;background:#f7f7f7}
+    td{padding:12px 16px;border-bottom:1px solid #eee;font-size:14px}
+    .red{color:#dc2626;font-weight:600}
+    .blue{color:#2563eb;font-weight:600}
+    .green{color:#16a34a;font-weight:700}
+    .vp-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .vp{background:#f7f7f7;border-radius:8px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start}
+    .vp-num{font-size:18px;font-weight:800;color:#e8614a;opacity:0.5;flex-shrink:0}
+    .footer{margin-top:48px;padding-top:20px;border-top:1px solid #eee;font-size:11px;color:#aaa;display:flex;justify-content:space-between}
+    @media print{body{padding:32px}@page{margin:0.5in;size:A4}}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">
+      <svg width="48" height="30" viewBox="0 0 52 32" fill="none">
+        <path d="M2 26 L11 4 L20 26" stroke="#e8614a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <rect x="25" y="13" width="4.5" height="14" rx="2.25" fill="#e8614a"/>
+        <circle cx="27.25" cy="6" r="2.8" fill="#e8614a"/>
+        <rect x="33.5" y="12" width="16" height="15" rx="5.5" stroke="#e8614a" stroke-width="4.5" fill="none"/>
+      </svg>
+      <div><div class="logo-text">AIO</div><div class="logo-sub">Proposal Engine</div></div>
+    </div>
+    <div class="date">Prepared ${new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}</div>
+  </div>
+
+  <div class="proposal-badge">MERCHANT PROPOSAL</div>
+  <div class="merchant-name">${analysis.merchantName||'Merchant'}</div>
+  <div class="summary">${proposal.proposalSummary||''}</div>
+
+  <div class="savings-box">
+    <div>
+      <div class="savings-lbl">Annual Savings</div>
+      <div class="savings-big">${fmt$(savingsAnnual)}</div>
+      <div class="savings-pct">${fmtPct2(Math.abs(savingsPct))} reduction in processing costs</div>
+    </div>
+    <div class="savings-stats">
+      <div class="stat"><div class="stat-val">${fmt$(savingsMonthly)}</div><div class="stat-lbl">Monthly Savings</div></div>
+      <div class="divider"></div>
+      <div class="stat"><div class="stat-val">${fmtPct2(proposedEffRate)}</div><div class="stat-lbl">New Effective Rate</div></div>
+      <div class="divider"></div>
+      <div class="stat"><div class="stat-val">${fmtPct2(currentEffRate)}</div><div class="stat-lbl">Current Rate</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Proposed ${proposal.pricingModel === 'flat-rate' ? 'Flat Rate' : proposal.pricingModel === '2-tier' ? '2-Tier' : 'Interchange Plus'} Pricing</h2>
+    <div class="rates-grid">${ratesHtml}</div>
+  </div>
+
+  <div class="section">
+    <h2>Fee Comparison</h2>
+    <table>
+      <thead><tr><th>Category</th><th>Current</th><th>Proposed</th><th>Savings</th></tr></thead>
+      <tbody>
+        <tr><td>Monthly Processing Fees</td><td class="red">${fmt$(analysis.totalFees)}</td><td class="blue">${fmt$(proposal.projectedFees?.monthly||0)}</td><td class="green">${fmt$(savingsMonthly)}</td></tr>
+        <tr><td>Annual Processing Fees</td><td class="red">${fmt$((analysis.totalFees||0)*12)}</td><td class="blue">${fmt$((proposal.projectedFees?.monthly||0)*12)}</td><td class="green">${fmt$(savingsAnnual)}</td></tr>
+        <tr><td>Effective Rate</td><td class="red">${fmtPct2(currentEffRate)}</td><td class="blue">${fmtPct2(proposedEffRate)}</td><td class="green">${fmtPct2(currentEffRate-proposedEffRate)}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  ${proposal.sellingPoints?.length ? `
+  <div class="section">
+    <h2>Key Value Points</h2>
+    <div class="vp-grid">
+      ${proposal.sellingPoints.map((p,i)=>`<div class="vp"><span class="vp-num">${String(i+1).padStart(2,'0')}</span><span>${p}</span></div>`).join('')}
+    </div>
+  </div>` : ''}
+
+  <div class="footer">
+    <span>AIO — AI for Restaurants</span>
+    <span>aioapp.com</span>
+  </div>
+
+  <script>window.onload=()=>window.print();<\/script>
+</body>
+</html>`;
+
+  const blob = new Blob([html], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `AIO-Proposal-${(analysis.merchantName||'Merchant').replace(/\s+/g,'-')}-${new Date().toISOString().slice(0,10)}.html`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ─── Pricing Step Component ───────────────────────────────────────────────────
+function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, targetMargin, setTargetMargin, pricingModel, setPricingModel, feeOverrides, setFeeOverrides, loading, onBack, onGenerate }) {
+  if (!analysis) return null;
+  const vol   = analysis.totalVolume || 0;
+  const txns  = analysis.totalTransactions || 0;
+  const annVol = analysis.annualVolume || vol * 12;
+  const icRate = analysis.interchangeRate || 0;
+  const existingMargin = analysis.currentMargin || 0;
+  const currentEffective = analysis.effectiveRate || 0;
+
+  // Net margin after acquirer cost
+  const netMargin = targetMargin - adyenCostRate;
+  const belowFloor = netMargin < 0;
+
+  // ── Derived rates from fee overrides ──────────────────────────────────────
+  // For flat-rate: targetMargin = flatRate - icRate, but we also need to absorb
+  // monthly fee and per-txn fee. Solve for the % rate that achieves targetMargin.
+  // revenue needed = vol * targetMargin
+  // revenue from perTxn = txns * perTxnFee
+  // revenue from monthly = monthlyFee
+  // remaining needed from % = vol * targetMargin - txns*perTxn - monthlyFee
+  // flatRate = icRate + (remaining / vol)
+  const flatRevNeeded  = vol * targetMargin;
+  const flatFeeRevenue = txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+  const flatPctRevNeeded = Math.max(0, flatRevNeeded - flatFeeRevenue);
+  const derivedFlatRate  = icRate + flatPctRevNeeded / (vol || 1);
+
+  // For 2-tier: split volume between CP and CNP
+  const cpVol  = analysis.cardPresentVolume    || vol * (analysis.cardPresentPct    || 0.7);
+  const cnpVol = analysis.cardNotPresentVolume || vol * (analysis.cardNotPresentPct || 0.3);
+  // CP interchange is typically ~1.5%, CNP ~1.9% — use proportional share of total IC
+  const cpIcRate  = cpVol  > 0 ? (icRate * vol * (analysis.cardPresentPct    || 0.7)) / (cpVol  || 1) : icRate * 0.85;
+  const cnpIcRate = cnpVol > 0 ? (icRate * vol * (analysis.cardNotPresentPct || 0.3)) / (cnpVol || 1) : icRate * 1.15;
+
+  const cpRevNeeded   = cpVol  * targetMargin;
+  const cnpRevNeeded  = cnpVol * targetMargin;
+  const cpFeeRev      = txns * (analysis.cardPresentPct || 0.7) * (feeOverrides.cpPerTxnFee  || 0) + (feeOverrides.monthlyFee || 0) * (analysis.cardPresentPct || 0.7);
+  const cnpFeeRev     = txns * (analysis.cardNotPresentPct || 0.3) * (feeOverrides.cnpPerTxnFee || 0) + (feeOverrides.monthlyFee || 0) * (analysis.cardNotPresentPct || 0.3);
+  const derivedCPRate  = cpIcRate  + Math.max(0, cpRevNeeded  - cpFeeRev)  / (cpVol  || 1);
+  const derivedCNPRate = cnpIcRate + Math.max(0, cnpRevNeeded - cnpFeeRev) / (cnpVol || 1);
+
+  // ── Merchant savings preview ──────────────────────────────────────────────
+  const currentMonthlyFees = analysis.totalFees || 0;
+  let proposedMonthlyFees = 0;
+  if (pricingModel === "flat-rate") {
+    proposedMonthlyFees = vol * derivedFlatRate + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+  } else if (pricingModel === "2-tier") {
+    proposedMonthlyFees = cpVol * derivedCPRate + txns*(analysis.cardPresentPct||0.7)*(feeOverrides.cpPerTxnFee||0)
+      + cnpVol * derivedCNPRate + txns*(analysis.cardNotPresentPct||0.3)*(feeOverrides.cnpPerTxnFee||0)
+      + (feeOverrides.monthlyFee || 0);
+  } else {
+    // interchange-plus: proposed = IC passthrough + markup
+    proposedMonthlyFees = vol * icRate + vol * targetMargin + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+  }
+  const merchantSavingsMonthly = currentMonthlyFees - proposedMonthlyFees;
+  const merchantSavingsAnnual  = merchantSavingsMonthly * 12;
+  const merchantSavingsPct     = currentMonthlyFees > 0 ? merchantSavingsMonthly / currentMonthlyFees : 0;
+  const proposedEffective      = vol > 0 ? proposedMonthlyFees / vol : 0;
+
+  const [feeInputs, setFeeInputs] = useState({
+    monthlyFee: feeOverrides.monthlyFee > 0 ? String(feeOverrides.monthlyFee) : "",
+    perTxnFee:  feeOverrides.perTxnFee  > 0 ? String(feeOverrides.perTxnFee)  : "",
+    cpPerTxnFee: feeOverrides.cpPerTxnFee > 0 ? String(feeOverrides.cpPerTxnFee) : "",
+    cnpPerTxnFee: feeOverrides.cnpPerTxnFee > 0 ? String(feeOverrides.cnpPerTxnFee) : "",
+  });
+
+  const upd = (k, v) => {
+    setFeeInputs(prev => ({ ...prev, [k]: v }));
+    const parsed = parseFloat(v);
+    setFeeOverrides(prev => ({ ...prev, [k]: isNaN(parsed) ? 0 : parsed }));
+  };
+
+  return (
+    <div style={S.panel}>
+      <h1 style={S.h1}>Configure Your Proposal</h1>
+      <p style={S.sub}>Set your pricing model, fees, and target margin. Rates are calculated automatically to hit your margin.</p>
+
+      {/* Current vs proposed snapshot */}
+      <div style={S.snapshotRow}>
+        <div style={S.snapshotCard}>
+          <div style={S.snapLabel}>Current Processor Margin</div>
+          <div style={{...S.snapVal, color: T.accent}}>{fmtPct2(existingMargin)}</div>
+          <div style={S.snapSub}>above interchange · {fmt$(vol * existingMargin)}/mo</div>
+        </div>
+        <div style={{...S.snapshotCard, background:`${T.green}08`, border:`1px solid ${T.green}30`}}>
+          <div style={S.snapLabel}>Your Target Margin</div>
+          <div style={{...S.snapVal, color: T.green}}>{fmtPct2(targetMargin)}</div>
+          <div style={S.snapSub}>above interchange · {fmt$(vol * targetMargin)}/mo</div>
+        </div>
+        <div style={{...S.snapshotCard, background: merchantSavingsMonthly > 0 ? `${T.green}08` : `${T.red}08`, border:`1px solid ${merchantSavingsMonthly>0?T.green:T.red}30`}}>
+          <div style={S.snapLabel}>Merchant Savings</div>
+          <div style={{...S.snapVal, color: merchantSavingsMonthly > 0 ? T.green : T.red}}>{fmt$(merchantSavingsMonthly)}/mo</div>
+          <div style={S.snapSub}>{fmt$(merchantSavingsAnnual)}/yr · {fmtPct2(Math.abs(merchantSavingsPct))} {merchantSavingsMonthly>=0?"reduction":"increase"}</div>
+        </div>
+        <div style={S.snapshotCard}>
+          <div style={S.snapLabel}>Proposed Effective Rate</div>
+          <div style={{...S.snapVal, color: T.white}}>{pricingModel ? fmtPct2(proposedEffective) : "—"}</div>
+          <div style={S.snapSub}>was {fmtPct2(currentEffective)}</div>
+        </div>
+      </div>
+
+      {/* Pricing model selector */}
+      <div style={S.section}>
+        <h2 style={S.h2}>Pricing Model</h2>
+        <div style={S.modelGrid}>
+          {[
+            {id:"2-tier",name:"2-Tier Pricing",icon:"⬛",desc:"Separate rates for card-present and card-not-present.",pros:["Simple to explain","Predictable costs","Good for high CP volume"],cons:["Less transparent"]},
+            {id:"interchange-plus",name:"Interchange Plus",icon:"◎",desc:"Transparent cost pass-through plus a fixed markup.",pros:["Fully transparent","Lower effective rate"],cons:["Variable bills","More complex"]},
+            {id:"flat-rate",name:"Flat Rate",icon:"▬",desc:"One rate for all card types.",pros:["Simplest billing","Easy to budget"],cons:["May overpay on debit"]},
+          ].map(m=>(
+            <div key={m.id} style={{...S.modelCard,...(pricingModel===m.id?S.modelSelected:{})}} onClick={()=>setPricingModel(m.id)}>
+              <div style={S.modelIcon}>{m.icon}</div><div style={S.modelName}>{m.name}</div><div style={S.modelDesc}>{m.desc}</div>
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:10}}>
+                {m.pros.map(p=><div key={p} style={{fontSize:12,color:T.green}}>✓ {p}</div>)}
+                {m.cons.map(c=><div key={c} style={{fontSize:12,color:T.muted}}>– {c}</div>)}
+              </div>
+              {pricingModel===m.id && <div style={S.selectedBadge}>Selected</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Margin slider */}
+      <div style={S.section}>
+        <h2 style={S.h2}>Target Gross Margin Above Interchange</h2>
+        <div style={S.sliderBox}>
+          <div style={{textAlign:"center",marginBottom:20}}>
+            <span style={{fontSize:52,fontWeight:800,color:T.accent,display:"block"}}>{fmtPct2(targetMargin)}</span>
+            <span style={{fontSize:13,color:T.muted}}>gross margin above interchange</span>
+          </div>
+          <input type="range" min="0.001" max="0.02" step="0.0005" value={targetMargin} onChange={e=>setTargetMargin(parseFloat(e.target.value))} style={S.slider}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:T.muted,marginTop:6,marginBottom:24}}>
+            <span>0.10% (aggressive)</span><span>2.00% (premium)</span>
+          </div>
+          {activeTier && belowFloor && (
+            <div style={S.floorAlert}><span style={{fontSize:18}}>⚠</span><div><div style={{fontWeight:700,color:T.red,marginBottom:4}}>Below Cost Floor</div><div style={{fontSize:13}}>Your gross margin ({fmtPct2(targetMargin)}) is below your {activeProcessor?.name} cost ({fmtPct2(adyenCostRate)}). You'd lose money on this deal.</div></div></div>
+          )}
+          <div style={S.marginStack}>
+            <div style={S.msRow}><div style={S.msLabel}>Gross Margin (above interchange)</div><div style={{...S.msVal,color:T.accent}}>{fmtPct2(targetMargin)}</div><div style={S.msMoney}>{fmt$(vol*targetMargin)}/mo</div></div>
+            {activeTier && <div style={S.msRow}><div style={S.msLabel}>− {activeProcessor?.name} Cost ({activeTier.label})</div><div style={{...S.msVal,color:T.gold}}>{fmtPct2(adyenCostRate)}</div><div style={S.msMoney}>−{fmt$(vol*adyenCostRate)}/mo</div></div>}
+            <div style={{...S.msRow,...S.msTotal}}><div style={S.msLabel}>= Your Net Margin</div><div style={{...S.msVal,color:belowFloor?T.red:T.green,fontSize:20,fontWeight:800}}>{fmtPct2(netMargin)}</div><div style={{...S.msMoney,color:belowFloor?T.red:T.green,fontWeight:700}}>{fmt$(vol*netMargin)}/mo</div></div>
+            <div style={S.msArrRow}><span style={S.msArrLabel}>Net ARR</span>                  <span style={{...S.msArrVal,color:belowFloor?T.red:T.blue}}>{fmt$(annVol*netMargin)}</span></div>
+          </div>
+        </div>
+      </div>
+
+      {/* Fee configuration — flat rate */}
+      {pricingModel === "flat-rate" && (
+        <div style={S.section}>
+          <h2 style={S.h2}>Flat Rate — Fee Configuration</h2>
+          <div style={S.feeConfigBox}>
+            <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Set any fixed fees below. The discount rate is automatically calculated so your total revenue still hits your target margin.</p>
+            <div style={S.feeConfigGrid}>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Monthly Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.monthlyFee} placeholder="0.00" onChange={e=>upd("monthlyFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/mo</span></div>
+                <div style={S.feeConfigHint}>Flat monthly service fee</div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Per Transaction Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.perTxnFee} placeholder="0.00" onChange={e=>upd("perTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+                <div style={S.feeConfigHint}>Applied to every transaction</div>
+              </div>
+              <div style={{...S.feeConfigField,...S.feeConfigResult}}>
+                <label style={S.manualLabel}>Calculated Discount Rate</label>
+                <div style={{fontSize:32,fontWeight:800,color:T.accent,margin:"8px 0"}}>{fmtPct2(derivedFlatRate)}</div>
+                <div style={S.feeConfigHint}>Rate needed to hit {fmtPct2(targetMargin)} margin after fees</div>
+              </div>
+            </div>
+            <div style={S.feeBreakdown}>
+              {[
+                {label:"Revenue from % rate", val: fmt$(vol * derivedFlatRate)},
+                {label:"Revenue from per-txn", val: fmt$(txns * (feeOverrides.perTxnFee||0))},
+                {label:"Revenue from monthly fee", val: fmt$(feeOverrides.monthlyFee||0)},
+                {label:"Total gross revenue", val: fmt$(proposedMonthlyFees), bold:true, color:T.accent},
+                {label:"Merchant saves vs. current", val: fmt$(merchantSavingsMonthly), bold:true, color: merchantSavingsMonthly>=0?T.green:T.red},
+              ].map((r,i)=>(
+                <div key={i} style={{...S.feeBreakdownRow,...(r.bold?{borderTop:`1px solid ${T.cardBorder}`,marginTop:4,paddingTop:8}:{})}}>
+                  <span style={{fontSize:13,color:T.muted}}>{r.label}</span>
+                  <span style={{fontSize:14,fontWeight:r.bold?700:400,color:r.color||T.white}}>{r.val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fee configuration — 2-tier */}
+      {pricingModel === "2-tier" && (
+        <div style={S.section}>
+          <h2 style={S.h2}>2-Tier Pricing — Fee Configuration</h2>
+          <div style={S.feeConfigBox}>
+            <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Set per-transaction fees for each tier. Discount rates are calculated automatically to hit your target margin across the blended volume.</p>
+            <div style={S.feeConfigGrid}>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Monthly Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.monthlyFee} placeholder="0.00" onChange={e=>upd("monthlyFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/mo</span></div>
+                <div style={S.feeConfigHint}>Shared monthly service fee</div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Card Present Per-Txn ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.cpPerTxnFee} placeholder="0.00" onChange={e=>upd("cpPerTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+                <div style={S.feeConfigHint}>CP transactions</div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Card Not Present Per-Txn ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.cnpPerTxnFee} placeholder="0.00" onChange={e=>upd("cnpPerTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+                <div style={S.feeConfigHint}>CNP transactions</div>
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginTop:20}}>
+              {[
+                {label:"Card Present Rate", rate:derivedCPRate, vol:cpVol, txnFee:feeOverrides.cpPerTxnFee||0, pct:analysis.cardPresentPct||0.7, color:"#3b82f6"},
+                {label:"Card Not Present Rate", rate:derivedCNPRate, vol:cnpVol, txnFee:feeOverrides.cnpPerTxnFee||0, pct:analysis.cardNotPresentPct||0.3, color:T.accent},
+              ].map(r=>(
+                <div key={r.label} style={{...S.feeConfigResult, background:T.card, border:`1px solid ${r.color}40`, borderRadius:10, padding:20}}>
+                  <div style={{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>{r.label}</div>
+                  <div style={{fontSize:36,fontWeight:800,color:r.color}}>{fmtPct2(r.rate)}</div>
+                  <div style={{fontSize:12,color:T.muted,marginTop:6}}>+ ${r.txnFee.toFixed(2)}/txn</div>
+                  <div style={{fontSize:12,color:T.muted,marginTop:4}}>{fmt$(r.vol)} volume · {fmtPct2(r.pct)} of total</div>
+                </div>
+              ))}
+            </div>
+            <div style={S.feeBreakdown}>
+              {[
+                {label:"CP revenue (rate + per-txn)", val: fmt$(cpVol*derivedCPRate + txns*(analysis.cardPresentPct||0.7)*(feeOverrides.cpPerTxnFee||0))},
+                {label:"CNP revenue (rate + per-txn)", val: fmt$(cnpVol*derivedCNPRate + txns*(analysis.cardNotPresentPct||0.3)*(feeOverrides.cnpPerTxnFee||0))},
+                {label:"Monthly fee revenue", val: fmt$(feeOverrides.monthlyFee||0)},
+                {label:"Total gross revenue", val: fmt$(proposedMonthlyFees), bold:true, color:T.accent},
+                {label:"Merchant saves vs. current", val: fmt$(merchantSavingsMonthly), bold:true, color:merchantSavingsMonthly>=0?T.green:T.red},
+              ].map((r,i)=>(
+                <div key={i} style={{...S.feeBreakdownRow,...(r.bold?{borderTop:`1px solid ${T.cardBorder}`,marginTop:4,paddingTop:8}:{})}}>
+                  <span style={{fontSize:13,color:T.muted}}>{r.label}</span>
+                  <span style={{fontSize:14,fontWeight:r.bold?700:400,color:r.color||T.white}}>{r.val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* IC+ fee config */}
+      {pricingModel === "interchange-plus" && (
+        <div style={S.section}>
+          <h2 style={S.h2}>Interchange Plus — Fee Configuration</h2>
+          <div style={S.feeConfigBox}>
+            <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Set optional fixed fees. The BPS markup is driven by your target margin slider above.</p>
+            <div style={S.feeConfigGrid}>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Monthly Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.monthlyFee} placeholder="0.00" onChange={e=>upd("monthlyFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/mo</span></div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Per Transaction Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.perTxnFee} placeholder="0.00" onChange={e=>upd("perTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+              </div>
+              <div style={{...S.feeConfigResult, background:T.card, border:`1px solid ${T.accent}40`, borderRadius:10, padding:20}}>
+                <div style={{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>BPS Markup</div>
+                <div style={{fontSize:36,fontWeight:800,color:T.accent}}>{Math.round(targetMargin*10000)} BPS</div>
+                <div style={{fontSize:12,color:T.muted,marginTop:6}}>above interchange pass-through</div>
+              </div>
+            </div>
+            <div style={S.feeBreakdown}>
+              {[
+                {label:"Revenue from BPS markup", val: fmt$(vol*targetMargin)},
+                {label:"Revenue from per-txn", val: fmt$(txns*(feeOverrides.perTxnFee||0))},
+                {label:"Monthly fee revenue", val: fmt$(feeOverrides.monthlyFee||0)},
+                {label:"Total gross revenue", val: fmt$(proposedMonthlyFees), bold:true, color:T.accent},
+                {label:"Merchant saves vs. current", val: fmt$(merchantSavingsMonthly), bold:true, color:merchantSavingsMonthly>=0?T.green:T.red},
+              ].map((r,i)=>(
+                <div key={i} style={{...S.feeBreakdownRow,...(r.bold?{borderTop:`1px solid ${T.cardBorder}`,marginTop:4,paddingTop:8}:{})}}>
+                  <span style={{fontSize:13,color:T.muted}}>{r.label}</span>
+                  <span style={{fontSize:14,fontWeight:r.bold?700:400,color:r.color||T.white}}>{r.val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={S.btnRow}>
+        <button style={{...S.btn,...S.btnSecondary}} onClick={onBack}>← Back</button>
+        <button style={{...S.btn,...S.btnPrimary,opacity:(pricingModel&&!belowFloor)?1:0.4}} disabled={!pricingModel||belowFloor||loading} onClick={onGenerate}>Generate Proposal →</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Login Page ───────────────────────────────────────────────────────────────
+function LoginPage({ settings, persistSettings, onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [showSetup, setShowSetup] = useState(false);
+  // Setup form (first-time admin creation)
+  const [setupName, setSetupName] = useState("");
+  const [setupEmail, setSetupEmail] = useState("");
+  const [setupPassword, setSetupPassword] = useState("");
+  const [setupConfirm, setSetupConfirm] = useState("");
+
+  const hasUsers = settings?.users?.length > 0;
+
+  const handleLogin = () => {
+    setError("");
+    const user = (settings?.users||[]).find(u => u.email?.toLowerCase() === email.toLowerCase());
+    if (!user) { setError("No account found with that email address."); return; }
+    if (!user.password) { setError("This account has no password set. Ask an Admin to set one in Settings."); return; }
+    if (user.password !== password) { setError("Incorrect password. Please try again."); return; }
+    onLogin(user);
+  };
+
+  const handleSetup = () => {
+    setError("");
+    if (!setupName.trim()) { setError("Please enter your name."); return; }
+    if (!setupEmail.trim()) { setError("Please enter an email."); return; }
+    if (setupPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (setupPassword !== setupConfirm) { setError("Passwords don't match."); return; }
+    const adminUser = { id: Date.now().toString(), name: setupName.trim(), email: setupEmail.trim(), role: "Admin", password: setupPassword, createdAt: new Date().toISOString() };
+    const updated = { ...settings, users: [adminUser] };
+    persistSettings(updated);
+    onLogin(adminUser);
+  };
+
+  return (
+    <div style={{...S.root, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
+      <style>{css}</style>
+      <div style={S.loginCard}>
+        {/* Logo */}
+        <div style={{textAlign:"center", marginBottom:36}}>
+          <img
+            src="data:image/png;base64,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"
+            alt="AIO" style={{height:56, filter:"brightness(0) invert(0.55) sepia(1) saturate(3) hue-rotate(330deg)"}}
+          />
+          <div style={{fontSize:13,color:T.muted,letterSpacing:3,textTransform:"uppercase",marginTop:8}}>Proposal Engine</div>
+        </div>
+
+        {(!hasUsers || showSetup) && !error ? (
+          <>
+            <div style={S.loginWelcome}>{showSetup ? "Create Admin Account" : "Welcome to AIO Proposal Engine"}</div>
+            <div style={S.loginSub}>{showSetup ? "This will be the first admin with full access." : "No accounts exist yet. Create the first Admin account to get started."}</div>
+            <div style={S.loginFields}>
+              <div style={S.loginField}>
+                <label style={S.manualLabel}>Full Name</label>
+                <input type="text" value={setupName} onChange={e=>setSetupName(e.target.value)} placeholder="Your name" style={S.loginInput}/>
+              </div>
+              <div style={S.loginField}>
+                <label style={S.manualLabel}>Email Address</label>
+                <input type="email" value={setupEmail} onChange={e=>setSetupEmail(e.target.value)} placeholder="you@company.com" style={S.loginInput}/>
+              </div>
+              <div style={S.loginField}>
+                <label style={S.manualLabel}>Password</label>
+                <input type="password" value={setupPassword} onChange={e=>setSetupPassword(e.target.value)} placeholder="Min 6 characters" style={S.loginInput}/>
+              </div>
+              <div style={S.loginField}>
+                <label style={S.manualLabel}>Confirm Password</label>
+                <input type="password" value={setupConfirm} onChange={e=>setSetupConfirm(e.target.value)} placeholder="Repeat password" style={S.loginInput} onKeyDown={e=>e.key==="Enter"&&handleSetup()}/>
+              </div>
+            </div>
+            {error && <div style={S.loginError}>{error}</div>}
+            <button style={{...S.btn,...S.btnPrimary,width:"100%",marginTop:16}} onClick={handleSetup}>Create Account & Sign In →</button>
+            {hasUsers && <button style={{...S.btn,...S.btnGhost,width:"100%",marginTop:8}} onClick={()=>{setShowSetup(false);setError("");}}>← Back to Sign In</button>}
+          </>
+        ) : (
+          <>
+            <div style={S.loginWelcome}>Sign In</div>
+            <div style={S.loginSub}>Use your email and password to access the Proposal Engine.</div>
+            <div style={S.loginFields}>
+              <div style={S.loginField}>
+                <label style={S.manualLabel}>Email Address</label>
+                <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" style={S.loginInput}/>
+              </div>
+              <div style={S.loginField}>
+                <label style={S.manualLabel}>Password</label>
+                <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" style={S.loginInput} onKeyDown={e=>e.key==="Enter"&&handleLogin()}/>
+              </div>
+            </div>
+            {error && <div style={S.loginError}>{error}</div>}
+            <button style={{...S.btn,...S.btnPrimary,width:"100%",marginTop:16}} onClick={handleLogin}>Sign In →</button>
+            <button style={{...S.btn,...S.btnGhost,width:"100%",marginTop:8}} onClick={()=>{setShowSetup(true);setError("");}}>Create new account</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Settings Page ────────────────────────────────────────────────────────────
+function SettingsPage({ settings, persistSettings }) {
+  const [activeTab, setActiveTab] = useState("processors");
+  return (
+    <div style={S.panel}>
+      <h1 style={S.h1}>Settings</h1>
+      <p style={S.sub}>Manage acquirer contracts, pricing tiers, and team members.</p>
+      <div style={S.tabs}>
+        {[{id:"processors",label:"⚙ Processor Contracts"},{id:"users",label:"👤 Users"}].map(t=>(
+          <button key={t.id} style={{...S.tab,...(activeTab===t.id?S.tabActive:{})}} onClick={()=>setActiveTab(t.id)}>{t.label}</button>
+        ))}
+      </div>
+      {activeTab==="processors" && <ProcessorsTab settings={settings} persistSettings={persistSettings}/>}
+      {activeTab==="users" && <UsersTab settings={settings} persistSettings={persistSettings}/>}
+    </div>
+  );
+}
+
+// ─── Processors Tab ───────────────────────────────────────────────────────────
+function ProcessorsTab({ settings, persistSettings }) {
+  const [extractingId, setExtractingId] = useState(null);
+  const [editingTierId, setEditingTierId] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+  const fileRefs = useRef({});
+
+  const addProcessor = () => {
+    const p = newProcessor();
+    const updated = { ...settings, processors: [...(settings.processors||[]), p], activeProcessorId: settings.activeProcessorId || p.id };
+    persistSettings(updated);
+    setExpandedId(p.id);
+  };
+
+  const updateProcessor = (id, changes) => {
+    const updated = { ...settings, processors: settings.processors.map(p => p.id===id ? {...p,...changes} : p) };
+    persistSettings(updated);
+  };
+
+  const deleteProcessor = (id) => {
+    const updated = { ...settings, processors: settings.processors.filter(p=>p.id!==id), activeProcessorId: settings.activeProcessorId===id ? null : settings.activeProcessorId };
+    persistSettings(updated);
+  };
+
+  const setActive = (id) => persistSettings({ ...settings, activeProcessorId: id });
+
+  const setActiveTier = (processorId, tierId) => updateProcessor(processorId, { activeTierId: tierId });
+
+  const extractRates = async (proc, fileData) => {
+    setExtractingId(proc.id);
+    try {
+      const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
+        method:"POST", headers:{"Content-Type":"application/json","x-api-key":window.__CR_API_KEY||"","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body: JSON.stringify({
+          model:"claude-sonnet-4-20250514", max_tokens:1200,
+          messages:[{role:"user",content:[
+            {type:"document",source:{type:"base64",media_type:"application/pdf",data:fileData}},
+            {type:"text",text:`Extract ALL acquirer/processor cost data from this contract. Return ONLY JSON:
+{
+  "processingBps": number (base processing fee as decimal, e.g. 0.0008 for 8bps),
+  "perTxnFee": number (per-transaction fee USD),
+  "schemeBps": number (card scheme/network pass-through as decimal),
+  "monthlyFee": number (fixed monthly USD),
+  "isTiered": boolean,
+  "tiers": [
+    {
+      "id": "tier_1",
+      "label": "Tier 1 — Up to $X/mo",
+      "minVolume": number (monthly volume floor USD, 0 for first tier),
+      "maxVolume": number or null (monthly volume ceiling USD, null for top tier),
+      "processingBps": number,
+      "perTxnFee": number,
+      "schemeBps": number,
+      "monthlyFee": number
+    }
+  ],
+  "currency": "USD",
+  "notes": "string",
+  "confidence": "high|medium|low"
+}
+For tiers, set label like "Tier 1 — $0–$500K/mo", "Tier 2 — $500K–$2M/mo" etc based on the volume thresholds in the contract.
+If not tiered, still populate tiers array with a single entry using the base rates and label "Standard Rate".
+Never use null for numeric fields — use 0.`}
+          ]}]
+        })
+      });
+      const data = await res.json();
+      const parsed = parseJSON(data.content?.map(b=>b.text||"").join("")||"");
+      if (parsed) {
+        if (!parsed.tiers || parsed.tiers.length===0) {
+          parsed.tiers = [{id:"flat",label:"Standard Rate",minVolume:0,maxVolume:null,processingBps:parsed.processingBps,perTxnFee:parsed.perTxnFee,schemeBps:parsed.schemeBps,monthlyFee:parsed.monthlyFee}];
+        }
+        parsed.tiers = parsed.tiers.map((t,i)=>({...t, id: t.id||`tier_${i+1}`}));
+        updateProcessor(proc.id, { rates: parsed, activeTierId: parsed.tiers[0]?.id });
+      } else { alert("Could not parse contract. Check the PDF and try again."); }
+    } catch(err) { alert("Error: "+err.message); }
+    setExtractingId(null);
+  };
+
+  const handleFileUpload = (proc, file) => {
+    if (!file) return;
+    updateProcessor(proc.id, { contractFile: file.name });
+    const reader = new FileReader();
+    reader.onload = e => extractRates(proc, e.target.result.split(",")[1]);
+    reader.readAsDataURL(file);
+  };
+
+  const updateTier = (procId, tierId, field, val) => {
+    const proc = settings.processors.find(p=>p.id===procId);
+    if (!proc?.rates) return;
+    const tiers = proc.rates.tiers.map(t => t.id===tierId ? {...t,[field]:val} : t);
+    updateProcessor(procId, { rates: {...proc.rates, tiers} });
+  };
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+        <p style={{color:T.muted,fontSize:14}}>Upload processor contracts to enable true net margin calculations in proposals.</p>
+        <button style={{...S.btn,...S.btnPrimary,padding:"10px 20px"}} onClick={addProcessor}>+ Add Processor</button>
+      </div>
+
+      {(!settings.processors||settings.processors.length===0) && (
+        <div style={{...S.emptyState}}><div style={{fontSize:40,marginBottom:16}}>◈</div><div style={{fontSize:16,color:T.white,marginBottom:8}}>No processors yet</div><div style={{fontSize:14,color:T.muted}}>Add your first acquirer contract to get started.</div></div>
+      )}
+
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        {(settings.processors||[]).map(proc => {
+          const isActive = settings.activeProcessorId === proc.id;
+          const isExpanded = expandedId === proc.id;
+          const isExtracting = extractingId === proc.id;
+          const activeTier = proc.rates?.tiers?.find(t=>t.id===proc.activeTierId) || proc.rates?.tiers?.[0];
+
+          return (
+            <div key={proc.id} style={{...S.procCard,...(isActive?S.procCardActive:{})}}>
+              {/* Card header */}
+              <div style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+                <div style={{flex:1,minWidth:200}}>
+                  <input
+                    value={proc.name}
+                    onChange={e=>updateProcessor(proc.id,{name:e.target.value})}
+                    style={S.procNameInput}
+                    placeholder="Processor / Acquirer Name"
+                  />
+                  {proc.rates && activeTier && (
+                    <div style={{fontSize:12,color:T.muted,marginTop:4}}>
+                      {fmtBps(activeTier.processingBps)} + ${(activeTier.perTxnFee||0).toFixed(4)}/txn
+                      {proc.rates.isTiered && <span style={{color:T.gold,marginLeft:8}}>· {proc.rates.tiers?.length} tiers</span>}
+                    </div>
+                  )}
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  {isActive
+                    ? <div style={S.activePill}>✓ Active</div>
+                    : <button style={{...S.btn,...S.btnSecondary,padding:"6px 14px",fontSize:12}} onClick={()=>setActive(proc.id)}>Set Active</button>
+                  }
+                  <button style={{...S.btn,...S.btnGhost,padding:"6px 14px",fontSize:12}} onClick={()=>setExpandedId(isExpanded?null:proc.id)}>
+                    {isExpanded?"Collapse ▲":"Edit ▼"}
+                  </button>
+                  <button style={{...S.btn,background:"transparent",color:T.red,border:`1px solid ${T.red}40`,padding:"6px 14px",fontSize:12}} onClick={()=>deleteProcessor(proc.id)}>Delete</button>
+                </div>
+              </div>
+
+              {/* Expanded section */}
+              {isExpanded && (
+                <div style={{marginTop:24,paddingTop:24,borderTop:`1px solid ${T.cardBorder}`}}>
+                  {/* Contract upload */}
+                  <div style={{marginBottom:24}}>
+                    <div style={S.manualTitle}>Contract PDF</div>
+                    <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+                      <input ref={el=>fileRefs.current[proc.id]=el} type="file" accept=".pdf" style={{display:"none"}}
+                        onChange={e=>handleFileUpload(proc,e.target.files[0])}/>
+                      <button style={{...S.btn,...S.btnSecondary,padding:"8px 16px",fontSize:13}} onClick={()=>fileRefs.current[proc.id]?.click()} disabled={isExtracting}>
+                        {isExtracting ? "⏳ Extracting rates..." : proc.contractFile ? "↺ Re-upload Contract" : "⬆ Upload Contract PDF"}
+                      </button>
+                      {proc.contractFile && <span style={{fontSize:13,color:T.muted}}>{proc.contractFile}</span>}
+                      {proc.rates && <span style={{fontSize:12,color:T.green}}>✓ Rates extracted · {proc.rates.confidence} confidence</span>}
+                    </div>
+                    {proc.rates?.notes && <p style={{...S.adyenNote,marginTop:8}}>{proc.rates.notes}</p>}
+                  </div>
+
+                  {/* Tiers */}
+                  {proc.rates?.tiers && proc.rates.tiers.length > 0 && (
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                        <div style={S.manualTitle}>Pricing Tiers — Select Active Tier for Proposals</div>
+                        <button style={{...S.btn,...S.btnGhost,padding:"4px 12px",fontSize:11}} onClick={()=>{
+                          const newTier={id:`tier_${Date.now()}`,label:"New Tier",minVolume:0,maxVolume:null,processingBps:0,perTxnFee:0,schemeBps:0,monthlyFee:0};
+                          updateProcessor(proc.id,{rates:{...proc.rates,tiers:[...proc.rates.tiers,newTier],isTiered:true}});
+                        }}>+ Add Tier</button>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        {proc.rates.tiers.map((tier,ti)=>{
+                          const isTierActive = (proc.activeTierId||proc.rates.tiers[0]?.id) === tier.id;
+                          const isEditingThis = editingTierId === `${proc.id}_${tier.id}`;
+                          return (
+                            <div key={tier.id} style={{...S.tierCard,...(isTierActive?S.tierCardActive:{})}}>
+                              <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                                <div style={{flex:1}}>
+                                  {isEditingThis
+                                    ? <input value={tier.label} onChange={e=>updateTier(proc.id,tier.id,"label",e.target.value)} style={{...S.manualInput,fontSize:14,fontWeight:600,width:"100%"}}/>
+                                    : <div style={{fontSize:14,fontWeight:600,color:isTierActive?T.white:T.text}}>{tier.label}</div>
+                                  }
+                                  <div style={{fontSize:12,color:T.muted,marginTop:3}}>
+                                    {fmtBps(tier.processingBps)} processing · ${(tier.perTxnFee||0).toFixed(4)}/txn{tier.schemeBps>0?` · ${fmtBps(tier.schemeBps)} scheme`:""}{tier.monthlyFee>0?` · ${fmt$(tier.monthlyFee)}/mo`:""}
+                                  </div>
+                                </div>
+                                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                                  {isTierActive ? <div style={S.activePill}>✓ Active</div> : <button style={{...S.btn,...S.btnGhost,padding:"4px 12px",fontSize:11}} onClick={()=>setActiveTier(proc.id,tier.id)}>Use This Tier</button>}
+                                  <button style={{...S.btn,...S.btnGhost,padding:"4px 12px",fontSize:11}} onClick={()=>setEditingTierId(isEditingThis?null:`${proc.id}_${tier.id}`)}>{isEditingThis?"Done":"Edit"}</button>
+                                </div>
+                              </div>
+                              {isEditingThis && (
+                                <div style={{...S.manualGrid,marginTop:14}}>
+                                  {[
+                                    {label:"Min Volume ($/mo)",key:"minVolume",scale:1,unit:"$"},
+                                    {label:"Max Volume ($/mo)",key:"maxVolume",scale:1,unit:"$"},
+                                    {label:"Processing (BPS)",key:"processingBps",scale:10000,unit:"bps"},
+                                    {label:"Per Transaction ($)",key:"perTxnFee",scale:1,unit:"$"},
+                                    {label:"Scheme Fees (BPS)",key:"schemeBps",scale:10000,unit:"bps"},
+                                    {label:"Monthly Fee ($)",key:"monthlyFee",scale:1,unit:"$"},
+                                  ].map(({label,key,scale,unit})=>(
+                                    <div key={key} style={S.manualField}>
+                                      <label style={S.manualLabel}>{label}</label>
+                                      <div style={S.manualInputRow}>
+                                        <input type="number" step="any"
+                                          value={scale===10000?Math.round((tier[key]||0)*10000):(tier[key]||0)}
+                                          onChange={e=>updateTier(proc.id,tier.id,key,scale===10000?parseFloat(e.target.value||0)/10000:parseFloat(e.target.value||0))}
+                                          style={S.manualInput}/>
+                                        <span style={S.manualUnit}>{unit}</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Users Tab ────────────────────────────────────────────────────────────────
+function UsersTab({ settings, persistSettings }) {
+  const [editingId, setEditingId] = useState(null);
+
+  const addUser = () => {
+    const u = newUser();
+    persistSettings({...settings, users:[...(settings.users||[]),u]});
+    setEditingId(u.id);
+  };
+
+  const updateUser = (id, changes) => {
+    persistSettings({...settings, users:(settings.users||[]).map(u=>u.id===id?{...u,...changes}:u)});
+  };
+
+  const deleteUser = (id) => {
+    persistSettings({...settings, users:(settings.users||[]).filter(u=>u.id!==id)});
+  };
+
+
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+        <p style={{color:T.muted,fontSize:14}}>Manage team members who can access this tool.</p>
+        <button style={{...S.btn,...S.btnPrimary,padding:"10px 20px"}} onClick={addUser}>+ Add User</button>
+      </div>
+
+      {(!settings.users||settings.users.length===0) && (
+        <div style={S.emptyState}><div style={{fontSize:40,marginBottom:16}}>👤</div><div style={{fontSize:16,color:T.white,marginBottom:8}}>No users yet</div><div style={{fontSize:14,color:T.muted}}>Add team members to manage access.</div></div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:16}}>
+        {(settings.users||[]).map(user=>{
+          const isEditing = editingId===user.id;
+          return (
+            <div key={user.id} style={S.userCard}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                <div style={{flex:1}}>
+                  {isEditing
+                    ? <input value={user.name} onChange={e=>updateUser(user.id,{name:e.target.value})} style={{...S.manualInput,fontSize:16,fontWeight:600,marginBottom:8,width:"100%"}} placeholder="Full Name"/>
+                    : <div style={{fontSize:16,fontWeight:600,color:T.white,marginBottom:4}}>{user.name||"Unnamed User"}</div>
+                  }
+                  {isEditing
+                    ? <input value={user.email} onChange={e=>updateUser(user.id,{email:e.target.value})} style={{...S.manualInput,fontSize:13,width:"100%"}} placeholder="email@company.com"/>
+                    : <div style={{fontSize:13,color:T.muted}}>{user.email||"No email set"}</div>
+                  }
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+                {isEditing
+                  ? <select value={user.role} onChange={e=>updateUser(user.id,{role:e.target.value})} style={{...S.manualInput,fontSize:13,padding:"6px 10px",flex:1}}>
+                      {ROLES.map(r=><option key={r} value={r}>{r}</option>)}
+                    </select>
+                  : <div style={S.rolePill}>{user.role}</div>
+                }
+                <div style={{display:"flex",gap:8}}>
+                  <button style={{...S.btn,...S.btnGhost,padding:"5px 12px",fontSize:12}} onClick={()=>setEditingId(isEditing?null:user.id)}>{isEditing?"Save":"Edit"}</button>
+                  <button style={{...S.btn,background:"transparent",color:T.red,border:`1px solid ${T.red}40`,padding:"5px 12px",fontSize:12}} onClick={()=>deleteUser(user.id)}>Remove</button>
+                </div>
+              </div>
+              <div style={{fontSize:11,color:T.muted,marginTop:12}}>Added {new Date(user.createdAt).toLocaleDateString()}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Theme ────────────────────────────────────────────────────────────────────
+const T = {
+  bg:"#0f0f0f",
+  card:"#1a1a1a",
+  cardBorder:"#2e2e2e",
+  accent:"#f9674e",       // AIO Orange — dominant
+  accentGlow:"#f9674e18",
+  blue:"#7a80f6",         // Electric Blue — 30%
+  blueGlow:"#7a80f615",
+  gold:"#f9674e",         // use orange for highlights
+  green:"#22c55e",
+  red:"#ef4444",
+  text:"#e8e8e8",
+  muted:"#888888",
+  white:"#f5f4f0",        // Off-white
+  dark:"#f5f4f0",
+  softBlack:"#1a1a1a",
+};
+
+const S = {
+  root:{background:T.bg,minHeight:"100vh",fontFamily:"'DM Mono','Fira Code',monospace",color:T.text},
+  header:{borderBottom:`1px solid ${T.cardBorder}`,background:`${T.card}cc`,backdropFilter:"blur(12px)",position:"sticky",top:0,zIndex:100},
+  headerInner:{maxWidth:1200,margin:"0 auto",padding:"0 24px",display:"flex",alignItems:"center",justifyContent:"space-between",height:64},
+  logo:{display:"flex",alignItems:"center",gap:10},
+  logoText:{fontWeight:700,fontSize:18,letterSpacing:3,color:T.white},
+  logoSub:{fontSize:11,color:T.muted,letterSpacing:3,textTransform:"uppercase",marginLeft:4},
+  stepNav:{display:"flex",gap:4},
+  stepItem:{padding:"4px 10px",borderRadius:4,fontSize:10,letterSpacing:1,color:T.muted,textTransform:"uppercase"},
+  stepActive:{background:T.accentGlow,color:T.accent,border:`1px solid ${T.accent}40`},
+  stepDone:{color:T.green},
+  pageNav:{display:"flex",gap:4,borderLeft:`1px solid ${T.cardBorder}`,paddingLeft:16},
+  pageBtn:{background:"transparent",border:"none",color:T.muted,fontSize:13,cursor:"pointer",padding:"6px 12px",borderRadius:6,fontFamily:"inherit"},
+  pageBtnActive:{background:T.accentGlow,color:T.accent},
+  main:{maxWidth:1200,margin:"0 auto",padding:"32px 24px 80px"},
+  panel:{animation:"fadeIn 0.3s ease"},
+  overlay:{position:"fixed",inset:0,background:"#0a0f1ecc",backdropFilter:"blur(8px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"},
+  overlayCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:"48px 64px",textAlign:"center"},
+  spinner:{width:40,height:40,border:`3px solid ${T.cardBorder}`,borderTop:`3px solid ${T.accent}`,borderRadius:"50%",margin:"0 auto 16px"},
+  spinMsg:{color:T.muted,fontSize:15},
+  h1:{fontSize:28,fontWeight:700,color:T.white,margin:"0 0 8px",letterSpacing:-0.5},
+  h2:{fontSize:13,fontWeight:600,color:T.muted,margin:"0 0 16px",letterSpacing:2,textTransform:"uppercase"},
+  sub:{color:T.muted,fontSize:15,marginBottom:32,lineHeight:1.6},
+  section:{marginBottom:40},
+  panelHeader:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:32,flexWrap:"wrap",gap:16},
+  badge:{background:T.accentGlow,border:`1px solid ${T.accent}40`,color:T.accent,padding:"6px 16px",borderRadius:4,fontSize:12,letterSpacing:2,fontWeight:700},
+  btnRow:{display:"flex",gap:12,marginTop:40,flexWrap:"wrap"},
+  btn:{padding:"12px 28px",borderRadius:6,fontFamily:"inherit",fontWeight:600,fontSize:14,cursor:"pointer",border:"none",transition:"all 0.2s",letterSpacing:0.5},
+  btnPrimary:{background:T.accent,color:T.bg},
+  btnSecondary:{background:"transparent",color:T.accent,border:`1px solid ${T.accent}60`},
+  btnGhost:{background:"transparent",color:T.muted,border:`1px solid ${T.cardBorder}`},
+  procBanner:{background:`${T.green}08`,border:`1px solid ${T.green}30`,borderRadius:8,padding:"10px 16px",marginBottom:24,fontSize:13,color:T.muted,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"},
+  bannerLink:{background:"transparent",border:"none",color:T.accent,fontSize:12,cursor:"pointer",marginLeft:"auto",fontFamily:"inherit"},
+  // Upload
+  dropzone:{border:`2px dashed ${T.cardBorder}`,borderRadius:12,padding:"60px 40px",textAlign:"center",cursor:"pointer",transition:"all 0.2s",marginBottom:24},
+  dropzoneActive:{border:`2px dashed ${T.accent}`,background:T.accentGlow},
+  dropzoneDone:{border:`2px solid ${T.green}40`,background:"#052e1640"},
+  uploadIcon:{fontSize:40,marginBottom:16,color:T.muted},
+  dropLabel:{fontSize:17,color:T.text,marginBottom:8},
+  dropMeta:{fontSize:13,color:T.muted},
+  fileIcon:{fontSize:40,marginBottom:12,color:T.green},
+  fileName:{fontSize:16,color:T.white,fontWeight:600,marginBottom:4},
+  fileMeta:{fontSize:13,color:T.muted},
+  chips:{display:"flex",flexWrap:"wrap",gap:8,marginBottom:32},
+  chip:{padding:"4px 12px",background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:4,fontSize:12,color:T.muted},
+  grid4:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:16,marginBottom:32},
+  metricCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"24px 20px"},
+  metricAccent:{border:`1px solid ${T.accent}40`,background:T.accentGlow},
+  metricVal:{fontSize:26,fontWeight:700,color:T.white,marginBottom:6},
+  metricLbl:{fontSize:12,color:T.muted,letterSpacing:1,textTransform:"uppercase"},
+  feeTable:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden"},
+  feeRow:{display:"grid",gridTemplateColumns:"1fr 120px 100px 1fr",gap:16,padding:"16px 24px",borderBottom:`1px solid ${T.cardBorder}`,alignItems:"center"},
+  feeName:{display:"flex",flexDirection:"column",gap:2},
+  feeNote:{fontSize:11,color:T.muted},
+  feeAmt:{fontWeight:600,color:T.white,textAlign:"right"},
+  feeRate:{color:T.muted,textAlign:"right",fontSize:13},
+  feeBar:{height:6,background:"#1e2d4a",borderRadius:3,overflow:"hidden"},
+  feeBarFill:{height:"100%",borderRadius:3,transition:"width 0.6s ease"},
+  highlightBox:{background:`linear-gradient(135deg,#0ea5e912,#0f172a)`,border:`1px solid ${T.accent}40`,borderRadius:12,padding:"28px 32px",display:"flex",gap:40,alignItems:"center",flexWrap:"wrap",marginBottom:40},
+  hlLeft:{flex:1,minWidth:200},
+  hlTitle:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8},
+  hlValue:{fontSize:42,fontWeight:800,color:T.accent},
+  hlSub:{fontSize:13,color:T.muted,marginTop:8},
+  hlRight:{display:"flex",gap:32},
+  hlStat:{display:"flex",flexDirection:"column",gap:4},
+  hlStatNum:{fontSize:20,fontWeight:700,color:T.white},
+  hlStatLbl:{fontSize:11,color:T.muted,letterSpacing:1},
+  mixCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"20px 16px"},
+  mixLbl:{fontSize:11,color:T.muted,letterSpacing:1,textTransform:"uppercase",marginBottom:8},
+  mixPct:{fontSize:22,fontWeight:700,color:T.white},
+  mixAmt:{fontSize:13,color:T.muted,marginTop:4},
+  notesBox:{background:`#f59e0b10`,border:`1px solid #f59e0b30`,borderRadius:8,padding:"16px 20px",fontSize:14,color:T.muted,marginBottom:24},
+  modelGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:16},
+  modelCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"24px",cursor:"pointer",transition:"all 0.2s",position:"relative"},
+  modelSelected:{border:`2px solid ${T.accent}`,background:T.accentGlow},
+  modelIcon:{fontSize:24,marginBottom:10},
+  modelName:{fontSize:16,fontWeight:700,color:T.white,marginBottom:6},
+  modelDesc:{fontSize:13,color:T.muted,lineHeight:1.5},
+  selectedBadge:{position:"absolute",top:12,right:12,background:T.accent,color:T.bg,fontSize:10,padding:"3px 10px",borderRadius:20,fontWeight:700,letterSpacing:1},
+  sliderBox:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:32},
+  slider:{width:"100%",accentColor:T.accent,height:6,cursor:"pointer"},
+  floorAlert:{background:"#ef444415",border:`1px solid ${T.red}50`,borderRadius:10,padding:"16px 20px",display:"flex",gap:16,alignItems:"flex-start",marginBottom:24,color:T.text,fontSize:14},
+  marginStack:{background:"#0a0f1e",border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden"},
+  msRow:{display:"grid",gridTemplateColumns:"1fr auto auto",gap:16,padding:"14px 20px",borderBottom:`1px solid ${T.cardBorder}`,alignItems:"center"},
+  msTotal:{background:"#0f1628",borderTop:`2px solid ${T.cardBorder}`},
+  msLabel:{fontSize:13,color:T.muted},
+  msVal:{fontSize:17,fontWeight:700,textAlign:"right"},
+  msMoney:{fontSize:13,color:T.muted,textAlign:"right",minWidth:110},
+  msArrRow:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 20px"},
+  msArrLabel:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase"},
+  msArrVal:{fontSize:28,fontWeight:800},
+  proposalBadge:{display:"inline-block",background:T.accentGlow,border:`1px solid ${T.accent}40`,color:T.accent,padding:"6px 20px",borderRadius:20,fontSize:11,letterSpacing:3},
+  savingsHero:{background:`linear-gradient(135deg,#052e16,#0a0f1e)`,border:`1px solid ${T.green}40`,borderRadius:16,padding:40,display:"flex",gap:40,alignItems:"center",marginBottom:48,flexWrap:"wrap"},
+  rateCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"24px 20px",textAlign:"center"},
+  rateLbl:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:12},
+  rateVal:{fontSize:32,fontWeight:800,color:T.accent},
+  rateSub:{fontSize:12,color:T.muted,marginTop:8},
+  compareTable:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden"},
+  compareHead:{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr",padding:"12px 24px",background:"#1e2d4a",fontSize:11,letterSpacing:1,textTransform:"uppercase",color:T.muted},
+  compareRow:{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr",padding:"16px 24px",borderBottom:`1px solid ${T.cardBorder}`},
+  compareCell:{fontSize:14,color:T.text},
+  arrBox:{background:`linear-gradient(135deg,#1e1b0a,#0a0f1e)`,border:`1px solid ${T.gold}40`,borderRadius:16,padding:36,marginBottom:40},
+  arrSplit:{background:"#0a0f1e",border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden",marginBottom:20},
+  arrSplitRow:{display:"grid",gridTemplateColumns:"1fr auto auto",gap:16,padding:"14px 20px",borderBottom:`1px solid ${T.cardBorder}`,alignItems:"center"},
+  arrSplitTotal:{background:"#0f1628",borderTop:`2px solid ${T.cardBorder}`},
+  arrSplitLbl:{fontSize:13,color:T.muted},
+  arrSplitVal:{fontSize:15,fontWeight:600,textAlign:"right",minWidth:120},
+  arrHighlight:{background:`${T.gold}10`,border:`1px solid ${T.gold}30`,borderRadius:10,padding:"24px",textAlign:"center"},
+  vpGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:12},
+  vpCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"16px 20px",display:"flex",gap:16,alignItems:"flex-start"},
+  // Snapshot row
+  snapshotRow:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12,marginBottom:36},
+  snapshotCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"18px 20px"},
+  snapLabel:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8},
+  snapVal:{fontSize:28,fontWeight:800,marginBottom:4},
+  snapSub:{fontSize:12,color:T.muted},
+  // Fee config
+  feeConfigBox:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:28},
+  feeConfigGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:16,marginBottom:24},
+  feeConfigField:{display:"flex",flexDirection:"column",gap:6},
+  feeConfigResult:{display:"flex",flexDirection:"column",justifyContent:"center"},
+  feeConfigHint:{fontSize:11,color:T.muted,marginTop:4},
+  feeBreakdown:{background:"#0a0f1e",borderRadius:8,padding:"16px 20px",display:"flex",flexDirection:"column",gap:8},
+  feeBreakdownRow:{display:"flex",justifyContent:"space-between",alignItems:"center"},
+  // Login
+  loginCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:"48px 40px",width:"100%",maxWidth:420,boxShadow:"0 24px 64px rgba(0,0,0,0.4)"},
+  loginWelcome:{fontSize:22,fontWeight:700,color:T.white,marginBottom:8,textAlign:"center"},
+  loginSub:{fontSize:13,color:T.muted,marginBottom:28,textAlign:"center",lineHeight:1.6},
+  loginFields:{display:"flex",flexDirection:"column",gap:16},
+  loginField:{display:"flex",flexDirection:"column",gap:6},
+  loginInput:{background:"#1e1e1e",border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"12px 14px",color:T.white,fontSize:14,fontFamily:"inherit",outline:"none",width:"100%"},
+  loginError:{background:"#ef444415",border:`1px solid ${T.red}50`,borderRadius:8,padding:"10px 14px",fontSize:13,color:T.red,marginTop:12,textAlign:"center"},
+  // User badge in header
+  userBadge:{display:"flex",alignItems:"center",gap:10,borderLeft:`1px solid ${T.cardBorder}`,paddingLeft:16},
+  userAvatar:{width:30,height:30,borderRadius:"50%",background:T.accentGlow,border:`1px solid ${T.accent}60`,color:T.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,flexShrink:0},
+  // Settings
+  tabs:{display:"flex",gap:4,marginBottom:32,borderBottom:`1px solid ${T.cardBorder}`,paddingBottom:0},
+  tab:{background:"transparent",border:"none",color:T.muted,fontSize:14,cursor:"pointer",padding:"10px 20px",fontFamily:"inherit",borderBottom:"2px solid transparent",marginBottom:-1},
+  tabActive:{color:T.accent,borderBottom:`2px solid ${T.accent}`},
+  procCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:24},
+  procCardActive:{border:`1px solid ${T.accent}40`,background:`${T.accent}06`},
+  procNameInput:{background:"transparent",border:"none",color:T.white,fontSize:17,fontWeight:700,fontFamily:"inherit",outline:"none",width:"100%"},
+  activePill:{background:`${T.green}20`,border:`1px solid ${T.green}40`,color:T.green,fontSize:11,padding:"3px 12px",borderRadius:20,fontWeight:700,letterSpacing:1},
+  tierCard:{background:"#0a0f1e",border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"14px 16px"},
+  tierCardActive:{border:`1px solid ${T.accent}40`,background:T.accentGlow},
+  userCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:20},
+  rolePill:{background:`${T.accent}15`,border:`1px solid ${T.accent}30`,color:T.accent,fontSize:11,padding:"3px 12px",borderRadius:20,fontWeight:600},
+  emptyState:{background:T.card,border:`2px dashed ${T.cardBorder}`,borderRadius:12,padding:"60px 40px",textAlign:"center",color:T.muted},
+  adyenNote:{fontSize:12,color:T.muted,lineHeight:1.5},
+  manualTitle:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:12},
+  manualGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12},
+  manualField:{display:"flex",flexDirection:"column",gap:6},
+  manualLabel:{fontSize:11,color:T.muted,letterSpacing:1},
+  manualInputRow:{display:"flex",alignItems:"center",gap:8},
+  manualInput:{background:"#1e2d4a",border:`1px solid ${T.cardBorder}`,borderRadius:6,padding:"8px 12px",color:T.white,fontSize:14,fontFamily:"inherit",width:"100%",outline:"none"},
+  manualUnit:{fontSize:12,color:T.muted,flexShrink:0},
+};
+
+const css = `
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin 0.8s linear infinite}
+*{box-sizing:border-box;margin:0;padding:0}
+input[type=range]{-webkit-appearance:none;appearance:none;background:#2e2e2e;border-radius:4px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;background:#f9674e;border-radius:50%;cursor:pointer}
+input[type=number]::-webkit-inner-spin-button{opacity:0.4}
+select{background:#1a1a1a;border:1px solid #2e2e2e;border-radius:6px;color:#e8e8e8;font-family:inherit;outline:none;cursor:pointer}
+@media(max-width:700px){.stepNav{display:none!important}}
+@media print{header{display:none}}
+`;
+
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(App));
+
+  </script>
+</body>
+</html>

@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AIO — Admin Dashboard</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0f1e;color:#e2e8f0;min-height:100vh}
+    ::-webkit-scrollbar{width:6px;height:6px}
+    ::-webkit-scrollbar-track{background:#0f1628}
+    ::-webkit-scrollbar-thumb{background:#1e293b;border-radius:3px}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    .fade{animation:fadeIn .3s ease forwards}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  (function(){var k=localStorage.getItem("cr_api_key");if(k)window.__CR_API_KEY=k;})();
+</script>
+<script type="text/babel">
+const {useState,useEffect,useMemo} = React;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const fmt$ = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:0}).format(n||0);
+const fmtD$ = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
+const fmtPct = n => `${((n||0)*100).toFixed(2)}%`;
+const fmtDate = s => { try{ return new Date(s).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}); }catch{ return s; } };
+
+const ADMIN_PASSWORD = "aio2024"; // Change this
+
+const T = {
+  bg:"#0a0f1e", card:"#0f1628", border:"#1e2d45", text:"#e2e8f0", muted:"#64748b",
+  blue:"#0ea5e9", green:"#22c55e", greenDark:"#16a34a", red:"#ef4444",
+  gold:"#f59e0b", accent:"#6366f1", white:"#ffffff"
+};
+
+// ── Login Screen ──────────────────────────────────────────────────────────────
+function LoginScreen({onAuth}){
+  const [pw,setPw] = useState("");
+  const [err,setErr] = useState(false);
+  const submit = e => {
+    e.preventDefault();
+    if(pw===ADMIN_PASSWORD){ onAuth(); }
+    else{ setErr(true); setTimeout(()=>setErr(false),2000); }
+  };
+  return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"linear-gradient(135deg,#0a0f1e,#0f1e3d)"}}>
+      <div style={{width:"100%",maxWidth:380,padding:24}}>
+        <div style={{textAlign:"center",marginBottom:40}}>
+          <div style={{width:48,height:48,borderRadius:12,background:"linear-gradient(135deg,#0ea5e9,#6366f1)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,margin:"0 auto 16px"}}>⚡</div>
+          <div style={{fontSize:22,fontWeight:800,color:T.text,letterSpacing:"-0.5px"}}>AIO Admin</div>
+          <div style={{fontSize:13,color:T.muted,marginTop:4}}>Submission Dashboard</div>
+        </div>
+        <form onSubmit={submit} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,padding:32,display:"flex",flexDirection:"column",gap:16}}>
+          <div>
+            <label style={{display:"block",fontSize:12,color:T.muted,marginBottom:6,fontWeight:600,letterSpacing:.5}}>PASSWORD</label>
+            <input
+              type="password" value={pw} onChange={e=>setPw(e.target.value)}
+              placeholder="Enter admin password"
+              autoFocus
+              style={{width:"100%",padding:"12px 14px",borderRadius:8,border:`1.5px solid ${err?"#ef4444":T.border}`,background:"#0a0f1e",color:T.text,fontSize:14,outline:"none"}}
+            />
+            {err&&<div style={{fontSize:12,color:T.red,marginTop:6}}>Incorrect password.</div>}
+          </div>
+          <button type="submit" style={{background:T.blue,color:"#fff",border:"none",borderRadius:10,padding:"12px",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+            Sign In →
+          </button>
+        </form>
+        <p style={{textAlign:"center",fontSize:11,color:T.muted,marginTop:20}}>AIO Internal — Authorized Personnel Only</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Stat Card ─────────────────────────────────────────────────────────────────
+function StatCard({label,value,sub,color}){
+  return (
+    <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:12,padding:"20px 24px",flex:1,minWidth:160}}>
+      <div style={{fontSize:12,color:T.muted,marginBottom:8,fontWeight:600,letterSpacing:.5,textTransform:"uppercase"}}>{label}</div>
+      <div style={{fontSize:26,fontWeight:800,color:color||T.text,lineHeight:1}}>{value}</div>
+      {sub&&<div style={{fontSize:12,color:T.muted,marginTop:6}}>{sub}</div>}
+    </div>
+  );
+}
+
+// ── Status Badge ──────────────────────────────────────────────────────────────
+function Badge({type}){
+  const styles = {
+    quote:  {bg:"#052e16",border:"#22c55e40",color:"#22c55e",label:"Quote Sent"},
+    referral:{bg:"#1e1b4b",border:"#6366f140",color:"#a5b4fc",label:"Team Review"},
+  };
+  const s = styles[type]||styles.referral;
+  return <span style={{background:s.bg,border:`1px solid ${s.border}`,color:s.color,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,letterSpacing:.5,textTransform:"uppercase"}}>{s.label}</span>;
+}
+
+// ── Submissions Table ──────────────────────────────────────────────────────────
+function SubmissionsTable({submissions,onSelect,selected}){
+  if(!submissions.length){
+    return (
+      <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,padding:"60px 24px",textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>📭</div>
+        <div style={{fontSize:16,fontWeight:700,color:T.text,marginBottom:8}}>No submissions yet</div>
+        <div style={{fontSize:13,color:T.muted}}>Submissions from the customer page will appear here.</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,overflow:"hidden"}}>
+      {/* Table header */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 120px 120px 80px",gap:0,padding:"10px 20px",borderBottom:`1px solid ${T.border}`,fontSize:11,color:T.muted,fontWeight:700,letterSpacing:.5,textTransform:"uppercase"}}>
+        {["Business","Contact","Submitted","Volume","Savings","Status"].map(h=><div key={h}>{h}</div>)}
+      </div>
+      {submissions.map((s,i)=>{
+        const isSelected = selected?.id===s.id;
+        const savings = s.quote?.type==="quote" ? s.quote.savings?.annual : null;
+        return (
+          <div key={s.id} onClick={()=>onSelect(isSelected?null:s)}
+            style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 120px 120px 80px",gap:0,padding:"14px 20px",
+              borderBottom:i<submissions.length-1?`1px solid ${T.border}`:"none",
+              cursor:"pointer",
+              background:isSelected?"#0ea5e910":i%2===0?"transparent":"#0a0f1e20",
+              transition:"background .15s"}}>
+            <div>
+              <div style={{fontSize:14,fontWeight:700,color:T.text}}>{s.contact?.dba||"—"}</div>
+              <div style={{fontSize:12,color:T.muted,marginTop:2}}>{s.analysis?.currentProcessorName||"Unknown processor"}</div>
+            </div>
+            <div>
+              <div style={{fontSize:13,color:T.text}}>{s.contact?.name||"—"}</div>
+              <div style={{fontSize:12,color:T.muted,marginTop:2}}>{s.contact?.email||"—"}</div>
+            </div>
+            <div style={{fontSize:12,color:T.muted,paddingTop:2}}>{fmtDate(s.submittedAt)}</div>
+            <div style={{fontSize:13,fontWeight:600,color:T.text}}>{fmt$(s.analysis?.totalVolume)}<div style={{fontSize:11,color:T.muted}}>monthly</div></div>
+            <div style={{fontSize:13,fontWeight:700,color:s.quote?.type==="quote"?T.green:T.muted}}>
+              {savings!=null ? fmt$(savings) : "—"}
+              {savings!=null&&<div style={{fontSize:11,color:T.muted,fontWeight:400}}>annual</div>}
+            </div>
+            <div><Badge type={s.quote?.type||"referral"}/></div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Margin Bar ─────────────────────────────────────────────────────────────────
+function MarginBar({label,note,amount,rate,total,color}){
+  const pct = total > 0 ? Math.min((amount/total)*100,100) : 0;
+  return (
+    <div style={{padding:"12px 0",borderBottom:`1px solid ${T.border}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+        <div>
+          <span style={{fontSize:14,fontWeight:600,color:T.text}}>{label}</span>
+          {note&&<span style={{fontSize:11,color:T.muted,marginLeft:8}}>{note}</span>}
+        </div>
+        <div style={{textAlign:"right",flexShrink:0,marginLeft:12}}>
+          <span style={{fontSize:14,fontWeight:700,color:color||T.text}}>{fmtD$(amount)}</span>
+          <span style={{fontSize:11,color:T.muted,marginLeft:6}}>{fmtPct(rate)}</span>
+        </div>
+      </div>
+      <div style={{height:6,background:T.border,borderRadius:3,overflow:"hidden"}}>
+        <div style={{height:"100%",width:`${pct}%`,background:color||T.muted,borderRadius:3,transition:"width .5s ease"}}/>
+      </div>
+    </div>
+  );
+}
+
+// ── Detail Panel ──────────────────────────────────────────────────────────────
+function DetailPanel({submission,onClose}){
+  const {contact,analysis,quote} = submission;
+  const vol = analysis?.totalVolume || 0;
+  const total = analysis?.totalFees || 0;
+  const ic = analysis?.interchangeFees || 0;
+  const procFees = analysis?.processorFees || 0;
+  const other = analysis?.otherFees || 0;
+  const icRate = analysis?.interchangeRate || 0;
+  const procRate = analysis?.processorMarkup || 0;
+  const otherRate = vol > 0 ? other/vol : 0;
+  const effRate = analysis?.effectiveRate || 0;
+
+  const processorMargin = procFees + other;
+  const processorMarginRate = vol > 0 ? processorMargin/vol : 0;
+
+  return (
+    <div className="fade" style={{background:T.bg,borderLeft:`1px solid ${T.border}`,height:"100vh",overflowY:"auto",padding:28,display:"flex",flexDirection:"column",gap:24}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+        <div>
+          <div style={{fontSize:11,color:T.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>{fmtDate(submission.submittedAt)}</div>
+          <div style={{fontSize:20,fontWeight:800,color:T.text,letterSpacing:"-0.3px"}}>{contact?.dba||"Unknown Business"}</div>
+          <div style={{fontSize:13,color:T.muted,marginTop:2}}>{analysis?.processingMonth} · {analysis?.currentProcessorName}</div>
+        </div>
+        <button onClick={onClose} style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:13}}>✕ Close</button>
+      </div>
+
+      {/* Contact info */}
+      <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:12,padding:20}}>
+        <div style={{fontSize:12,color:T.muted,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:14}}>Contact Info</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+          {[
+            {lbl:"DBA",val:contact?.dba},
+            {lbl:"Name",val:contact?.name},
+            {lbl:"Email",val:contact?.email},
+            {lbl:"Phone",val:contact?.phone},
+          ].map(f=>(
+            <div key={f.lbl}>
+              <div style={{fontSize:11,color:T.muted,marginBottom:2}}>{f.lbl}</div>
+              <div style={{fontSize:13,fontWeight:600,color:T.text}}>{f.val||"—"}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Quote */}
+      {quote?.type==="quote" ? (
+        <div style={{background:"linear-gradient(135deg,#052e16,#0a1628)",border:`1px solid ${T.green}40`,borderRadius:12,padding:24}}>
+          <div style={{fontSize:12,color:T.green,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:16}}>Generated Quote</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+            {[
+              {lbl:"AIO Flat Rate",val:fmtPct(quote.flatRate),color:T.green},
+              {lbl:"Current Rate",val:fmtPct(effRate),color:T.red},
+              {lbl:"Proposed Monthly",val:fmt$(quote.monthlyCost),color:"#38bdf8"},
+              {lbl:"Current Monthly",val:fmt$(total),color:T.red},
+              {lbl:"Monthly Savings",val:fmt$(quote.savings?.monthly),color:T.green},
+              {lbl:"Annual Savings",val:fmt$(quote.savings?.annual),color:T.green},
+            ].map(s=>(
+              <div key={s.lbl}>
+                <div style={{fontSize:11,color:T.muted,marginBottom:3}}>{s.lbl}</div>
+                <div style={{fontSize:16,fontWeight:800,color:s.color||T.text}}>{s.val}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{marginTop:16,padding:"10px 14px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:8,fontSize:12,color:"#4ade80"}}>
+            Saving merchant {fmtPct(quote.savings?.pct)} of current processing costs · 25% of processor margin
+          </div>
+        </div>
+      ) : (
+        <div style={{background:"#1e1b4b30",border:`1px solid #6366f140`,borderRadius:12,padding:20}}>
+          <div style={{fontSize:12,color:"#a5b4fc",fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:8}}>Status: Team Review</div>
+          <div style={{fontSize:13,color:T.muted,lineHeight:1.6}}>Savings below 5% threshold. Customer was shown the "team will be in touch" message. Manual review recommended to identify other value drivers.</div>
+        </div>
+      )}
+
+      {/* Margin Analysis */}
+      <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:12,padding:20}}>
+        <div style={{fontSize:12,color:T.muted,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:4}}>Margin Analysis</div>
+        <div style={{fontSize:11,color:T.muted,marginBottom:16}}>
+          {analysis?.merchantName} · {fmt$(vol)}/mo volume · {analysis?.totalTransactions?.toLocaleString()||"?"} transactions
+        </div>
+
+        {/* Fee bars */}
+        <div style={{marginBottom:16}}>
+          <MarginBar label="Interchange" note="Pass-through cost, not markup" amount={ic} rate={icRate} total={total} color="#3b82f6"/>
+          <MarginBar label="Processor Markup" note="Margin above interchange" amount={procFees} rate={procRate} total={total} color="#f97316"/>
+          <MarginBar label="Other Fees" note="Monthly, PCI, statement fees" amount={other} rate={otherRate} total={total} color={T.green}/>
+        </div>
+
+        {/* Totals */}
+        <div style={{background:"#0a0f1e",borderRadius:10,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div>
+            <div style={{fontSize:12,color:T.muted,marginBottom:2}}>Total Monthly Fees</div>
+            <div style={{fontSize:18,fontWeight:800,color:T.text}}>{fmtD$(total)}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:12,color:T.muted,marginBottom:2}}>Effective Rate</div>
+            <div style={{fontSize:18,fontWeight:800,color:T.text}}>{fmtPct(effRate)}</div>
+          </div>
+        </div>
+
+        {/* Processor margin highlight */}
+        <div style={{background:`${T.gold}10`,border:`1px solid ${T.gold}30`,borderRadius:10,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:12,color:T.gold,fontWeight:700,marginBottom:2}}>Processor Margin (Markup + Other)</div>
+            <div style={{fontSize:11,color:T.muted}}>This is what we're competing against</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:18,fontWeight:800,color:T.gold}}>{fmtD$(processorMargin)}</div>
+            <div style={{fontSize:11,color:T.muted}}>{fmtPct(processorMarginRate)}</div>
+          </div>
+        </div>
+
+        {/* Pricing model info */}
+        <div style={{marginTop:16,padding:"10px 14px",background:"#0a0f1e",borderRadius:8,display:"flex",gap:16,flexWrap:"wrap"}}>
+          {[
+            {lbl:"Pricing Model",val:analysis?.currentPricingModel||"—"},
+            {lbl:"Confidence",val:analysis?.confidence||"—"},
+            {lbl:"Annual Volume",val:fmt$((vol||0)*12)},
+          ].map(s=>(
+            <div key={s.lbl} style={{flex:1,minWidth:100}}>
+              <div style={{fontSize:10,color:T.muted,marginBottom:2,textTransform:"uppercase",letterSpacing:.5}}>{s.lbl}</div>
+              <div style={{fontSize:13,fontWeight:600,color:T.text,textTransform:"capitalize"}}>{s.val}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Notes from extraction */}
+      {analysis?.notes && (
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:12,padding:16}}>
+          <div style={{fontSize:11,color:T.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.5,fontWeight:700}}>Extraction Notes</div>
+          <div style={{fontSize:12,color:T.muted,lineHeight:1.6}}>{analysis.notes}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+function Dashboard({onLogout}){
+  const [submissions,setSubmissions] = useState([]);
+  const [selected,setSelected] = useState(null);
+  const [filter,setFilter] = useState("all"); // all | quote | referral
+  const [search,setSearch] = useState("");
+
+  useEffect(()=>{
+    const load = () => {
+      try{
+        const data = JSON.parse(localStorage.getItem("aio_submissions")||"[]");
+        setSubmissions(Array.isArray(data)?data:[]);
+      }catch{ setSubmissions([]); }
+    };
+    load();
+    const t = setInterval(load, 10000); // refresh every 10s
+    return ()=>clearInterval(t);
+  },[]);
+
+  const filtered = useMemo(()=>submissions.filter(s=>{
+    if(filter!=="all" && s.quote?.type!==filter) return false;
+    if(search){
+      const q = search.toLowerCase();
+      return (s.contact?.dba||"").toLowerCase().includes(q)
+        || (s.contact?.name||"").toLowerCase().includes(q)
+        || (s.contact?.email||"").toLowerCase().includes(q);
+    }
+    return true;
+  }),[submissions,filter,search]);
+
+  // Stats
+  const totalQuotes    = submissions.filter(s=>s.quote?.type==="quote").length;
+  const totalReferrals = submissions.filter(s=>s.quote?.type==="referral").length;
+  const totalSavings   = submissions.filter(s=>s.quote?.type==="quote").reduce((a,s)=>a+(s.quote?.savings?.annual||0),0);
+  const avgSavings     = totalQuotes > 0 ? totalSavings/totalQuotes : 0;
+
+  const deleteSubmission = (id,e) => {
+    e.stopPropagation();
+    if(!confirm("Delete this submission?")) return;
+    const updated = submissions.filter(s=>s.id!==id);
+    localStorage.setItem("aio_submissions",JSON.stringify(updated));
+    setSubmissions(updated);
+    if(selected?.id===id) setSelected(null);
+  };
+
+  return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column"}}>
+      {/* Top Nav */}
+      <div style={{background:T.card,borderBottom:`1px solid ${T.border}`,padding:"0 24px",height:60,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:30,height:30,borderRadius:8,background:"linear-gradient(135deg,#0ea5e9,#6366f1)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>⚡</div>
+          <span style={{fontSize:16,fontWeight:800,color:T.text}}>AIO Admin</span>
+          <span style={{fontSize:11,color:T.muted,marginLeft:4}}>· Submission Dashboard</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <a href="customer.html" target="_blank" style={{fontSize:12,color:T.blue,textDecoration:"none",padding:"6px 12px",border:`1px solid ${T.blue}30`,borderRadius:6}}>↗ Customer Page</a>
+          <button onClick={onLogout} style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12}}>Sign Out</button>
+        </div>
+      </div>
+
+      <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+        {/* Main content */}
+        <div style={{flex:1,overflowY:"auto",padding:24}}>
+          {/* Stats row */}
+          <div style={{display:"flex",gap:16,marginBottom:28,flexWrap:"wrap"}}>
+            <StatCard label="Total Submissions" value={submissions.length} sub="all time"/>
+            <StatCard label="Quotes Generated" value={totalQuotes} sub={`${totalReferrals} pending review`} color={T.green}/>
+            <StatCard label="Avg Annual Savings" value={avgSavings>0?fmt$(avgSavings):"—"} sub="per quoted merchant" color={T.blue}/>
+            <StatCard label="Total Quoted Savings" value={totalSavings>0?fmt$(totalSavings):"—"} sub="across all quotes" color={T.gold}/>
+          </div>
+
+          {/* Controls */}
+          <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap",alignItems:"center"}}>
+            <input
+              type="text" placeholder="Search by business, name, or email..."
+              value={search} onChange={e=>setSearch(e.target.value)}
+              style={{flex:1,minWidth:200,padding:"9px 14px",borderRadius:8,border:`1px solid ${T.border}`,background:"#0a0f1e",color:T.text,fontSize:13,outline:"none"}}
+            />
+            <div style={{display:"flex",gap:4}}>
+              {[["all","All"],["quote","Quotes"],["referral","Team Review"]].map(([v,l])=>(
+                <button key={v} onClick={()=>setFilter(v)} style={{
+                  background:filter===v?T.blue:"transparent",
+                  color:filter===v?"#fff":T.muted,
+                  border:`1px solid ${filter===v?T.blue:T.border}`,
+                  borderRadius:8,padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer"
+                }}>{l}</button>
+              ))}
+            </div>
+            <div style={{fontSize:12,color:T.muted}}>{filtered.length} result{filtered.length!==1?"s":""}</div>
+          </div>
+
+          {/* Table — extended with delete */}
+          {!filtered.length ? (
+            <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,padding:"60px 24px",textAlign:"center"}}>
+              <div style={{fontSize:32,marginBottom:16}}>🔍</div>
+              <div style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:8}}>{search?"No matching submissions":"No submissions yet"}</div>
+              <div style={{fontSize:13,color:T.muted}}>
+                {search?"Try a different search term.":"Submissions from the customer page will appear here automatically."}
+              </div>
+            </div>
+          ) : (
+            <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:16,overflow:"hidden"}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 140px 110px 110px 90px 36px",padding:"10px 20px",borderBottom:`1px solid ${T.border}`,fontSize:11,color:T.muted,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",gap:12}}>
+                {["Business","Contact","Submitted","Volume","Savings","Status",""].map(h=><div key={h}>{h}</div>)}
+              </div>
+              {filtered.map((s,i)=>{
+                const isSelected = selected?.id===s.id;
+                const savings = s.quote?.type==="quote" ? s.quote.savings?.annual : null;
+                return (
+                  <div key={s.id} onClick={()=>setSelected(isSelected?null:s)}
+                    style={{display:"grid",gridTemplateColumns:"1fr 1fr 140px 110px 110px 90px 36px",padding:"13px 20px",gap:12,
+                      borderBottom:i<filtered.length-1?`1px solid ${T.border}`:"none",cursor:"pointer",
+                      background:isSelected?"rgba(14,165,233,0.06)":"transparent",transition:"background .15s"}}>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:700,color:T.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.contact?.dba||"—"}</div>
+                      <div style={{fontSize:11,color:T.muted,marginTop:1}}>{s.analysis?.currentProcessorName||"—"}</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:13,color:T.text}}>{s.contact?.name||"—"}</div>
+                      <div style={{fontSize:11,color:T.muted,marginTop:1}}>{s.contact?.email||"—"}</div>
+                    </div>
+                    <div style={{fontSize:11,color:T.muted,paddingTop:2}}>{fmtDate(s.submittedAt)}</div>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:600,color:T.text}}>{fmt$(s.analysis?.totalVolume)}</div>
+                      <div style={{fontSize:11,color:T.muted}}>monthly</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:700,color:s.quote?.type==="quote"?T.green:T.muted}}>
+                        {savings!=null?fmt$(savings):"—"}
+                      </div>
+                      {savings!=null&&<div style={{fontSize:11,color:T.muted}}>annual</div>}
+                    </div>
+                    <div style={{paddingTop:2}}><Badge type={s.quote?.type||"referral"}/></div>
+                    <div>
+                      <button onClick={e=>deleteSubmission(s.id,e)} title="Delete"
+                        style={{background:"transparent",border:"none",color:T.muted,cursor:"pointer",fontSize:14,padding:4,borderRadius:4,lineHeight:1}}>✕</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Detail Panel (side drawer) */}
+        {selected && (
+          <div style={{width:"min(480px,50vw)",flexShrink:0,overflowY:"auto",borderLeft:`1px solid ${T.border}`}}>
+            <DetailPanel submission={selected} onClose={()=>setSelected(null)}/>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Root App ──────────────────────────────────────────────────────────────────
+function App(){
+  const [authed,setAuthed] = useState(()=>sessionStorage.getItem("aio_admin_authed")==="1");
+  const auth = () => { sessionStorage.setItem("aio_admin_authed","1"); setAuthed(true); };
+  const logout = () => { sessionStorage.removeItem("aio_admin_authed"); setAuthed(false); };
+  if(!authed) return <LoginScreen onAuth={auth}/>;
+  return <Dashboard onLogout={logout}/>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

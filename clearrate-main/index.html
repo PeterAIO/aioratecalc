@@ -1,0 +1,2337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClearRate Proposal Engine</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0f1e; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- API key config — loaded from localStorage -->
+  <script>
+    (function() {
+      var saved = localStorage.getItem("cr_api_key");
+      if (saved) { window.__CR_API_KEY = saved; }
+    })();
+  </script>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useRef, useEffect } = React;
+
+
+const STEPS = ["upload", "analysis", "pricing", "proposal", "apply"];
+
+const fmt$ = (n) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(n || 0);
+const fmtPct  = (n) => `${((n || 0) * 100).toFixed(4)}%`;
+const fmtPct2 = (n) => `${((n || 0) * 100).toFixed(2)}%`;
+const fmtBps  = (n) => `${Math.round((n || 0) * 10000)} bps`;
+
+function parseJSON(text) {
+  try {
+    const clean = text.replace(/```json|```/g, "").trim();
+    const s = clean.indexOf("{"), e = clean.lastIndexOf("}");
+    if (s !== -1 && e !== -1) return JSON.parse(clean.slice(s, e + 1));
+  } catch {}
+  return null;
+}
+
+// ─── AIO Margin Requirements (sourced from AIO Payments Margin Requirements.xlsx) ─
+const MARGIN_REQS = [
+  { maxVol: 20000,   takeRate: 0.015,  minMRR: 300    },
+  { maxVol: 50000,   takeRate: 0.006,  minMRR: 300    },
+  { maxVol: 75000,   takeRate: 0.005,  minMRR: 375    },
+  { maxVol: 100000,  takeRate: 0.004,  minMRR: 400    },
+  { maxVol: 125000,  takeRate: 0.0035, minMRR: 437.5  },
+  { maxVol: 150000,  takeRate: 0.003,  minMRR: 450    },
+  { maxVol: 175000,  takeRate: 0.0025, minMRR: 437.5  },
+  { maxVol: 200000,  takeRate: 0.002,  minMRR: 400    },
+  { maxVol: 250000,  takeRate: 0.0018, minMRR: 450    },
+  { maxVol: 300000,  takeRate: 0.0016, minMRR: 480    },
+  { maxVol: 350000,  takeRate: 0.0014, minMRR: 490    },
+  { maxVol: 400000,  takeRate: 0.0012, minMRR: 480    },
+  { maxVol: 500000,  takeRate: 0.001,  minMRR: 500    },
+  { maxVol: Infinity,takeRate: 0.0008, minMRR: 480    },
+];
+function getMarginFloor(monthlyVolume) {
+  return MARGIN_REQS.find(t => monthlyVolume <= t.maxVol) || MARGIN_REQS[MARGIN_REQS.length - 1];
+}
+
+function calcAdyenCost(tier, volume, txnCount) {
+  if (!tier) return 0;
+  return volume * (tier.processingBps || 0) + txnCount * (tier.perTxnFee || 0) + volume * (tier.schemeBps || 0) + (tier.monthlyFee || 0);
+}
+
+function adyenRateOnVolume(tier, volume, txnCount) {
+  if (!tier || !volume) return 0;
+  return calcAdyenCost(tier, volume, txnCount) / volume;
+}
+
+// ─── Default empty state ──────────────────────────────────────────────────────
+const defaultSettings = {
+  processors: [],
+  activeProcessorId: null,
+};
+
+const newProcessor = () => ({
+  id: Date.now().toString(),
+  name: "New Processor",
+  contractFile: null,
+  rates: null,
+  activeTierId: null,
+  createdAt: new Date().toISOString(),
+});
+
+// ─── Storage helpers ──────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const raw = localStorage.getItem("clearrate:settings"); const r = raw ? { value: raw } : null;
+    return r ? JSON.parse(r.value) : defaultSettings;
+  } catch { return defaultSettings; }
+}
+
+async function saveSettings(s) {
+  try { localStorage.setItem("clearrate:settings", JSON.stringify(s)); } catch {}
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+function App() {
+  const [page, setPage] = useState("proposal"); // "proposal" | "settings"
+  const [settings, setSettings] = useState(null);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  // Proposal flow
+  const [step, setStep] = useState("upload");
+  const [file, setFile] = useState(null);
+  const [fileData, setFileData] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
+  const [pricingModel, setPricingModel] = useState(null);
+  const [targetMargin, setTargetMargin] = useState(0.005);
+  const [proposal, setProposal] = useState(null);
+  const [feeOverrides, setFeeOverrides] = useState({ monthlyFee: 0, perTxnFee: 0, cpPerTxnFee: 0, cnpPerTxnFee: 0 });
+  const [dragOver, setDragOver] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const fileRef = useRef();
+
+  // Load settings on mount
+  useEffect(() => {
+    loadSettings().then(s => { setSettings(s); setSettingsLoaded(true); });
+  }, []);
+
+  // Snap targetMargin up to AIO floor whenever analysis changes
+  useEffect(() => {
+    if (analysis) {
+      const floor = getMarginFloor(analysis.totalVolume || 0);
+      setTargetMargin(prev => Math.max(prev, floor.takeRate));
+    }
+  }, [analysis]);
+
+  const persistSettings = (updated) => {
+    setSettings(updated);
+    saveSettings(updated);
+  };
+
+  // Active processor + tier
+  const activeProcessor = settings?.processors?.find(p => p.id === settings?.activeProcessorId) || null;
+  const activeTier = activeProcessor?.rates?.isTiered
+    ? activeProcessor.rates.tiers?.find(t => t.id === activeProcessor.activeTierId) || activeProcessor.rates.tiers?.[0]
+    : activeProcessor?.rates ? { ...activeProcessor.rates, id: "flat", label: "Standard Rate" } : null;
+
+  const adyenCostRate = (activeTier && analysis)
+    ? adyenRateOnVolume(activeTier, analysis.totalVolume, analysis.totalTransactions)
+    : 0;
+  const netMargin = targetMargin - adyenCostRate;
+  const belowFloor = netMargin < 0;
+
+  const readFile = (f, cb) => {
+    const r = new FileReader();
+    r.onload = e => cb(e.target.result.split(",")[1]);
+    r.readAsDataURL(f);
+  };
+
+  const analyzeStatement = async () => {
+    if (!fileData) return;
+    setLoading(true); setLoadingMsg("Analyzing merchant statement...");
+    const isImage = file.type.startsWith("image/");
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          messages: [{ role: "user", content: [
+            { type: isImage ? "image" : "document", source: { type: "base64", media_type: isImage ? file.type : "application/pdf", data: fileData } },
+            { type: "text", text: `Analyze this merchant processing statement. Return ONLY valid JSON — no markdown, no explanation.
+
+FIELDS:
+{
+  "merchantName": string,
+  "processingMonth": string,
+  "totalVolume": number (total card volume processed this month in USD),
+  "totalTransactions": number,
+  "totalFees": number (ONLY the fees actually shown on this statement — see rules below),
+  "interchangeFees": number (interchange/network fees in USD if shown; 0 if NOT shown),
+  "processorFees": number (processor markup fees — see rules below),
+  "otherFees": number (monthly fee, PCI fee, statement fee, misc — USD),
+  "effectiveRate": number (totalFees / totalVolume as decimal),
+  "interchangeRate": number (interchangeFees / totalVolume; 0 if interchange not shown),
+  "processorMarkup": number (the markup RATE as decimal e.g. 0.0025 for 0.25% — NOT a dollar amount),
+  "statedMarkupRate": number (the explicit % markup rate printed on the statement, as decimal; 0 if not stated),
+  "statedPerTxnFee": number (the explicit per-transaction fee printed on the statement in USD; 0 if not stated),
+  "interchangeNotShown": boolean (true if this is IC+ but interchange fees are NOT itemized on the statement),
+  "averageTicket": number,
+  "cardPresentVolume": number,
+  "cardNotPresentVolume": number,
+  "cardPresentPct": number,
+  "cardNotPresentPct": number,
+  "visaVolume": number,
+  "mastercardVolume": number,
+  "amexVolume": number,
+  "discoverVolume": number,
+  "rewardCardPct": number,
+  "corporateCardPct": number,
+  "currentPricingModel": "tiered|interchange-plus|flat-rate|unknown",
+  "currentProcessorName": string,
+  "annualVolume": number,
+  "confidence": "high|medium|low",
+  "notes": string
+}
+
+CRITICAL RULES — READ CAREFULLY:
+
+RULE 1 — IC+ STATEMENTS WHERE INTERCHANGE IS NOT BROKEN OUT (e.g. Toast, some Heartland/TSYS):
+These statements show the TOTAL fees (interchange + markup combined) but do not itemize interchange separately.
+They DO show the markup rate (e.g. 0.25% + $0.10/txn) which is what the processor charges ABOVE interchange.
+
+If this is interchange-plus pricing AND interchange is NOT itemized as a separate line:
+  • Set interchangeNotShown = true
+  • totalFees = the TOTAL fees shown on the statement (this INCLUDES interchange — use the grand total)
+  • statedMarkupRate = the explicit % markup rate printed (e.g. 0.0025 for 0.25%)
+  • statedPerTxnFee = the explicit per-transaction markup fee printed (e.g. 0.10)
+  • processorFees = markup-only dollar amount = totalVolume × statedMarkupRate + totalTransactions × statedPerTxnFee
+  • interchangeFees = totalFees − processorFees − otherFees  (back-calculated — the remainder IS interchange)
+  • interchangeRate = interchangeFees / totalVolume
+  • effectiveRate = totalFees / totalVolume  (true full effective rate including interchange)
+  • processorMarkup = statedMarkupRate
+
+RULE 2 — IC+ STATEMENTS WHERE INTERCHANGE IS ITEMIZED:
+  • Set interchangeNotShown = false
+  • interchangeFees = the interchange dollar amount explicitly shown
+  • processorFees = fees shown above interchange (the markup)
+  • totalFees = interchangeFees + processorFees + otherFees
+
+RULE 3 — FLAT-RATE OR TIERED STATEMENTS:
+  • Set interchangeNotShown = false
+  • totalFees = all fees on the statement
+  • interchangeFees = 0  (interchange is bundled, cannot be separated)
+  • processorFees = totalFees − otherFees
+
+RULE 4 — processorMarkup is always a RATE (decimal), never a dollar amount.
+  e.g. 0.25% = 0.0025, 1.5% = 0.015
+
+Use 0 for unknown numerics. Never null.` }
+          ]}]
+        })
+      });
+      const data = await res.json();
+      const parsed = parseJSON(data.content?.map(b => b.text || "").join("") || "");
+      if (parsed) {
+        // Normalize rate fields: >0.5 is likely a percentage integer, convert to decimal
+        const rateFields = ["effectiveRate","interchangeRate","processorMarkup","statedMarkupRate","cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"];
+        rateFields.forEach(f => {
+          if (parsed[f] != null && parsed[f] > 0.5) parsed[f] = parsed[f] / 100;
+        });
+
+        const vol  = parsed.totalVolume  || 0;
+        const txns = parsed.totalTransactions || 0;
+
+        // ── IC+ WHERE INTERCHANGE IS NOT ITEMIZED (e.g. Toast) ─────────────
+        // totalFees = full statement total (interchange + markup).
+        // Hard-recalculate processorFees from stated rates, then back-calculate
+        // interchange as the remainder: interchange = totalFees - markup - other.
+        if (parsed.interchangeNotShown && vol > 0) {
+          const markupRate = parsed.statedMarkupRate || parsed.processorMarkup || 0;
+          const perTxnFee  = parsed.statedPerTxnFee  || 0;
+          // Recalculate markup from the printed rates — authoritative
+          const calcMarkup = vol * markupRate + txns * perTxnFee;
+          if (calcMarkup > 0) parsed.processorFees = calcMarkup;
+          parsed.processorMarkup = markupRate;
+          // Back-calculate interchange as the remainder of total fees
+          const backCalcIC = (parsed.totalFees || 0) - parsed.processorFees - (parsed.otherFees || 0);
+          parsed.interchangeFees = Math.max(0, backCalcIC);
+          parsed.interchangeRate = parsed.interchangeFees / vol;
+          // Effective rate = full total / volume (includes interchange)
+          if (parsed.totalFees > 0) parsed.effectiveRate = parsed.totalFees / vol;
+        }
+
+        // Volume-derived pcts
+        if (vol > 0) {
+          if (parsed.cardPresentVolume    > 0) parsed.cardPresentPct    = parsed.cardPresentVolume    / vol;
+          if (parsed.cardNotPresentVolume > 0) parsed.cardNotPresentPct = parsed.cardNotPresentVolume / vol;
+          ["cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"].forEach(f => {
+            if (parsed[f] > 1) parsed[f] = 0;
+          });
+          // Cross-check effective rate (skip when interchange not shown — it will look low by design)
+          if (parsed.totalFees > 0 && !parsed.interchangeNotShown) {
+            const derived = parsed.totalFees / vol;
+            if (Math.abs((parsed.effectiveRate || 0) - derived) > 0.01) parsed.effectiveRate = derived;
+          } else if (parsed.totalFees > 0) {
+            parsed.effectiveRate = parsed.totalFees / vol;
+          }
+          // Cross-check interchange rate
+          if (parsed.interchangeFees > 0) {
+            const derivedIC = parsed.interchangeFees / vol;
+            if (Math.abs((parsed.interchangeRate || 0) - derivedIC) > 0.01) parsed.interchangeRate = derivedIC;
+          }
+        }
+        parsed.currentMargin = (parsed.effectiveRate || 0) - (parsed.interchangeRate || 0);
+        setAnalysis(parsed);
+        setStep("analysis");
+      }
+      else alert("Could not parse statement.");
+    } catch (err) { alert("Error: " + err.message); }
+    setLoading(false);
+  };
+
+  const generateProposal = async () => {
+    if (!analysis || !pricingModel) return;
+    setLoading(true); setLoadingMsg("Building your proposal...");
+
+    // Re-derive the exact same rates PricingStep shows, so the AI uses them verbatim
+    const vol = analysis.totalVolume || 0;
+    const txns = analysis.totalTransactions || 0;
+    const icRate = analysis.interchangeRate || 0;
+
+    const annVol = vol * 12; // always derive from monthly
+    const cpPct  = analysis.cardPresentPct    || 0.7;
+    const cnpPct = analysis.cardNotPresentPct || 0.3;
+    const cpVol  = analysis.cardPresentVolume  || vol * cpPct;
+    const cnpVol = analysis.cardNotPresentVolume || vol * cnpPct;
+    const cpIcRate  = cpVol  > 0 ? (icRate * vol * cpPct)  / cpVol  : icRate * 0.85;
+    const cnpIcRate = cnpVol > 0 ? (icRate * vol * cnpPct) / cnpVol : icRate * 1.15;
+
+    const flatRevNeeded    = vol * targetMargin;
+    const flatFeeRevenue   = txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+    const flatPctRevNeeded = Math.max(0, flatRevNeeded - flatFeeRevenue);
+    const derivedFlatRate  = icRate + flatPctRevNeeded / (vol || 1);
+
+    const cpRevNeeded  = cpVol  * targetMargin;
+    const cnpRevNeeded = cnpVol * targetMargin;
+    const cpFeeRev     = txns * cpPct  * (feeOverrides.cpPerTxnFee  || 0) + (feeOverrides.monthlyFee || 0) * cpPct;
+    const cnpFeeRev    = txns * cnpPct * (feeOverrides.cnpPerTxnFee || 0) + (feeOverrides.monthlyFee || 0) * cnpPct;
+    const derivedCPRate  = cpIcRate  + Math.max(0, cpRevNeeded  - cpFeeRev)  / (cpVol  || 1);
+    const derivedCNPRate = cnpIcRate + Math.max(0, cnpRevNeeded - cnpFeeRev) / (cnpVol || 1);
+
+    // Proposed monthly fees (same formula as PricingStep)
+    let proposedMonthly = 0;
+    if (pricingModel === "flat-rate") {
+      proposedMonthly = vol * derivedFlatRate + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+    } else if (pricingModel === "2-tier") {
+      proposedMonthly = cpVol * derivedCPRate + txns * cpPct * (feeOverrides.cpPerTxnFee || 0)
+        + cnpVol * derivedCNPRate + txns * cnpPct * (feeOverrides.cnpPerTxnFee || 0)
+        + (feeOverrides.monthlyFee || 0);
+    } else {
+      proposedMonthly = vol * icRate + vol * targetMargin + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+    }
+
+    // Build the exact rates object to inject — AI must use these numbers, not invent its own
+    const exactRates = pricingModel === "flat-rate"
+      ? { flatRate: derivedFlatRate, perTransaction: feeOverrides.perTxnFee || 0, monthlyFee: feeOverrides.monthlyFee || 0 }
+      : pricingModel === "2-tier"
+      ? { cardPresentRate: derivedCPRate, cardPresentPerTxn: feeOverrides.cpPerTxnFee || 0, cardNotPresentRate: derivedCNPRate, cardNotPresentPerTxn: feeOverrides.cnpPerTxnFee || 0, monthlyFee: feeOverrides.monthlyFee || 0 }
+      : { basisPoints: Math.round(targetMargin * 10000), perTransaction: feeOverrides.perTxnFee || 0, monthlyFee: feeOverrides.monthlyFee || 0 };
+
+    const exactProjected = { monthly: proposedMonthly, annual: proposedMonthly * 12, effectiveRate: vol > 0 ? proposedMonthly / vol : 0 };
+    const savingsMonthly = (analysis.totalFees || 0) - proposedMonthly;
+
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          messages: [{ role: "user", content: `Generate a payment processing proposal. Use EXACTLY the rates and fees provided — do not recalculate or change any numbers.
+
+MERCHANT: ${JSON.stringify({       merchantName: analysis.merchantName, totalVolume: vol, totalTransactions: txns, totalFees: analysis.totalFees, effectiveRate: analysis.effectiveRate, currentProcessorName: analysis.currentProcessorName, currentPricingModel: analysis.currentPricingModel, annualVolume: annVol })}
+PRICING MODEL: ${pricingModel}
+PROPOSED RATES (use exactly): ${JSON.stringify(exactRates)}
+PROJECTED FEES (use exactly): ${JSON.stringify(exactProjected)}
+SAVINGS MONTHLY: ${savingsMonthly.toFixed(2)}
+SAVINGS ANNUAL: ${(savingsMonthly * 12).toFixed(2)}
+
+Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72):
+{"pricingModel":"${pricingModel}","proposedRates":${JSON.stringify(exactRates)},"projectedFees":${JSON.stringify(exactProjected)},"currentFees":{"monthly":${(analysis.totalFees||0).toFixed(2)},"annual":${((analysis.totalFees||0)*12).toFixed(2)},"effectiveRate":${(analysis.effectiveRate||0).toFixed(6)}},"savings":{"monthly":${savingsMonthly.toFixed(2)},"annual":${(savingsMonthly*12).toFixed(2)},"savingsPct":${(analysis.totalFees > 0 ? savingsMonthly/analysis.totalFees : 0).toFixed(6)}},"sellingPoints":["string","string","string","string"],"proposalSummary":"Write 2-3 sentences in this style: AIO combines payments, POS, and restaurant operations into one AI-powered platform. By replacing fragmented systems with a single solution, [merchantName] gains simpler pricing, better visibility into performance, and more predictable costs—while saving $[annualSavings] annually on processing. Use the actual merchant name and actual annual savings amount. Keep the language concise and benefit-focused."}` }]
+        })
+      });
+      const data = await res.json();
+      // Surface API-level errors (invalid key, model, quota, etc.)
+      if (data.type === "error" || data.error) {
+        const msg = data.error?.message || JSON.stringify(data.error || data);
+        alert("API error: " + msg);
+        setLoading(false); return;
+      }
+      const rawText = data.content?.map(b => b.text || "").join("") || "";
+      const parsed = parseJSON(rawText);
+      if (parsed) {
+        // Force the exact computed values regardless of what AI returned
+        parsed.proposedRates   = exactRates;
+        parsed.projectedFees   = exactProjected;
+        parsed.currentFees     = { monthly: analysis.totalFees || 0, annual: (analysis.totalFees || 0) * 12, effectiveRate: analysis.effectiveRate || 0 };
+        parsed.savings         = { monthly: savingsMonthly, annual: savingsMonthly * 12, savingsPct: analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0 };
+        setProposal(parsed);
+        setStep("proposal");
+      } else {
+        console.error("Proposal raw response:", rawText);
+        alert("Could not parse proposal response. Check console for details.");
+      }
+    } catch (err) { alert("Error: " + err.message); }
+    setLoading(false);
+  };
+
+  if (!settingsLoaded) return (
+    <div style={{...S.root, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
+      <div style={{textAlign:"center"}}><div style={S.spinner} className="spin"/><p style={{color:T.muted,marginTop:16}}>Loading ClearRate...</p></div>
+      <style>{css}</style>
+    </div>
+  );
+
+  return (
+    <div style={S.root}>
+      <style>{css}</style>
+      <header style={S.header}>
+        <div style={S.headerInner}>
+          <div style={S.logo}>
+            <svg width="72" height="40" viewBox="0 0 72 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              {/* A — chevron with rounded ends and curved base */}
+              <path d="M4 34 L14 6 L24 34" stroke="#f9674e" strokeWidth="5.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <path d="M4 34 Q14 28 24 34" stroke="#f9674e" strokeWidth="5.5" strokeLinecap="round" fill="none"/>
+              {/* i — rounded pill stem */}
+              <rect x="29.5" y="14" width="5" height="20" rx="2.5" fill="#f9674e"/>
+              {/* i — circle dot */}
+              <circle cx="32" cy="7" r="3.5" fill="#f9674e"/>
+              {/* o — rounded rectangle outline */}
+              <rect x="39" y="13" width="29" height="21" rx="7" stroke="#f9674e" strokeWidth="5.5" fill="none"/>
+            </svg>
+            <span style={S.logoSub}>Proposal Engine</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:24}}>
+            {page === "proposal" && (
+              <nav style={S.stepNav}>
+                {[{id:"upload",label:"01 Upload"},{id:"analysis",label:"02 Analysis"},{id:"pricing",label:"03 Pricing"},{id:"proposal",label:"04 Proposal"},{id:"apply",label:"05 Apply"}].map(s=>(
+                  <div key={s.id} style={{...S.stepItem,...(step===s.id?S.stepActive:{}),...(STEPS.indexOf(step)>STEPS.indexOf(s.id)?S.stepDone:{})}}>{s.label}</div>
+                ))}
+              </nav>
+            )}
+            <div style={S.pageNav}>
+              <button style={{...S.pageBtn,...(page==="proposal"?S.pageBtnActive:{})}} onClick={()=>setPage("proposal")}>Proposals</button>
+              <button style={{...S.pageBtn,...(page==="settings"?S.pageBtnActive:{})}} onClick={()=>setPage("settings")}>⚙ Settings</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main style={S.main}>
+        {loading && (
+          <div style={S.overlay}><div style={S.overlayCard}><div style={S.spinner} className="spin"/><p style={S.spinMsg}>{loadingMsg}</p></div></div>
+        )}
+
+        {page === "settings" && (
+          <SettingsPage settings={settings} persistSettings={persistSettings} />
+        )}
+
+        {page === "proposal" && (
+          <>
+            {/* Active processor banner — only show outside of proposal step */}
+            {step !== "proposal" && activeProcessor && activeTier && (
+              <div style={S.procBanner}>
+                <span style={{color:T.green}}>◈</span>
+                <span style={{color:T.muted,fontSize:13}}>Acquirer:</span>
+                <span style={{color:T.white,fontWeight:600,fontSize:13}}>{activeProcessor.name}</span>
+                <span style={{color:T.muted,fontSize:13}}>·</span>
+                <span style={{color:T.gold,fontSize:13}}>Tier: {activeTier.label || "Standard"}</span>
+                <span style={{color:T.muted,fontSize:12}}>{fmtBps(activeTier.processingBps)} + ${(activeTier.perTxnFee||0).toFixed(4)}/txn</span>
+                <button style={S.bannerLink} onClick={()=>setPage("settings")}>Change</button>
+              </div>
+            )}
+            {step !== "proposal" && !activeProcessor && (
+              <div style={{...S.procBanner, borderColor:`${T.gold}40`, background:`${T.gold}08`}}>
+                <span style={{color:T.gold}}>⚠</span>
+                <span style={{color:T.muted,fontSize:13}}>No acquirer contract loaded — proposals will not include your cost layer.</span>
+                <button style={{...S.bannerLink,color:T.gold}} onClick={()=>setPage("settings")}>Add in Settings →</button>
+              </div>
+            )}
+
+            {/* ══ UPLOAD ══ */}
+            {step === "upload" && (
+              <div style={S.panel}>
+                <h1 style={S.h1}>Upload Merchant Statement</h1>
+                <p style={S.sub}>Upload a PDF or image of any merchant processing statement.</p>
+                <div style={{...S.dropzone,...(dragOver?S.dropzoneActive:{}),...(file?S.dropzoneDone:{})}}
+                  onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)}
+                  onDrop={e=>{e.preventDefault();setDragOver(false);const f=e.dataTransfer.files[0];if(f){setFile(f);readFile(f,setFileData);}}}
+                  onClick={()=>fileRef.current.click()}>
+                  <input ref={fileRef} type="file" accept=".pdf,image/*" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];if(f){setFile(f);readFile(f,setFileData);}}}/>
+                  {file?(<><div style={S.fileIcon}>✓</div><p style={S.fileName}>{file.name}</p><p style={S.fileMeta}>{(file.size/1024).toFixed(1)} KB · Click to replace</p></>)
+                  :(<><div style={S.uploadIcon}>⬆</div><p style={S.dropLabel}>Drop statement here or click to browse</p><p style={S.dropMeta}>PDF or image · Any processor format</p></>)}
+                </div>
+                <div style={S.chips}>{["Stripe","Square","First Data","TSYS","Heartland","Worldpay","Chase Paymentech","Elavon"].map(p=><div key={p} style={S.chip}>{p}</div>)}</div>
+                <button style={{...S.btn,...S.btnPrimary,opacity:file?1:0.4}} disabled={!file||loading} onClick={analyzeStatement}>Analyze Statement →</button>
+              </div>
+            )}
+
+            {/* ══ ANALYSIS ══ */}
+            {step === "analysis" && analysis && (
+              <div style={S.panel}>
+                <div style={S.panelHeader}>
+                  <div><h1 style={S.h1}>{analysis.merchantName||"Merchant"} — Analysis</h1>
+                    <p style={S.sub}>{analysis.processingMonth} · {analysis.currentProcessorName} · Confidence: <span style={{color:analysis.confidence==="high"?T.green:analysis.confidence==="medium"?T.gold:T.red}}>{analysis.confidence}</span></p>
+                  </div>
+                  <div style={S.badge}>{analysis.currentPricingModel?.replace("-"," ").toUpperCase()}</div>
+                </div>
+                {/* ── IC+ back-calculated interchange banner ── */}
+                {analysis.interchangeNotShown && (
+                  <div style={{margin:"12px 0",padding:"12px 16px",background:"#1e1b4b",border:"1px solid #6366f180",borderRadius:10,display:"flex",gap:12,alignItems:"flex-start"}}>
+                    <span style={{fontSize:18,flexShrink:0}}>ℹ️</span>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:700,color:"#a5b4fc",marginBottom:3}}>
+                        IC+ Statement — Interchange Back-Calculated ({analysis.currentProcessorName})
+                      </div>
+                      <div style={{fontSize:12,color:"#94a3b8",lineHeight:1.6}}>
+                        This statement shows total fees but does not itemize interchange separately.
+                        Markup fees were calculated from the stated rates ({fmtPct2(analysis.statedMarkupRate||0)} + ${(analysis.statedPerTxnFee||0).toFixed(2)}/txn).
+                        <strong style={{color:"#c7d2fe"}}> Interchange = total fees − markup − other fees</strong> (back-calculated from the statement total).
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div style={S.grid4}>
+                  {[
+                    {label:"Monthly Volume",  val:fmt$(analysis.totalVolume)},
+                    {label:"Total Fees",       val:fmt$(analysis.totalFees),  accent:true},
+                    {label:"Effective Rate",   val:fmtPct2(analysis.effectiveRate), accent:true},
+                    {label:"Avg Ticket",       val:fmt$(analysis.averageTicket)},
+                  ].map(m=>(
+                    <div key={m.label} style={{...S.metricCard,...(m.accent?S.metricAccent:{})}}><div style={S.metricVal}>{m.val}</div><div style={S.metricLbl}>{m.label}</div></div>
+                  ))}
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Fee Structure — 3-Way Split</h2>
+                  {activeTier ? (()=>{
+                    const adyenCost = calcAdyenCost(activeTier, analysis.totalVolume, analysis.totalTransactions);
+                    const adyenRate = adyenCost/(analysis.totalVolume||1);
+                    const myMarkup = Math.max(0,(analysis.processorFees||0)-adyenCost);
+                    const myRate = myMarkup/(analysis.totalVolume||1);
+                    const totalMarkup = myMarkup+(analysis.otherFees||0);
+                    const totalMarkupRate = totalMarkup/(analysis.totalVolume||1);
+                    const rows=[
+                      {name:"Interchange",note:analysis.interchangeNotShown?"Back-calculated: total fees − markup − other fees":"Card network cost — non-negotiable",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6"},
+                      {name:`${activeProcessor.name} Cost`,note:"Your acquirer cost — processing + txn + scheme",amt:adyenCost,rate:adyenRate,color:T.gold},
+                      {name:"Your Markup",note:"Processor markup above interchange & acquirer",amt:myMarkup,rate:myRate,color:T.green},
+                      {name:"Other Fees",note:"Monthly, PCI, misc. — pure margin, no cost to you",amt:analysis.otherFees,rate:(analysis.otherFees||0)/(analysis.totalVolume||1),color:T.green},
+                    ];
+                    return(<div style={S.feeTable}>
+                      {rows.map(r=>(<div key={r.name} style={S.feeRow}>
+                        <div style={S.feeName}><span style={{color:r.color,fontWeight:600}}>{r.name}</span><span style={S.feeNote}>{r.note}</span></div>
+                        <div style={S.feeAmt}>{fmt$(r.amt)}</div><div style={S.feeRate}>{fmtPct(r.rate)}</div>
+                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
+                      </div>))}
+                      <div style={{...S.feeRow,background:`${T.green}08`,borderTop:`2px solid ${T.green}30`}}>
+                        <div style={S.feeName}><span style={{color:T.green,fontWeight:700}}>Total Margin Opportunity</span><span style={S.feeNote}>Everything above interchange & acquirer cost</span></div>
+                        <div style={{...S.feeAmt,color:T.green,fontWeight:700}}>{fmt$(totalMarkup)}</div>
+                        <div style={{...S.feeRate,color:T.green,fontWeight:700}}>{fmtPct(totalMarkupRate)}</div>
+                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min((totalMarkup/(analysis.totalFees||1))*100,100)}%`,background:T.green}}/></div>
+                      </div>
+                    </div>);
+                  })() : (
+                    <div style={S.feeTable}>
+                      {[{name:"Interchange",note:"Pass-through",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6"},{name:"Processor Markup",note:"Where savings are found",amt:analysis.processorFees,rate:analysis.processorMarkup,color:"#f97316"},{name:"Other Fees",note:"Monthly, PCI, misc. — pure margin",amt:analysis.otherFees,rate:(analysis.otherFees||0)/(analysis.totalVolume||1),color:T.green}].map(r=>(
+                        <div key={r.name} style={S.feeRow}>
+                          <div style={S.feeName}><span style={{color:r.color,fontWeight:600}}>{r.name}</span><span style={S.feeNote}>{r.note}</span></div>
+                          <div style={S.feeAmt}>{fmt$(r.amt)}</div><div style={S.feeRate}>{fmtPct(r.rate)}</div>
+                          <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div style={S.highlightBox}>
+                  <div style={S.hlLeft}>
+                    <div style={S.hlTitle}>Total Gross Margin Above Interchange</div>
+                    <div style={S.hlValue}>{fmtPct2(analysis.currentMargin||0)}</div>
+                    <div style={S.hlSub}>Everything the merchant pays above interchange, including processor costs</div>
+                  </div>
+                  <div style={S.hlRight}>
+                    <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$((analysis.processorFees||0)+(analysis.otherFees||0))}</span><span style={S.hlStatLbl}>Monthly Gross</span></div>
+                    <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$(((analysis.processorFees||0)+(analysis.otherFees||0))*12)}</span><span style={S.hlStatLbl}>Annual Gross</span></div>
+                  </div>
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Volume Mix</h2>
+                  <div style={S.grid4}>
+                    {[{label:"Card Present",pct:analysis.cardPresentPct,amt:analysis.cardPresentVolume},{label:"Card Not Present",pct:analysis.cardNotPresentPct,amt:analysis.cardNotPresentVolume},{label:"Reward Cards",pct:analysis.rewardCardPct,amt:(analysis.totalVolume||0)*(analysis.rewardCardPct||0)},{label:"Corporate Cards",pct:analysis.corporateCardPct,amt:(analysis.totalVolume||0)*(analysis.corporateCardPct||0)}].map(m=>(
+                      <div key={m.label} style={S.mixCard}><div style={S.mixLbl}>{m.label}</div><div style={S.mixPct}>{fmtPct2(m.pct||0)}</div><div style={S.mixAmt}>{fmt$(m.amt)}</div></div>
+                    ))}
+                  </div>
+                </div>
+                {analysis.notes && <div style={S.notesBox}><strong>AI Notes:</strong> {analysis.notes}</div>}
+                <div style={S.btnRow}>
+                  <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setStep("upload")}>← Re-upload</button>
+                  <button style={{...S.btn,...S.btnPrimary}} onClick={()=>setStep("pricing")}>Select Pricing Model →</button>
+                </div>
+              </div>
+            )}
+
+            {step === "pricing" && analysis && activeTier !== undefined && (
+              <PricingStep
+                analysis={analysis}
+                activeTier={activeTier || null}
+                activeProcessor={activeProcessor || null}
+                adyenCostRate={adyenCostRate || 0}
+                targetMargin={targetMargin}
+                setTargetMargin={setTargetMargin}
+                pricingModel={pricingModel}
+                setPricingModel={setPricingModel}
+                feeOverrides={feeOverrides}
+                setFeeOverrides={setFeeOverrides}
+                loading={loading}
+                onBack={()=>setStep("analysis")}
+                onGenerate={generateProposal}
+              />
+            )}
+
+            {/* ══ PROPOSAL ══ */}
+            {step === "proposal" && proposal && analysis && (() => {
+          // Compute effective rates directly from dollar amounts — never trust AI-returned rate fields
+          const pVol = analysis.totalVolume || 1;
+          const currentEffRate = (analysis.totalFees || 0) / pVol;
+          const proposedEffRate = (proposal.projectedFees?.monthly || 0) / pVol;
+          const savingsMonthly = (analysis.totalFees || 0) - (proposal.projectedFees?.monthly || 0);
+          const savingsAnnual  = savingsMonthly * 12;
+          const savingsPct     = (analysis.totalFees || 0) > 0 ? savingsMonthly / (analysis.totalFees || 1) : 0;
+          return (
+              <div style={S.panel}>
+                <div style={{textAlign:"center",marginBottom:48,paddingTop:40}}>
+                  <div style={S.proposalBadge}>MERCHANT PROPOSAL</div>
+                  <h1 style={{fontSize:42,fontWeight:800,color:T.white,margin:"12px 0",letterSpacing:-1}}>{analysis.merchantName||"Merchant"}</h1>
+                  <p style={{fontSize:16,color:T.muted,maxWidth:600,margin:"0 auto",lineHeight:1.7}}>{proposal.proposalSummary}</p>
+                </div>
+                <div style={S.savingsHero}>
+                  <div style={{flex:1,minWidth:240}}>
+                    <div style={{fontSize:12,color:T.green,letterSpacing:2,textTransform:"uppercase",marginBottom:12}}>Annual Savings for Merchant</div>
+                    <div style={{fontSize:56,fontWeight:900,color:T.green,lineHeight:1}}>{fmt$(savingsAnnual)}</div>
+                    <div style={{fontSize:14,color:T.green+"80",marginTop:8}}>{fmtPct2(Math.abs(savingsPct))} reduction in costs</div>
+                  </div>
+                  <div style={{display:"flex",gap:24,alignItems:"center",flexWrap:"wrap"}}>
+                    {[{val:fmt$(savingsMonthly),lbl:"Monthly Savings"},{val:fmtPct2(proposedEffRate),lbl:"New Effective Rate"},{val:fmtPct2(currentEffRate),lbl:"Current Rate"}].map((s,i)=>(
+                      <div key={i} style={{display:"flex",gap:24,alignItems:"center"}}>
+                        {i>0&&<div style={{width:1,height:40,background:T.cardBorder}}/>}
+                        <div style={{textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:T.white}}>{s.val}</div><div style={{fontSize:11,color:T.muted,marginTop:4}}>{s.lbl}</div></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{padding:"18px 24px",background:"#0f1628",border:`1px solid ${T.cardBorder}`,borderRadius:12,marginBottom:32,fontSize:14,color:T.muted,lineHeight:1.7,textAlign:"center"}}>
+                  Payments are just one part of the system—AIO connects your POS, ordering, staffing, and back-office tools into a single platform, reducing manual work and giving you a clearer view of your business.
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Proposed Rates</h2>
+                  <div style={S.grid4}>
+                    {proposal.pricingModel==="2-tier"&&(<><div style={S.rateCard}><div style={S.rateLbl}>Card Present</div><div style={S.rateVal}>{fmtPct2(proposal.proposedRates?.cardPresentRate||0)}</div><div style={S.rateSub}>+${(proposal.proposedRates?.cardPresentPerTxn||0).toFixed(2)}/txn</div></div><div style={S.rateCard}><div style={S.rateLbl}>Card Not Present</div><div style={S.rateVal}>{fmtPct2(proposal.proposedRates?.cardNotPresentRate||0)}</div><div style={S.rateSub}>+${(proposal.proposedRates?.cardNotPresentPerTxn||0).toFixed(2)}/txn</div></div></>)}
+                    {proposal.pricingModel==="interchange-plus"&&(<><div style={S.rateCard}><div style={S.rateLbl}>Markup</div><div style={S.rateVal}>{proposal.proposedRates?.basisPoints||0} BPS</div><div style={S.rateSub}>above interchange</div></div><div style={S.rateCard}><div style={S.rateLbl}>Per Transaction</div><div style={S.rateVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={S.rateSub}>auth fee</div></div>{proposal.proposedRates?.monthlyFee>0&&<div style={S.rateCard}><div style={S.rateLbl}>Monthly</div><div style={S.rateVal}>{fmt$(proposal.proposedRates?.monthlyFee)}</div><div style={S.rateSub}>platform fee</div></div>}</>)}
+                    {proposal.pricingModel==="flat-rate"&&(<><div style={S.rateCard}><div style={S.rateLbl}>All Cards</div><div style={S.rateVal}>{fmtPct2(proposal.proposedRates?.flatRate||0)}</div><div style={S.rateSub}>single flat rate</div></div><div style={S.rateCard}><div style={S.rateLbl}>Per Transaction</div><div style={S.rateVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={S.rateSub}>auth fee</div></div></>)}
+                  </div>
+                </div>
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Fee Comparison</h2>
+                  <div style={S.compareTable}>
+                    <div style={S.compareHead}>{["Category","Current","Proposed","Savings"].map(h=><div key={h} style={S.compareCell}>{h}</div>)}</div>
+                    {[
+                  {category:"Monthly Processing Fees", current:analysis.totalFees, proposed:proposal.projectedFees?.monthly, savings:savingsMonthly},
+                  {category:"Annual Processing Fees",  current:(analysis.totalFees||0)*12, proposed:(proposal.projectedFees?.monthly||0)*12, savings:savingsAnnual},
+                  {category:"Effective Rate", current:currentEffRate, proposed:proposedEffRate, savings:currentEffRate-proposedEffRate, isRate:true},
+                ].map((r,i)=>(
+                      <div key={i} style={{...S.compareRow,...(i%2===0?{background:"#0f162808"}:{})}}>
+                        <div style={S.compareCell}>{r.category}</div>
+                        <div style={{...S.compareCell,color:T.red}}>{r.isRate ? fmtPct2(r.current) : fmt$(r.current)}</div>
+                        <div style={{...S.compareCell,color:"#3b82f6"}}>{r.isRate ? fmtPct2(r.proposed) : fmt$(r.proposed)}</div>
+                        <div style={{...S.compareCell,color:T.green,fontWeight:700}}>{r.isRate ? fmtPct2(r.savings) : fmt$(r.savings)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+
+
+                <div style={S.section}>
+                  <h2 style={S.h2}>Key Value Points</h2>
+                  <div style={S.vpGrid}>
+                    {[
+                      "One platform for payments, POS, and operations—no more disconnected systems",
+                      `Clear, predictable pricing with immediate annual savings of ${fmt$(savingsAnnual)}`,
+                      "Real-time visibility into sales, costs, and performance across your business",
+                      "Less manual work for your team through automation and AI-powered workflows"
+                    ].map((p,i)=>(
+                      <div key={i} style={S.vpCard}><span style={{fontSize:20,fontWeight:800,color:T.accent+"60",flexShrink:0}}>{String(i+1).padStart(2,"0")}</span><span style={{fontSize:14,color:T.text,lineHeight:1.5}}>{p}</span></div>
+                    ))}
+                  </div>
+                </div>
+                <div style={S.btnRow}>
+                  <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setStep("pricing")}>← Adjust Pricing</button>
+                  <button style={{...S.btn,...S.btnPrimary}} onClick={()=>printProposal(proposal,analysis,activeTier,activeProcessor,targetMargin,netMargin,fmtPct2,fmt$)}>
+                    Generate Customer Proposal
+                  </button>
+                  <button style={{...S.btn,...S.btnGhost}} onClick={()=>{setStep("upload");setFile(null);setFileData(null);setAnalysis(null);setProposal(null);setPricingModel(null);}}>New Proposal</button>
+                </div>
+                {/* Apply CTA */}
+                <div style={{marginTop:32,padding:"28px 32px",background:"linear-gradient(135deg,#0a1628,#0f1e3d)",border:`1px solid ${T.blue}30`,borderRadius:16,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:20}}>
+                  <div>
+                    <div style={{fontSize:18,fontWeight:800,color:T.white,marginBottom:6}}>Ready to move forward?</div>
+                    <div style={{fontSize:14,color:T.muted}}>Complete the payment processing application to get {analysis.merchantName||"this merchant"} onboarded with AIO.</div>
+                  </div>
+                  <button style={{...S.btn,...S.btnPrimary,fontSize:16,padding:"16px 36px",background:"linear-gradient(135deg,#0ea5e9,#0284c7)",boxShadow:"0 6px 24px rgba(14,165,233,0.35)",flexShrink:0}} onClick={()=>setStep("apply")}>
+                    Apply for Processing →
+                  </button>
+                </div>
+              </div>
+          );
+        })()}
+            {step === "apply" && proposal && analysis && (
+              <ApplyStep
+                analysis={analysis}
+                proposal={proposal}
+                onBack={()=>setStep("proposal")}
+                onNewProposal={()=>{setStep("upload");setFile(null);setFileData(null);setAnalysis(null);setProposal(null);setPricingModel(null);}}
+              />
+            )}
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ─── Apply Step ───────────────────────────────────────────────────────────────
+function ApplyStep({ analysis, proposal, onBack, onNewProposal }) {
+  const fmtPct2 = n => `${((n||0)*100).toFixed(2)}%`;
+  const fmt$    = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:0}).format(n||0);
+
+  const vol = analysis.totalVolume || 0;
+  const savingsAnnual = ((analysis.totalFees||0) - (proposal.projectedFees?.monthly||0)) * 12;
+
+  const [submitted, setSubmitted] = useState(false);
+  const [adyenProgress, setAdyenProgress] = useState(null); // null | array of step objects
+  const [section, setSection] = useState(0); // 0–4
+
+  const [biz, setBiz] = useState({
+    legalName: analysis.merchantName || "",
+    dba: analysis.merchantName || "",
+    bizType: "llc",
+    address: "", city: "", state: "", zip: "",
+    phone: "", website: "",
+    yearsInBusiness: "", annualRevenue: String(Math.round((vol||0)*12)),
+    taxId: "",
+  });
+  const [owner, setOwner] = useState({
+    firstName: "", lastName: "", title: "Owner",
+    email: "", phone: "", dob: "", ssn: "", ownershipPct: "100",
+    address: "", city: "", state: "", zip: "",
+  });
+  const [processing, setProcessing] = useState({
+    monthlyVolume: String(Math.round(vol||0)),
+    avgTicket: String(Math.round(analysis.averageTicket||0)),
+    cardPresentPct: String(Math.round((analysis.cardPresentPct||0.7)*100)),
+    mcc: "", businessDescription: "",
+    previouslyTerminated: "no", bankruptcy: "no",
+    currentProcessor: analysis.currentProcessorName || "",
+  });
+  const [banking, setBanking] = useState({
+    bankName: "", accountType: "checking",
+    routingNumber: "", accountNumber: "", accountConfirm: "",
+  });
+  const [agreement, setAgreement] = useState({
+    sigName: "", sigDate: new Date().toISOString().slice(0,10),
+    termsAccepted: false, electronicConsentAccepted: false,
+  });
+
+  const sections = [
+    { title: "Business Information",   icon: "🏢" },
+    { title: "Owner Information",      icon: "👤" },
+    { title: "Processing Details",     icon: "💳" },
+    { title: "Banking Information",    icon: "🏦" },
+    { title: "Agreement & Signature",  icon: "✍️"  },
+  ];
+
+  const inp = (val, setter, key, placeholder, type="text", opts=null) => (
+    opts ? (
+      <select value={val[key]} onChange={e=>setter(p=>({...p,[key]:e.target.value}))} style={AS.input}>
+        {opts.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+      </select>
+    ) : (
+      <input type={type} placeholder={placeholder} value={val[key]}
+        onChange={e=>setter(p=>({...p,[key]:e.target.value}))}
+        style={AS.input}
+        onFocus={e=>e.target.style.borderColor="#0ea5e9"}
+        onBlur={e=>e.target.style.borderColor="#1e2d45"}
+      />
+    )
+  );
+
+  const field = (label, val, setter, key, placeholder, type="text", opts=null, span=1) => (
+    <div key={key} style={{gridColumn:`span ${span}`}}>
+      <label style={AS.label}>{label}</label>
+      {inp(val, setter, key, placeholder, type, opts)}
+    </div>
+  );
+
+  const handleSubmit = async () => {
+    // Always persist locally first
+    const app = {
+      id: Date.now(),
+      submittedAt: new Date().toISOString(),
+      merchantName: biz.dba || biz.legalName,
+      analysis, proposal, savingsAnnual,
+      business: biz, owner, processing,
+      banking: { ...banking, accountNumber: "****"+banking.accountNumber.slice(-4), accountConfirm: undefined },
+      agreement: { sigName: agreement.sigName, sigDate: agreement.sigDate },
+    };
+    try {
+      const existing = JSON.parse(localStorage.getItem("aio_applications")||"[]");
+      existing.unshift(app);
+      localStorage.setItem("aio_applications", JSON.stringify(existing.slice(0,500)));
+    } catch {}
+
+    const adyenCfg = getAdyenConfig();
+    if (!adyenCfg.lemApiKey || !adyenCfg.managementApiKey) {
+      // No Adyen keys configured — skip API calls
+      setSubmitted(true);
+      return;
+    }
+
+    // ── Adyen onboarding flow ──────────────────────────────────────────────
+    const ADYEN_STEPS = [
+      { key:"org",      label:"Create Organization Legal Entity" },
+      { key:"indiv",    label:"Create Owner Legal Entity" },
+      { key:"assoc",    label:"Link Owner as UBO & Signatory" },
+      { key:"bizline",  label:"Create Business Line" },
+      { key:"bank",     label:"Add Bank Account" },
+      { key:"merchant", label:"Create Merchant Account" },
+    ];
+    const initSteps = ADYEN_STEPS.map((s,i) => ({ ...s, status: i===0?"running":"pending", adyenId:null, error:null }));
+    setAdyenProgress(initSteps);
+
+    const tick = (key, status, adyenId=null, error=null) =>
+      setAdyenProgress(prev => {
+        const idx = prev.findIndex(s=>s.key===key);
+        return prev.map((s,i) => {
+          if (s.key === key) return { ...s, status, adyenId, error };
+          if (i === idx+1 && status === "done") return { ...s, status:"running" };
+          return s;
+        });
+      });
+
+    const lemKey  = adyenCfg.lemApiKey;
+    const mgmtKey = adyenCfg.managementApiKey;
+    let orgId, indivId, businessLineId, transferId, merchantId;
+
+    try {
+      // 1 — Organization
+      const orgPayload = {
+        type: "organization",
+        organization: {
+          legalName: biz.legalName || biz.dba,
+          registeredAddress: { street: biz.address||"N/A", city: biz.city||"N/A", stateOrProvince: biz.state||"N/A", postalCode: biz.zip||"00000", country:"US" },
+          ...(biz.taxId ? { taxInformation:[{ country:"US", number:biz.taxId, type:"EIN" }] } : {}),
+        }
+      };
+      const orgRes = await adyenPost("/legalEntities", lemKey, orgPayload, true);
+      orgId = orgRes.id;
+      tick("org", "done", orgId);
+
+      // 2 — Individual (owner)
+      const rawPhone = (owner.phone||"").replace(/\D/g,"");
+      const indivPayload = {
+        type: "individual",
+        individual: {
+          name: { firstName: owner.firstName||"Unknown", lastName: owner.lastName||"Unknown" },
+          ...(owner.dob ? { dateOfBirth: owner.dob } : {}),
+          ...(owner.address ? {
+            residentialAddress: { street: owner.address, city: owner.city||"N/A", stateOrProvince: owner.state||"N/A", postalCode: owner.zip||"00000", country:"US" }
+          } : {}),
+          ...(rawPhone.length >= 10 ? { phone:{ number:"+1"+rawPhone.slice(-10), type:"mobile" } } : {}),
+          ...(owner.ssn ? { taxInformation:[{ country:"US", number:owner.ssn, type:"SSN" }] } : {}),
+        }
+      };
+      const indivRes = await adyenPost("/legalEntities", lemKey, indivPayload, true);
+      indivId = indivRes.id;
+      tick("indiv", "done", indivId);
+
+      // 3 — Associate owner with org
+      await adyenPatch(`/legalEntities/${orgId}`, lemKey, {
+        entityAssociations:[
+          { legalEntityId: indivId, type:"uboThroughOwnership" },
+          { legalEntityId: indivId, type:"signatory" },
+        ]
+      });
+      tick("assoc", "done", null);
+
+      // 4 — Business line
+      const bizLinePayload = {
+        legalEntityId: orgId,
+        industryCode: processing.mcc || "5812",
+        service: "receivePayments",
+        ...(biz.website
+          ? { webData:[{ webAddress: biz.website.startsWith("http") ? biz.website : "https://"+biz.website }] }
+          : { webDataExemption:{ reason:"noOnlinePresence" } }),
+      };
+      const blRes = await adyenPost("/businessLines", lemKey, bizLinePayload, true);
+      businessLineId = blRes.id;
+      tick("bizline", "done", businessLineId);
+
+      // 5 — Bank account
+      const bankPayload = {
+        legalEntityId: orgId,
+        type: "bankAccount",
+        bankAccount: {
+          countryCode: "US",
+          accountIdentification: {
+            type: "usLocal",
+            bankAccountNumber: banking.accountNumber,
+            routingNumber: banking.routingNumber,
+            accountType: banking.accountType || "checking",
+          }
+        }
+      };
+      const bankRes = await adyenPost("/transferInstruments", lemKey, bankPayload, true);
+      transferId = bankRes.id;
+      tick("bank", "done", transferId);
+
+      // 6 — Merchant account
+      const merchantPayload = {
+        companyId: adyenCfg.companyId || "AIOAppInc",
+        legalEntityId: orgId,
+        businessLineId,
+        description: `${biz.dba||biz.legalName} — AIO Payment Processing`,
+        reference: `aio-${Date.now()}`,
+      };
+      const merchantRes = await adyenPost("/merchants", mgmtKey, merchantPayload, false);
+      merchantId = merchantRes.id;
+      tick("merchant", "done", merchantId);
+
+      // Persist Adyen IDs back to the saved application
+      try {
+        const existing = JSON.parse(localStorage.getItem("aio_applications")||"[]");
+        if (existing.length) {
+          existing[0].adyen = { orgId, indivId, businessLineId, transferId, merchantId, environment: adyenCfg.environment||"test" };
+          localStorage.setItem("aio_applications", JSON.stringify(existing));
+        }
+      } catch {}
+
+      setTimeout(() => setSubmitted(true), 1200);
+    } catch (err) {
+      setAdyenProgress(prev => prev.map(s => s.status==="running" ? {...s, status:"error", error:err.message} : s));
+    }
+  };
+
+  // ── Adyen Progress Overlay ─────────────────────────────────────────────────
+  if (adyenProgress && !submitted) {
+    const hasError = adyenProgress.some(s=>s.status==="error");
+    const allDone  = adyenProgress.every(s=>s.status==="done");
+    const statusIcon = s => s.status==="done"?"✓":s.status==="running"?"⟳":s.status==="error"?"✕":"·";
+    const statusColor = s => s.status==="done"?T.green:s.status==="running"?"#0ea5e9":s.status==="error"?T.red:T.muted;
+    return (
+      <div style={{...S.panel, paddingTop:48, paddingBottom:48}}>
+        <div style={{textAlign:"center",marginBottom:36}}>
+          <div style={{fontSize:13,color:T.muted,textTransform:"uppercase",letterSpacing:2,marginBottom:8}}>Adyen Onboarding</div>
+          <h2 style={{fontSize:26,fontWeight:800,color:T.white,marginBottom:8}}>
+            {hasError ? "Submission Error" : allDone ? "Onboarding Complete!" : "Submitting Application…"}
+          </h2>
+          <p style={{fontSize:14,color:T.muted,maxWidth:480,margin:"0 auto"}}>
+            {hasError ? "One step failed. Review the error below, then retry or continue." : "Creating your Legal Entity, Business Line, and Merchant Account in Adyen."}
+          </p>
+        </div>
+        <div style={{maxWidth:580,margin:"0 auto",display:"flex",flexDirection:"column",gap:10}}>
+          {adyenProgress.map((s,i) => (
+            <div key={s.key} style={{background:T.card,border:`1px solid ${s.status==="error"?"#ef444440":s.status==="done"?"#22c55e30":s.status==="running"?"#0ea5e930":T.cardBorder}`,borderRadius:12,padding:"14px 20px",display:"flex",alignItems:"center",gap:14,transition:"all .3s"}}>
+              <div style={{width:32,height:32,borderRadius:"50%",background:s.status==="running"?"rgba(14,165,233,0.1)":s.status==="done"?"rgba(34,197,94,0.1)":s.status==="error"?"rgba(239,68,68,0.1)":"rgba(255,255,255,0.04)",border:`1.5px solid ${statusColor(s)}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:statusColor(s),fontWeight:700,animation:s.status==="running"?"spin 1.2s linear infinite":"none",flexShrink:0}}>{statusIcon(s)}</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:600,color:s.status==="pending"?T.muted:T.text}}>{i+1}. {s.label}</div>
+                {s.adyenId && <div style={{fontSize:11,color:T.green,fontFamily:"monospace",marginTop:3}}>ID: {s.adyenId}</div>}
+                {s.error   && <div style={{fontSize:11,color:T.red,marginTop:3,lineHeight:1.4}}>{s.error}</div>}
+              </div>
+              <div style={{fontSize:11,color:statusColor(s),fontWeight:700,textTransform:"uppercase",letterSpacing:.5}}>{s.status}</div>
+            </div>
+          ))}
+        </div>
+        {hasError && (
+          <div style={{maxWidth:580,margin:"24px auto 0",display:"flex",gap:12,justifyContent:"center"}}>
+            <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setAdyenProgress(null)}>← Fix & Retry</button>
+            <button style={{...S.btn,...S.btnGhost}} onClick={()=>setSubmitted(true)}>Continue Without Adyen →</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (submitted) return (
+    <div style={{...S.panel, textAlign:"center", paddingTop:60, paddingBottom:60}}>
+      <div style={{fontSize:72, marginBottom:24}}>🎉</div>
+      <div style={{fontSize:28,fontWeight:900,color:"#fff",marginBottom:12,letterSpacing:"-0.5px"}}>Application Submitted!</div>
+      <div style={{fontSize:16,color:T.muted,maxWidth:480,margin:"0 auto 36px",lineHeight:1.7}}>
+        {biz.dba||biz.legalName}'s payment processing application has been received. Our team will review and reach out within 1–2 business days to complete onboarding.
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:480,margin:"0 auto 40px"}}>
+        {[
+          {icon:"⚡",text:`Quoted rate: ${fmtPct2(proposal.projectedFees?.monthly/vol||0)} effective rate`},
+          {icon:"💰",text:`Estimated savings: ${fmt$(savingsAnnual)}/year`},
+          {icon:"📧",text:`Confirmation sent to: ${owner.email||"your team"}`},
+        ].map((r,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:12,background:"#0f1628",border:"1px solid #1e2d45",borderRadius:10,padding:"14px 18px",textAlign:"left"}}>
+            <span style={{fontSize:20}}>{r.icon}</span>
+            <span style={{fontSize:14,color:"#e2e8f0"}}>{r.text}</span>
+          </div>
+        ))}
+        {/* Show Adyen IDs if onboarding ran */}
+        {adyenProgress && adyenProgress.some(s=>s.adyenId) && (
+          <div style={{background:"#052e16",border:"1px solid #22c55e30",borderRadius:12,padding:"16px 20px",textAlign:"left"}}>
+            <div style={{fontSize:11,color:"#4ade80",fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:12}}>Adyen Onboarding IDs</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {adyenProgress.filter(s=>s.adyenId).map(s=>(
+                <div key={s.key} style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+                  <span style={{color:"#94a3b8"}}>{s.label}</span>
+                  <span style={{fontFamily:"monospace",color:"#22c55e"}}>{s.adyenId}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap"}}>
+        <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setSubmitted(false)}>← View Application</button>
+        <button style={{...S.btn,...S.btnPrimary}} onClick={onNewProposal}>Start New Proposal</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={S.panel}>
+      {/* Header */}
+      <div style={{marginBottom:36}}>
+        <div style={{fontSize:12,color:T.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:1,fontWeight:600}}>Payment Processing Application</div>
+        <h1 style={{...S.h1,marginBottom:10}}>{biz.dba||analysis.merchantName||"Merchant"}</h1>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+          <div style={{fontSize:13,color:T.muted}}>Proposed rate: <span style={{color:"#0ea5e9",fontWeight:700}}>{fmtPct2((proposal.projectedFees?.monthly||0)/(vol||1))}</span></div>
+          <div style={{fontSize:13,color:T.muted}}>Annual savings: <span style={{color:T.green,fontWeight:700}}>{fmt$(savingsAnnual)}</span></div>
+          <div style={{fontSize:13,color:T.muted}}>Pricing model: <span style={{color:"#e2e8f0",fontWeight:600,textTransform:"capitalize"}}>{proposal.pricingModel}</span></div>
+        </div>
+      </div>
+
+      {/* Section tabs */}
+      <div style={{display:"flex",gap:4,marginBottom:32,flexWrap:"wrap"}}>
+        {sections.map((s,i)=>(
+          <button key={i} onClick={()=>setSection(i)}
+            style={{background:section===i?"#0ea5e9":i<section?"#052e16":"#0f1628",
+              color:section===i?"#fff":i<section?T.green:T.muted,
+              border:`1px solid ${section===i?"#0ea5e9":i<section?T.green+"40":"#1e2d45"}`,
+              borderRadius:8,padding:"8px 14px",fontSize:12,fontWeight:700,cursor:"pointer",
+              display:"flex",alignItems:"center",gap:6}}>
+            {i<section&&<span style={{color:T.green}}>✓</span>} {s.icon} {s.title}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Section 0: Business ── */}
+      {section === 0 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Business Information</h2>
+          <div style={AS.grid}>
+            {field("Legal Business Name",biz,setBiz,"legalName","LLC / Corp name",undefined,undefined,2)}
+            {field("DBA (Doing Business As)",biz,setBiz,"dba","Trade name")}
+            {field("Business Type",biz,setBiz,"bizType","",undefined,[
+              {v:"llc",l:"LLC"},{v:"corp",l:"Corporation"},{v:"s-corp",l:"S-Corp"},
+              {v:"sole-prop",l:"Sole Proprietor"},{v:"partnership",l:"Partnership"},{v:"non-profit",l:"Non-Profit"}
+            ])}
+            {field("Federal Tax ID (EIN)",biz,setBiz,"taxId","XX-XXXXXXX")}
+            {field("Phone",biz,setBiz,"phone","(555) 000-0000","tel")}
+            {field("Website",biz,setBiz,"website","www.yourbusiness.com","url")}
+            {field("Street Address",biz,setBiz,"address","123 Main St",undefined,undefined,2)}
+            {field("City",biz,setBiz,"city","City")}
+            {field("State",biz,setBiz,"state","",undefined,[
+              {v:"",l:"Select state"},
+              ...["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map(s=>({v:s,l:s}))
+            ])}
+            {field("ZIP Code",biz,setBiz,"zip","00000")}
+            {field("Years in Business",biz,setBiz,"yearsInBusiness","e.g. 5")}
+            {field("Annual Revenue",biz,setBiz,"annualRevenue","e.g. 1200000")}
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 1: Owner ── */}
+      {section === 1 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Owner / Principal Information</h2>
+          <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Required for identity verification. Provide info for the primary owner (25%+ ownership).</p>
+          <div style={AS.grid}>
+            {field("First Name",owner,setOwner,"firstName","First")}
+            {field("Last Name",owner,setOwner,"lastName","Last")}
+            {field("Title",owner,setOwner,"title","",undefined,[
+              {v:"Owner",l:"Owner"},{v:"CEO",l:"CEO"},{v:"President",l:"President"},
+              {v:"Partner",l:"Partner"},{v:"Director",l:"Director"},{v:"Manager",l:"Manager"}
+            ])}
+            {field("Ownership %",owner,setOwner,"ownershipPct","e.g. 100")}
+            {field("Email Address",owner,setOwner,"email","owner@business.com","email")}
+            {field("Mobile Phone",owner,setOwner,"phone","(555) 000-0000","tel")}
+            {field("Date of Birth",owner,setOwner,"dob","","date")}
+            {field("SSN (last 4 digits)",owner,setOwner,"ssn","XXXX","password")}
+            {field("Home Address",owner,setOwner,"address","123 Home St",undefined,undefined,2)}
+            {field("City",owner,setOwner,"city","City")}
+            {field("State",owner,setOwner,"state","",undefined,[
+              {v:"",l:"Select state"},
+              ...["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map(s=>({v:s,l:s}))
+            ])}
+            {field("ZIP",owner,setOwner,"zip","00000")}
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 2: Processing ── */}
+      {section === 2 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Processing Details</h2>
+          <div style={AS.grid}>
+            {field("Est. Monthly Volume ($)",processing,setProcessing,"monthlyVolume","e.g. 150000")}
+            {field("Average Ticket ($)",processing,setProcessing,"avgTicket","e.g. 45")}
+            {field("Card Present %",processing,setProcessing,"cardPresentPct","e.g. 80")}
+            {field("Current Processor",processing,setProcessing,"currentProcessor","e.g. Heartland")}
+            {field("MCC Code",processing,setProcessing,"mcc","e.g. 5812 (Restaurants)")}
+            {field("Business Description",processing,setProcessing,"businessDescription","Brief description of products/services sold",undefined,undefined,1)}
+            {field("Previously Terminated?",processing,setProcessing,"previouslyTerminated","",undefined,[{v:"no",l:"No"},{v:"yes",l:"Yes"}])}
+            {field("Bankruptcy in last 7 yrs?",processing,setProcessing,"bankruptcy","",undefined,[{v:"no",l:"No"},{v:"yes",l:"Yes"}])}
+          </div>
+          {/* Proposed rates summary */}
+          <div style={{marginTop:24,background:"#0f1628",border:"1px solid #1e2d45",borderRadius:12,padding:20}}>
+            <div style={{fontSize:11,color:T.muted,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:14}}>Agreed Proposed Rates</div>
+            <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
+              {proposal.pricingModel==="flat-rate"&&<><div style={AS.rateChip}><div style={AS.rateChipVal}>{fmtPct2(proposal.proposedRates?.flatRate||0)}</div><div style={AS.rateChipLbl}>Flat Rate</div></div>{(proposal.proposedRates?.perTransaction||0)>0&&<div style={AS.rateChip}><div style={AS.rateChipVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={AS.rateChipLbl}>Per Transaction</div></div>}</>}
+              {proposal.pricingModel==="2-tier"&&<><div style={AS.rateChip}><div style={AS.rateChipVal}>{fmtPct2(proposal.proposedRates?.cardPresentRate||0)}</div><div style={AS.rateChipLbl}>Card Present</div></div><div style={AS.rateChip}><div style={AS.rateChipVal}>{fmtPct2(proposal.proposedRates?.cardNotPresentRate||0)}</div><div style={AS.rateChipLbl}>Card Not Present</div></div></>}
+              {proposal.pricingModel==="interchange-plus"&&<><div style={AS.rateChip}><div style={AS.rateChipVal}>{proposal.proposedRates?.basisPoints||0} BPS</div><div style={AS.rateChipLbl}>IC+ Markup</div></div><div style={AS.rateChip}><div style={AS.rateChipVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={AS.rateChipLbl}>Per Transaction</div></div></>}
+              {(proposal.proposedRates?.monthlyFee||0)>0&&<div style={AS.rateChip}><div style={AS.rateChipVal}>${(proposal.proposedRates?.monthlyFee||0).toFixed(0)}/mo</div><div style={AS.rateChipLbl}>Monthly Fee</div></div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 3: Banking ── */}
+      {section === 3 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Banking Information</h2>
+          <p style={{fontSize:13,color:T.muted,marginBottom:20}}>This account will be used for daily settlement of your processing volume.</p>
+          <div style={AS.grid}>
+            {field("Bank Name",banking,setBanking,"bankName","e.g. Chase Bank",undefined,undefined,2)}
+            {field("Account Type",banking,setBanking,"accountType","",undefined,[{v:"checking",l:"Checking"},{v:"savings",l:"Savings"}])}
+            <div/>
+            {field("Routing Number",banking,setBanking,"routingNumber","9-digit routing number")}
+            {field("Account Number",banking,setBanking,"accountNumber","Account number","password")}
+            {field("Confirm Account Number",banking,setBanking,"accountConfirm","Re-enter account number","password")}
+          </div>
+          {banking.accountNumber && banking.accountConfirm && banking.accountNumber !== banking.accountConfirm && (
+            <div style={{marginTop:12,padding:"10px 14px",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,fontSize:13,color:"#ef4444"}}>
+              Account numbers do not match.
+            </div>
+          )}
+          <div style={{marginTop:20,padding:"14px 18px",background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,fontSize:13,color:"#1e40af",lineHeight:1.6}}>
+            🔒 Banking information is stored securely. We use bank-level 256-bit encryption and never share your account details with third parties.
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 4: Agreement ── */}
+      {section === 4 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Agreement & Signature</h2>
+          <div style={{background:"#0f1628",border:"1px solid #1e2d45",borderRadius:12,padding:"20px 24px",marginBottom:24,maxHeight:200,overflowY:"auto",fontSize:12,color:T.muted,lineHeight:1.8}}>
+            <strong style={{color:"#e2e8f0"}}>AIO Payment Processing Agreement — Summary of Terms</strong><br/><br/>
+            By submitting this application, the applicant ("Merchant") agrees to the AIO Merchant Processing Agreement ("Agreement"), the terms of which are incorporated herein by reference. The Merchant agrees to process all eligible transactions through AIO's payment processing platform at the rates disclosed in Section 3 of this application. AIO reserves the right to withhold settlement funds in cases of suspected fraud, chargebacks exceeding applicable thresholds, or material misrepresentation on this application. The Merchant acknowledges that interchange fees are set by Visa, Mastercard, and other card networks and are subject to change. AIO will provide 30 days notice of any rate changes except where prohibited by network regulations. The Merchant grants AIO authorization to debit the settlement account for processing fees, chargebacks, and adjustments as detailed in the Agreement. This application constitutes an offer to enter into the Agreement and does not obligate AIO to approve or provide processing services.
+          </div>
+          <div style={AS.grid}>
+            {field("Full Legal Name (Signature)",agreement,setAgreement,"sigName","Type your full name",undefined,undefined,2)}
+            {field("Date",agreement,setAgreement,"sigDate","","date")}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:14,marginTop:20}}>
+            {[
+              {key:"termsAccepted",label:"I have read and agree to the AIO Merchant Processing Agreement and all associated terms and conditions."},
+              {key:"electronicConsentAccepted",label:"I consent to the use of electronic records and signatures in connection with this agreement."},
+            ].map(c=>(
+              <label key={c.key} style={{display:"flex",alignItems:"flex-start",gap:12,cursor:"pointer"}}>
+                <input type="checkbox" checked={agreement[c.key]}
+                  onChange={e=>setAgreement(p=>({...p,[c.key]:e.target.checked}))}
+                  style={{marginTop:2,width:16,height:16,accentColor:"#0ea5e9",flexShrink:0}}/>
+                <span style={{fontSize:13,color:T.muted,lineHeight:1.6}}>{c.label}</span>
+              </label>
+            ))}
+          </div>
+          {/* Summary card */}
+          <div style={{marginTop:28,background:"#052e16",border:`1px solid ${T.green}40`,borderRadius:12,padding:"20px 24px"}}>
+            <div style={{fontSize:12,color:T.green,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:14}}>Application Summary</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {[
+                {l:"Business",v:biz.dba||biz.legalName||"—"},
+                {l:"Owner",v:`${owner.firstName} ${owner.lastName}`.trim()||"—"},
+                {l:"Monthly Volume",v:fmt$(Number(processing.monthlyVolume)||0)},
+                {l:"Pricing Model",v:proposal.pricingModel},
+                {l:"Annual Savings",v:fmt$(savingsAnnual)},
+                {l:"Settlement Account",v:banking.bankName||"—"},
+              ].map(r=>(
+                <div key={r.l}>
+                  <div style={{fontSize:11,color:T.muted,marginBottom:2}}>{r.l}</div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#e2e8f0",textTransform:"capitalize"}}>{r.v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Nav buttons */}
+      <div style={{...S.btnRow, marginTop:36}}>
+        <button style={{...S.btn,...S.btnSecondary}} onClick={()=>section>0?setSection(section-1):onBack()}>
+          ← {section>0?"Previous":"Back to Proposal"}
+        </button>
+        {section < sections.length-1 ? (
+          <button style={{...S.btn,...S.btnPrimary}} onClick={()=>setSection(section+1)}>
+            Continue → {sections[section+1].title}
+          </button>
+        ) : (
+          <button
+            disabled={!agreement.termsAccepted||!agreement.electronicConsentAccepted||!agreement.sigName.trim()}
+            style={{...S.btn,...S.btnPrimary,opacity:(agreement.termsAccepted&&agreement.electronicConsentAccepted&&agreement.sigName.trim())?1:0.4,
+              background:"linear-gradient(135deg,#22c55e,#16a34a)",boxShadow:"0 6px 20px rgba(34,197,94,0.3)"}}
+            onClick={handleSubmit}>
+            ✓ Submit Application
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Apply Step styles
+const AS = {
+  sectionTitle: { fontSize:18, fontWeight:800, color:"#e2e8f0", marginBottom:20, paddingBottom:12, borderBottom:"1px solid #1e2d45" },
+  grid: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:8 },
+  label: { display:"block", fontSize:12, fontWeight:600, color:"#94a3b8", marginBottom:6, letterSpacing:.3 },
+  input: { width:"100%", padding:"11px 14px", borderRadius:8, border:"1.5px solid #1e2d45", background:"#0a0f1e", color:"#e2e8f0", fontSize:14, outline:"none", fontFamily:"inherit" },
+  rateChip: { background:"#0a0f1e", border:"1px solid #1e2d45", borderRadius:10, padding:"12px 16px", textAlign:"center", minWidth:100 },
+  rateChipVal: { fontSize:18, fontWeight:800, color:"#0ea5e9", marginBottom:4 },
+  rateChipLbl: { fontSize:11, color:"#64748b", textTransform:"uppercase", letterSpacing:.5 },
+};
+
+// ─── Generate Customer Proposal (opens new tab with self-contained HTML) ──────
+function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
+  // All string building uses concatenation only — zero template literals to avoid
+  // Babel standalone crashing on nested backtick depth.
+  var safeName      = (analysis.merchantName || 'Merchant').replace(/[^a-zA-Z0-9]/g, '-');
+  var dateStr       = new Date().toISOString().slice(0, 10);
+  var fileName      = 'AIO-Proposal-' + safeName + '-' + dateStr + '.pdf';
+  var preparedDate  = new Date().toLocaleDateString('en-US', {year:'numeric', month:'long', day:'numeric'});
+  var merchantName  = analysis.merchantName || 'Merchant';
+  var vol           = analysis.totalVolume || 1;
+  var currentEffRate  = (analysis.totalFees || 0) / vol;
+  var proposedMonthly = (proposal.projectedFees && proposal.projectedFees.monthly) || 0;
+  var proposedEffRate = proposedMonthly / vol;
+  var savingsMonthly  = (analysis.totalFees || 0) - proposedMonthly;
+  var savingsAnnual   = savingsMonthly * 12;
+  var savingsPct      = analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0;
+  var pricingLabel    = proposal.pricingModel === 'flat-rate' ? 'Flat Rate' : proposal.pricingModel === '2-tier' ? '2-Tier' : 'Interchange Plus';
+  var rates           = proposal.proposedRates || {};
+
+  // Monthly fee card (optional)
+  var mfCard = (rates.monthlyFee || 0) > 0
+    ? '<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">' + fmt$(rates.monthlyFee) + '</div><div class="rate-sub">service fee</div></div>'
+    : '';
+
+  // Rates section
+  var ratesHtml;
+  if (proposal.pricingModel === 'flat-rate') {
+    ratesHtml = '<div class="rate-card"><div class="rate-lbl">All Cards</div><div class="rate-val">' + fmtPct2(rates.flatRate || 0) + '</div><div class="rate-sub">single flat rate</div></div>'
+      + '<div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">$' + (rates.perTransaction || 0).toFixed(2) + '</div><div class="rate-sub">auth fee</div></div>'
+      + mfCard;
+  } else if (proposal.pricingModel === '2-tier') {
+    ratesHtml = '<div class="rate-card"><div class="rate-lbl">Card Present</div><div class="rate-val">' + fmtPct2(rates.cardPresentRate || 0) + '</div><div class="rate-sub">+ $' + (rates.cardPresentPerTxn || 0).toFixed(2) + '/txn</div></div>'
+      + '<div class="rate-card"><div class="rate-lbl">Card Not Present</div><div class="rate-val">' + fmtPct2(rates.cardNotPresentRate || 0) + '</div><div class="rate-sub">+ $' + (rates.cardNotPresentPerTxn || 0).toFixed(2) + '/txn</div></div>'
+      + mfCard;
+  } else {
+    ratesHtml = '<div class="rate-card"><div class="rate-lbl">Markup</div><div class="rate-val">' + (rates.basisPoints || 0) + ' BPS</div><div class="rate-sub">above interchange</div></div>'
+      + '<div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">$' + (rates.perTransaction || 0).toFixed(2) + '</div><div class="rate-sub">auth fee</div></div>'
+      + mfCard;
+  }
+
+  // Key value points
+  var vpItems = [
+    'One platform for payments, POS, and operations\u2014no more disconnected systems',
+    'Clear, predictable pricing with immediate annual savings of ' + fmt$(savingsAnnual),
+    'Real-time visibility into sales, costs, and performance across your business',
+    'Less manual work for your team through automation and AI-powered workflows'
+  ];
+  var kvHtml = '';
+  for (var ki = 0; ki < vpItems.length; ki++) {
+    kvHtml += '<div class="vp"><span class="vp-num">' + String(ki+1).padStart(2,'0') + '</span><span>' + vpItems[ki] + '</span></div>';
+  }
+
+  // Inline script for export (escaped closing tag to prevent early termination)
+  var exportScript = '<scr' + 'ipt src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/scr' + 'ipt>'
+    + '<scr' + 'ipt>'
+    + 'function exportPDF(){'
+    + 'var wrap=document.getElementById("pdf-btn-wrap");'
+    + 'var btn=document.getElementById("pdf-btn");'
+    + 'wrap.style.visibility="hidden";btn.disabled=true;'
+    + 'html2pdf().set({margin:[10,10,10,10],filename:"' + fileName + '",'
+    + 'image:{type:"jpeg",quality:0.98},'
+    + 'html2canvas:{scale:2,useCORS:true,logging:false,backgroundColor:"#ffffff"},'
+    + 'jsPDF:{unit:"mm",format:"letter",orientation:"portrait"}})'
+    + '.from(document.body).save().then(function(){'
+    + 'wrap.style.visibility="visible";btn.disabled=false;});}'
+    + '<\/scr' + 'ipt>';
+
+  var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"/>'
+    + '<title>AIO Proposal \u2014 ' + merchantName + '</title>'
+    + '<style>'
+    + '*{box-sizing:border-box;margin:0;padding:0}'
+    + 'body{font-family:Helvetica Neue,Arial,sans-serif;color:#1a1a1a;background:#fff;padding:48px;font-size:14px;line-height:1.5}'
+    + '.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:40px;padding-bottom:24px;border-bottom:2px solid #e8614a}'
+    + '.logo{display:flex;align-items:center;gap:10px}'
+    + '.logo-text{font-size:22px;font-weight:800;letter-spacing:2px;color:#1a1a1a}'
+    + '.logo-sub{font-size:11px;color:#888;letter-spacing:3px;text-transform:uppercase}'
+    + '.date{font-size:12px;color:#888}'
+    + '.merchant-name{font-size:36px;font-weight:800;color:#1a1a1a;margin-bottom:6px}'
+    + '.proposal-badge{display:inline-block;background:#e8614a;color:#fff;font-size:10px;letter-spacing:3px;padding:4px 14px;border-radius:20px;margin-bottom:12px}'
+    + '.summary{font-size:15px;color:#555;margin-bottom:40px;max-width:600px;line-height:1.7}'
+    + '.savings-box{background:#f0faf4;border:1.5px solid #22c55e;border-radius:12px;padding:28px 32px;display:flex;gap:40px;align-items:center;margin-bottom:36px}'
+    + '.savings-big{font-size:48px;font-weight:900;color:#16a34a;line-height:1}'
+    + '.savings-lbl{font-size:11px;color:#16a34a;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}'
+    + '.savings-pct{font-size:13px;color:#4ade80;margin-top:6px}'
+    + '.savings-stats{display:flex;gap:28px;align-items:center}'
+    + '.stat{text-align:center}'
+    + '.stat-val{font-size:20px;font-weight:700;color:#1a1a1a}'
+    + '.stat-lbl{font-size:11px;color:#888;margin-top:3px}'
+    + '.divider{width:1px;height:36px;background:#ccc}'
+    + 'h2{font-size:11px;font-weight:700;color:#888;letter-spacing:2px;text-transform:uppercase;margin:0 0 14px}'
+    + '.section{margin-bottom:36px}'
+    + '.rates-grid{display:flex;gap:14px;flex-wrap:wrap}'
+    + '.rate-card{background:#f7f7f7;border-radius:8px;padding:18px 20px;min-width:140px;text-align:center}'
+    + '.rate-lbl{font-size:10px;color:#888;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}'
+    + '.rate-val{font-size:26px;font-weight:800;color:#e8614a}'
+    + '.rate-sub{font-size:11px;color:#888;margin-top:5px}'
+    + 'table{width:100%;border-collapse:collapse}'
+    + 'th{text-align:left;font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;padding:10px 16px;background:#f7f7f7}'
+    + 'td{padding:12px 16px;border-bottom:1px solid #eee;font-size:14px}'
+    + '.red{color:#dc2626;font-weight:600}'
+    + '.blue{color:#2563eb;font-weight:600}'
+    + '.green{color:#16a34a;font-weight:700}'
+    + '.vp-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}'
+    + '.vp{background:#f7f7f7;border-radius:8px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start}'
+    + '.vp-num{font-size:18px;font-weight:800;color:#e8614a;opacity:0.5;flex-shrink:0}'
+    + '.footer{margin-top:48px;padding-top:20px;border-top:1px solid #eee;font-size:11px;color:#aaa;display:flex;justify-content:space-between}'
+    + '@media print{body{padding:32px}@page{margin:0.5in;size:A4}}'
+    + '</style></head><body>'
+    // Header
+    + '<div class="header"><div class="logo">'
+    + '<svg width="48" height="30" viewBox="0 0 52 32" fill="none">'
+    + '<path d="M2 26 L11 4 L20 26" stroke="#e8614a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
+    + '<rect x="25" y="13" width="4.5" height="14" rx="2.25" fill="#e8614a"/>'
+    + '<circle cx="27.25" cy="6" r="2.8" fill="#e8614a"/>'
+    + '<rect x="33.5" y="12" width="16" height="15" rx="5.5" stroke="#e8614a" stroke-width="4.5" fill="none"/>'
+    + '</svg>'
+    + '<div><div class="logo-text">AIO</div><div class="logo-sub">Proposal Engine</div></div>'
+    + '</div><div class="date">Prepared ' + preparedDate + '</div></div>'
+    // Merchant name & summary
+    + '<div class="proposal-badge">MERCHANT PROPOSAL</div>'
+    + '<div class="merchant-name">' + merchantName + '</div>'
+    + '<div class="summary">' + (proposal.proposalSummary || '') + '</div>'
+    // Savings box
+    + '<div class="savings-box"><div>'
+    + '<div class="savings-lbl">Annual Savings</div>'
+    + '<div class="savings-big">' + fmt$(savingsAnnual) + '</div>'
+    + '<div class="savings-pct">' + fmtPct2(Math.abs(savingsPct)) + ' reduction in processing costs</div>'
+    + '</div><div class="savings-stats">'
+    + '<div class="stat"><div class="stat-val">' + fmt$(savingsMonthly) + '</div><div class="stat-lbl">Monthly Savings</div></div>'
+    + '<div class="divider"></div>'
+    + '<div class="stat"><div class="stat-val">' + fmtPct2(proposedEffRate) + '</div><div class="stat-lbl">New Effective Rate</div></div>'
+    + '<div class="divider"></div>'
+    + '<div class="stat"><div class="stat-val">' + fmtPct2(currentEffRate) + '</div><div class="stat-lbl">Current Rate</div></div>'
+    + '</div></div>'
+    // Platform blurb
+    + '<div style="padding:14px 20px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:28px;font-size:13px;color:#64748b;line-height:1.7;text-align:center;">'
+    + 'Payments are just one part of the system\u2014AIO connects your POS, ordering, staffing, and back-office tools into a single platform, reducing manual work and giving you a clearer view of your business.'
+    + '</div>'
+    // Pricing rates
+    + '<div class="section"><h2>Proposed ' + pricingLabel + ' Pricing</h2>'
+    + '<div class="rates-grid">' + ratesHtml + '</div></div>'
+    // Fee comparison table
+    + '<div class="section"><h2>Fee Comparison</h2>'
+    + '<table><thead><tr><th>Category</th><th>Current</th><th>Proposed</th><th>Savings</th></tr></thead><tbody>'
+    + '<tr><td>Monthly Processing Fees</td><td class="red">' + fmt$(analysis.totalFees) + '</td><td class="blue">' + fmt$(proposedMonthly) + '</td><td class="green">' + fmt$(savingsMonthly) + '</td></tr>'
+    + '<tr><td>Annual Processing Fees</td><td class="red">' + fmt$((analysis.totalFees||0)*12) + '</td><td class="blue">' + fmt$(proposedMonthly*12) + '</td><td class="green">' + fmt$(savingsAnnual) + '</td></tr>'
+    + '<tr><td>Effective Rate</td><td class="red">' + fmtPct2(currentEffRate) + '</td><td class="blue">' + fmtPct2(proposedEffRate) + '</td><td class="green">' + fmtPct2(currentEffRate - proposedEffRate) + '</td></tr>'
+    + '</tbody></table></div>'
+    // Key value points
+    + '<div class="section"><h2>Key Value Points</h2>'
+    + '<div class="vp-grid">' + kvHtml + '</div></div>'
+    // Footer
+    + '<div class="footer"><span>AIO \u2014 AI for Restaurants</span><span>aioapp.com</span></div>'
+    // Floating PDF button
+    + '<div id="pdf-btn-wrap" style="position:fixed;top:20px;right:20px;z-index:9999;">'
+    + '<button id="pdf-btn" onclick="exportPDF()" style="background:#e8614a;color:#fff;border:none;border-radius:8px;padding:11px 22px;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(232,97,74,0.35);">'
+    + '\u2b07\u00a0Export as PDF</button></div>'
+    + exportScript
+    + '</body></html>';
+
+  var blob = new Blob([html], { type: 'text/html' });
+  var url  = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+  setTimeout(function() { URL.revokeObjectURL(url); }, 60000);
+}
+
+// ─── Pricing Step Component ───────────────────────────────────────────────────
+function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, targetMargin, setTargetMargin, pricingModel, setPricingModel, feeOverrides, setFeeOverrides, loading, onBack, onGenerate }) {
+  if (!analysis) return null;
+  const vol   = analysis.totalVolume || 0;
+  const txns  = analysis.totalTransactions || 0;
+  const annVol = analysis.annualVolume || vol * 12;
+  const icRate = analysis.interchangeRate || 0;
+  const existingMargin = analysis.currentMargin || 0;
+  const currentEffective = analysis.effectiveRate || 0;
+
+  // Net margin after acquirer cost
+  const netMargin = targetMargin - adyenCostRate;
+  const belowFloor = netMargin < 0;
+
+  // AIO minimum margin requirement for this volume
+  const marginReq   = getMarginFloor(vol);
+  const belowAIOMin = targetMargin < marginReq.takeRate;
+
+  // ── Derived rates from fee overrides ──────────────────────────────────────
+  // For flat-rate: targetMargin = flatRate - icRate, but we also need to absorb
+  // monthly fee and per-txn fee. Solve for the % rate that achieves targetMargin.
+  // revenue needed = vol * targetMargin
+  // revenue from perTxn = txns * perTxnFee
+  // revenue from monthly = monthlyFee
+  // remaining needed from % = vol * targetMargin - txns*perTxn - monthlyFee
+  // flatRate = icRate + (remaining / vol)
+  const flatRevNeeded  = vol * targetMargin;
+  const flatFeeRevenue = txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+  const flatPctRevNeeded = Math.max(0, flatRevNeeded - flatFeeRevenue);
+  const derivedFlatRate  = icRate + flatPctRevNeeded / (vol || 1);
+
+  // For 2-tier: split volume between CP and CNP
+  const cpVol  = analysis.cardPresentVolume    || vol * (analysis.cardPresentPct    || 0.7);
+  const cnpVol = analysis.cardNotPresentVolume || vol * (analysis.cardNotPresentPct || 0.3);
+  // CP interchange is typically ~1.5%, CNP ~1.9% — use proportional share of total IC
+  const cpIcRate  = cpVol  > 0 ? (icRate * vol * (analysis.cardPresentPct    || 0.7)) / (cpVol  || 1) : icRate * 0.85;
+  const cnpIcRate = cnpVol > 0 ? (icRate * vol * (analysis.cardNotPresentPct || 0.3)) / (cnpVol || 1) : icRate * 1.15;
+
+  const cpRevNeeded   = cpVol  * targetMargin;
+  const cnpRevNeeded  = cnpVol * targetMargin;
+  const cpFeeRev      = txns * (analysis.cardPresentPct || 0.7) * (feeOverrides.cpPerTxnFee  || 0) + (feeOverrides.monthlyFee || 0) * (analysis.cardPresentPct || 0.7);
+  const cnpFeeRev     = txns * (analysis.cardNotPresentPct || 0.3) * (feeOverrides.cnpPerTxnFee || 0) + (feeOverrides.monthlyFee || 0) * (analysis.cardNotPresentPct || 0.3);
+  const derivedCPRate  = cpIcRate  + Math.max(0, cpRevNeeded  - cpFeeRev)  / (cpVol  || 1);
+  const derivedCNPRate = cnpIcRate + Math.max(0, cnpRevNeeded - cnpFeeRev) / (cnpVol || 1);
+
+  // ── Merchant savings preview ──────────────────────────────────────────────
+  const currentMonthlyFees = analysis.totalFees || 0;
+  let proposedMonthlyFees = 0;
+  if (pricingModel === "flat-rate") {
+    proposedMonthlyFees = vol * derivedFlatRate + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+  } else if (pricingModel === "2-tier") {
+    proposedMonthlyFees = cpVol * derivedCPRate + txns*(analysis.cardPresentPct||0.7)*(feeOverrides.cpPerTxnFee||0)
+      + cnpVol * derivedCNPRate + txns*(analysis.cardNotPresentPct||0.3)*(feeOverrides.cnpPerTxnFee||0)
+      + (feeOverrides.monthlyFee || 0);
+  } else {
+    // interchange-plus: proposed = IC passthrough + markup
+    proposedMonthlyFees = vol * icRate + vol * targetMargin + txns * (feeOverrides.perTxnFee || 0) + (feeOverrides.monthlyFee || 0);
+  }
+  const merchantSavingsMonthly = currentMonthlyFees - proposedMonthlyFees;
+  const merchantSavingsAnnual  = merchantSavingsMonthly * 12;
+  const merchantSavingsPct     = currentMonthlyFees > 0 ? merchantSavingsMonthly / currentMonthlyFees : 0;
+  const proposedEffective      = vol > 0 ? proposedMonthlyFees / vol : 0;
+
+  const [feeInputs, setFeeInputs] = useState({
+    monthlyFee: feeOverrides.monthlyFee > 0 ? String(feeOverrides.monthlyFee) : "",
+    perTxnFee:  feeOverrides.perTxnFee  > 0 ? String(feeOverrides.perTxnFee)  : "",
+    cpPerTxnFee: feeOverrides.cpPerTxnFee > 0 ? String(feeOverrides.cpPerTxnFee) : "",
+    cnpPerTxnFee: feeOverrides.cnpPerTxnFee > 0 ? String(feeOverrides.cnpPerTxnFee) : "",
+  });
+
+  const upd = (k, v) => {
+    setFeeInputs(prev => ({ ...prev, [k]: v }));
+    const parsed = parseFloat(v);
+    setFeeOverrides(prev => ({ ...prev, [k]: isNaN(parsed) ? 0 : parsed }));
+  };
+
+  return (
+    <div style={S.panel}>
+      <h1 style={S.h1}>Configure Your Proposal</h1>
+      <p style={S.sub}>Set your pricing model, fees, and target margin. Rates are calculated automatically to hit your margin.</p>
+
+      {/* Current vs proposed snapshot */}
+      <div style={S.snapshotRow}>
+        <div style={S.snapshotCard}>
+          <div style={S.snapLabel}>Current Processor Margin</div>
+          <div style={{...S.snapVal, color: T.accent}}>{fmtPct2(existingMargin)}</div>
+          <div style={S.snapSub}>above interchange · {fmt$(vol * existingMargin)}/mo</div>
+        </div>
+        <div style={{...S.snapshotCard, background:`${T.green}08`, border:`1px solid ${T.green}30`}}>
+          <div style={S.snapLabel}>Your Target Margin</div>
+          <div style={{...S.snapVal, color: T.green}}>{fmtPct2(targetMargin)}</div>
+          <div style={S.snapSub}>above interchange · {fmt$(vol * targetMargin)}/mo</div>
+        </div>
+        <div style={{...S.snapshotCard, background: merchantSavingsMonthly > 0 ? `${T.green}08` : `${T.red}08`, border:`1px solid ${merchantSavingsMonthly>0?T.green:T.red}30`}}>
+          <div style={S.snapLabel}>Merchant Savings</div>
+          <div style={{...S.snapVal, color: merchantSavingsMonthly > 0 ? T.green : T.red}}>{fmt$(merchantSavingsMonthly)}/mo</div>
+          <div style={S.snapSub}>{fmt$(merchantSavingsAnnual)}/yr · {fmtPct2(Math.abs(merchantSavingsPct))} {merchantSavingsMonthly>=0?"reduction":"increase"}</div>
+        </div>
+        <div style={S.snapshotCard}>
+          <div style={S.snapLabel}>Proposed Effective Rate</div>
+          <div style={{...S.snapVal, color: T.white}}>{pricingModel ? fmtPct2(proposedEffective) : "—"}</div>
+          <div style={S.snapSub}>was {fmtPct2(currentEffective)}</div>
+        </div>
+      </div>
+
+      {/* Pricing model selector */}
+      <div style={S.section}>
+        <h2 style={S.h2}>Pricing Model</h2>
+        <div style={S.modelGrid}>
+          {[
+            {id:"2-tier",name:"2-Tier Pricing",icon:"⬛",desc:"Separate rates for card-present and card-not-present.",pros:["Simple to explain","Predictable costs","Good for high CP volume"],cons:["Less transparent"]},
+            {id:"interchange-plus",name:"Interchange Plus",icon:"◎",desc:"Transparent cost pass-through plus a fixed markup.",pros:["Fully transparent","Lower effective rate"],cons:["Variable bills","More complex"]},
+            {id:"flat-rate",name:"Flat Rate",icon:"▬",desc:"One rate for all card types.",pros:["Simplest billing","Easy to budget"],cons:["May overpay on debit"]},
+          ].map(m=>(
+            <div key={m.id} style={{...S.modelCard,...(pricingModel===m.id?S.modelSelected:{})}} onClick={()=>setPricingModel(m.id)}>
+              <div style={S.modelIcon}>{m.icon}</div><div style={S.modelName}>{m.name}</div><div style={S.modelDesc}>{m.desc}</div>
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:10}}>
+                {m.pros.map(p=><div key={p} style={{fontSize:12,color:T.green}}>✓ {p}</div>)}
+                {m.cons.map(c=><div key={c} style={{fontSize:12,color:T.muted}}>– {c}</div>)}
+              </div>
+              {pricingModel===m.id && <div style={S.selectedBadge}>Selected</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Margin slider */}
+      <div style={S.section}>
+        <h2 style={S.h2}>Target Gross Margin Above Interchange</h2>
+        <div style={S.sliderBox}>
+          {/* Big display + editable text input */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:16,marginBottom:20}}>
+            <div style={{textAlign:"center"}}>
+              <span style={{fontSize:52,fontWeight:800,color:belowAIOMin?T.red:T.accent,display:"block",lineHeight:1}}>{fmtPct2(targetMargin)}</span>
+              <span style={{fontSize:13,color:T.muted}}>gross margin above interchange</span>
+              {belowAIOMin && <span style={{fontSize:12,color:T.red,display:"block",marginTop:4}}>↑ Below AIO minimum ({fmtPct2(marginReq.takeRate)})</span>}
+            </div>
+            {/* Manual type-in input */}
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+              <div style={{display:"flex",alignItems:"center",background:"#0a0f1e",border:`1.5px solid ${belowAIOMin?T.red:T.cardBorder}`,borderRadius:8,overflow:"hidden"}}>
+                <input
+                  type="number"
+                  min="0.01" max="5" step="0.01"
+                  value={((targetMargin||0)*100).toFixed(2)}
+                  onChange={e=>{
+                    const v = parseFloat(e.target.value);
+                    if(!isNaN(v) && v > 0) setTargetMargin(v/100);
+                  }}
+                  style={{width:72,padding:"8px 10px",background:"transparent",color:T.white,border:"none",outline:"none",fontSize:18,fontWeight:700,textAlign:"right"}}
+                />
+                <span style={{padding:"8px 10px 8px 2px",fontSize:16,fontWeight:700,color:T.muted}}>%</span>
+              </div>
+              <span style={{fontSize:10,color:T.muted}}>type to edit</span>
+            </div>
+          </div>
+          <input type="range" min="0.001" max="0.02" step="0.0001" value={Math.min(targetMargin, 0.02)} onChange={e=>setTargetMargin(parseFloat(e.target.value))} style={S.slider}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:T.muted,marginTop:6,marginBottom:8}}>
+            <span style={{color:T.gold}}>▲ {fmtPct2(marginReq.takeRate)} AIO min</span><span>2.00% · use text field for higher</span>
+          </div>
+          {/* AIO Minimum floor callout */}
+          <div style={{padding:"10px 14px",background:`${T.gold}08`,border:`1px solid ${T.gold}25`,borderRadius:8,fontSize:12,color:T.gold,marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
+            <span>AIO Minimum for {fmt$(vol)}/mo volume: <strong>{fmtPct2(marginReq.takeRate)}</strong> take rate · <strong>{fmt$(marginReq.minMRR)}</strong> min MRR</span>
+            {belowAIOMin && <button onClick={()=>setTargetMargin(marginReq.takeRate)} style={{background:T.gold,color:"#000",border:"none",borderRadius:6,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer",flexShrink:0}}>Snap to Minimum</button>}
+          </div>
+          {activeTier && belowFloor && (
+            <div style={S.floorAlert}><span style={{fontSize:18}}>⚠</span><div><div style={{fontWeight:700,color:T.red,marginBottom:4}}>Below Cost Floor</div><div style={{fontSize:13}}>Your gross margin ({fmtPct2(targetMargin)}) is below your {activeProcessor?.name} cost ({fmtPct2(adyenCostRate)}). You'd lose money on this deal.</div></div></div>
+          )}
+          <div style={S.marginStack}>
+            <div style={S.msRow}><div style={S.msLabel}>Gross Margin (above interchange)</div><div style={{...S.msVal,color:T.accent}}>{fmtPct2(targetMargin)}</div><div style={S.msMoney}>{fmt$(vol*targetMargin)}/mo</div></div>
+            {activeTier && (<>
+              <div style={S.msRow}><div style={S.msLabel}>− {activeProcessor?.name} Cost ({activeTier.label})</div><div style={{...S.msVal,color:T.gold}}>{fmtPct2(adyenCostRate)}</div><div style={S.msMoney}>−{fmt$(vol*adyenCostRate)}/mo</div></div>
+              <div style={{paddingLeft:16,display:"flex",flexDirection:"column",gap:3,marginTop:-4,marginBottom:4}}>
+                {(activeTier.processingBps||0)>0 && <div style={{fontSize:11,color:T.muted}}>Processing: {fmtBps(activeTier.processingBps)} × {fmt$(vol)} = {fmt$(vol*(activeTier.processingBps||0))}</div>}
+                {(activeTier.schemeBps||0)>0 && <div style={{fontSize:11,color:T.muted}}>Scheme: {fmtBps(activeTier.schemeBps)} × {fmt$(vol)} = {fmt$(vol*(activeTier.schemeBps||0))}</div>}
+                {(activeTier.perTxnFee||0)>0 && <div style={{fontSize:11,color:T.muted}}>Per-txn: ${(activeTier.perTxnFee||0).toFixed(4)} × {txns} txns = {fmt$(txns*(activeTier.perTxnFee||0))}</div>}
+                {(activeTier.monthlyFee||0)>0 && <div style={{fontSize:11,color:T.muted}}>Monthly fee: {fmt$(activeTier.monthlyFee||0)}</div>}
+              </div>
+            </>)}
+            <div style={{...S.msRow,...S.msTotal}}><div style={S.msLabel}>= Your Net Margin</div><div style={{...S.msVal,color:belowFloor?T.red:T.green,fontSize:20,fontWeight:800}}>{fmtPct2(netMargin)}</div><div style={{...S.msMoney,color:belowFloor?T.red:T.green,fontWeight:700}}>{fmt$(vol*netMargin)}/mo</div></div>
+            <div style={S.msArrRow}><span style={S.msArrLabel}>Net ARR</span><span style={{...S.msArrVal,color:belowFloor?T.red:T.blue}}>{fmt$(annVol*netMargin)}</span></div>
+            <div style={{marginTop:10,padding:"8px 12px",background:belowAIOMin?`${T.red}10`:`${T.gold}08`,border:`1px solid ${belowAIOMin?T.red:T.gold}30`,borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
+              <span style={{color:T.gold}}>AIO Minimum Take Rate</span>
+              <span style={{color:belowAIOMin?T.red:T.gold,fontWeight:700}}>{fmtPct2(marginReq.takeRate)} · {fmt$(marginReq.minMRR)}/mo MRR floor</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Fee configuration — flat rate */}
+      {pricingModel === "flat-rate" && (
+        <div style={S.section}>
+          <h2 style={S.h2}>Flat Rate — Fee Configuration</h2>
+          <div style={S.feeConfigBox}>
+            <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Set any fixed fees below. The discount rate is automatically calculated so your total revenue still hits your target margin.</p>
+            <div style={S.feeConfigGrid}>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Monthly Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.monthlyFee} placeholder="0.00" onChange={e=>upd("monthlyFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/mo</span></div>
+                <div style={S.feeConfigHint}>Flat monthly service fee</div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Per Transaction Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.perTxnFee} placeholder="0.00" onChange={e=>upd("perTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+                <div style={S.feeConfigHint}>Applied to every transaction</div>
+              </div>
+              <div style={{...S.feeConfigField,...S.feeConfigResult}}>
+                <label style={S.manualLabel}>Calculated Discount Rate</label>
+                <div style={{fontSize:32,fontWeight:800,color:T.accent,margin:"8px 0"}}>{fmtPct2(derivedFlatRate)}</div>
+                <div style={S.feeConfigHint}>Rate needed to hit {fmtPct2(targetMargin)} margin after fees</div>
+              </div>
+            </div>
+            <div style={S.feeBreakdown}>
+              {[
+                {label:"Revenue from % rate", val: fmt$(vol * derivedFlatRate)},
+                {label:"Revenue from per-txn", val: fmt$(txns * (feeOverrides.perTxnFee||0))},
+                {label:"Revenue from monthly fee", val: fmt$(feeOverrides.monthlyFee||0)},
+                {label:"Total gross revenue", val: fmt$(proposedMonthlyFees), bold:true, color:T.accent},
+                {label:"Merchant saves vs. current", val: fmt$(merchantSavingsMonthly), bold:true, color: merchantSavingsMonthly>=0?T.green:T.red},
+              ].map((r,i)=>(
+                <div key={i} style={{...S.feeBreakdownRow,...(r.bold?{borderTop:`1px solid ${T.cardBorder}`,marginTop:4,paddingTop:8}:{})}}>
+                  <span style={{fontSize:13,color:T.muted}}>{r.label}</span>
+                  <span style={{fontSize:14,fontWeight:r.bold?700:400,color:r.color||T.white}}>{r.val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fee configuration — 2-tier */}
+      {pricingModel === "2-tier" && (
+        <div style={S.section}>
+          <h2 style={S.h2}>2-Tier Pricing — Fee Configuration</h2>
+          <div style={S.feeConfigBox}>
+            <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Set per-transaction fees for each tier. Discount rates are calculated automatically to hit your target margin across the blended volume.</p>
+            <div style={S.feeConfigGrid}>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Monthly Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.monthlyFee} placeholder="0.00" onChange={e=>upd("monthlyFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/mo</span></div>
+                <div style={S.feeConfigHint}>Shared monthly service fee</div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Card Present Per-Txn ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.cpPerTxnFee} placeholder="0.00" onChange={e=>upd("cpPerTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+                <div style={S.feeConfigHint}>CP transactions</div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Card Not Present Per-Txn ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.cnpPerTxnFee} placeholder="0.00" onChange={e=>upd("cnpPerTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+                <div style={S.feeConfigHint}>CNP transactions</div>
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginTop:20}}>
+              {[
+                {label:"Card Present Rate", rate:derivedCPRate, vol:cpVol, txnFee:feeOverrides.cpPerTxnFee||0, pct:analysis.cardPresentPct||0.7, color:"#3b82f6"},
+                {label:"Card Not Present Rate", rate:derivedCNPRate, vol:cnpVol, txnFee:feeOverrides.cnpPerTxnFee||0, pct:analysis.cardNotPresentPct||0.3, color:T.accent},
+              ].map(r=>(
+                <div key={r.label} style={{...S.feeConfigResult, background:T.card, border:`1px solid ${r.color}40`, borderRadius:10, padding:20}}>
+                  <div style={{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>{r.label}</div>
+                  <div style={{fontSize:36,fontWeight:800,color:r.color}}>{fmtPct2(r.rate)}</div>
+                  <div style={{fontSize:12,color:T.muted,marginTop:6}}>+ ${r.txnFee.toFixed(2)}/txn</div>
+                  <div style={{fontSize:12,color:T.muted,marginTop:4}}>{fmt$(r.vol)} volume · {fmtPct2(r.pct)} of total</div>
+                </div>
+              ))}
+            </div>
+            <div style={S.feeBreakdown}>
+              {[
+                {label:"CP revenue (rate + per-txn)", val: fmt$(cpVol*derivedCPRate + txns*(analysis.cardPresentPct||0.7)*(feeOverrides.cpPerTxnFee||0))},
+                {label:"CNP revenue (rate + per-txn)", val: fmt$(cnpVol*derivedCNPRate + txns*(analysis.cardNotPresentPct||0.3)*(feeOverrides.cnpPerTxnFee||0))},
+                {label:"Monthly fee revenue", val: fmt$(feeOverrides.monthlyFee||0)},
+                {label:"Total gross revenue", val: fmt$(proposedMonthlyFees), bold:true, color:T.accent},
+                {label:"Merchant saves vs. current", val: fmt$(merchantSavingsMonthly), bold:true, color:merchantSavingsMonthly>=0?T.green:T.red},
+              ].map((r,i)=>(
+                <div key={i} style={{...S.feeBreakdownRow,...(r.bold?{borderTop:`1px solid ${T.cardBorder}`,marginTop:4,paddingTop:8}:{})}}>
+                  <span style={{fontSize:13,color:T.muted}}>{r.label}</span>
+                  <span style={{fontSize:14,fontWeight:r.bold?700:400,color:r.color||T.white}}>{r.val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* IC+ fee config */}
+      {pricingModel === "interchange-plus" && (
+        <div style={S.section}>
+          <h2 style={S.h2}>Interchange Plus — Fee Configuration</h2>
+          <div style={S.feeConfigBox}>
+            <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Set optional fixed fees. The BPS markup is driven by your target margin slider above.</p>
+            <div style={S.feeConfigGrid}>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Monthly Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.monthlyFee} placeholder="0.00" onChange={e=>upd("monthlyFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/mo</span></div>
+              </div>
+              <div style={S.feeConfigField}>
+                <label style={S.manualLabel}>Per Transaction Fee ($)</label>
+                <div style={S.manualInputRow}><input type="text" inputMode="decimal" value={feeInputs.perTxnFee} placeholder="0.00" onChange={e=>upd("perTxnFee",e.target.value)} style={S.manualInput}/><span style={S.manualUnit}>$/txn</span></div>
+              </div>
+              <div style={{...S.feeConfigResult, background:T.card, border:`1px solid ${T.accent}40`, borderRadius:10, padding:20}}>
+                <div style={{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>BPS Markup</div>
+                <div style={{fontSize:36,fontWeight:800,color:T.accent}}>{Math.round(targetMargin*10000)} BPS</div>
+                <div style={{fontSize:12,color:T.muted,marginTop:6}}>above interchange pass-through</div>
+              </div>
+            </div>
+            <div style={S.feeBreakdown}>
+              {[
+                {label:"Revenue from BPS markup", val: fmt$(vol*targetMargin)},
+                {label:"Revenue from per-txn", val: fmt$(txns*(feeOverrides.perTxnFee||0))},
+                {label:"Monthly fee revenue", val: fmt$(feeOverrides.monthlyFee||0)},
+                {label:"Total gross revenue", val: fmt$(proposedMonthlyFees), bold:true, color:T.accent},
+                {label:"Merchant saves vs. current", val: fmt$(merchantSavingsMonthly), bold:true, color:merchantSavingsMonthly>=0?T.green:T.red},
+              ].map((r,i)=>(
+                <div key={i} style={{...S.feeBreakdownRow,...(r.bold?{borderTop:`1px solid ${T.cardBorder}`,marginTop:4,paddingTop:8}:{})}}>
+                  <span style={{fontSize:13,color:T.muted}}>{r.label}</span>
+                  <span style={{fontSize:14,fontWeight:r.bold?700:400,color:r.color||T.white}}>{r.val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={S.btnRow}>
+        <button style={{...S.btn,...S.btnSecondary}} onClick={onBack}>← Back</button>
+        <button style={{...S.btn,...S.btnPrimary,opacity:(pricingModel&&!belowFloor)?1:0.4}} disabled={!pricingModel||belowFloor||loading} onClick={onGenerate}>Generate Proposal →</button>
+        {belowAIOMin && !belowFloor && <span style={{fontSize:12,color:T.gold,alignSelf:"center"}}>⚠ Below AIO minimum — manager approval may be required</span>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Adyen API Helpers ────────────────────────────────────────────────────────
+function getAdyenConfig() {
+  try { return JSON.parse(localStorage.getItem("clearrate:adyen_config") || "{}"); } catch { return {}; }
+}
+function saveAdyenConfig(cfg) {
+  localStorage.setItem("clearrate:adyen_config", JSON.stringify(cfg));
+}
+
+// apiType: "lem" | "management" | "balancePlatform"
+async function adyenReq(method, urlPath, apiKey, body, apiType = "lem") {
+  const config = getAdyenConfig();
+  const env    = config.environment || "test";
+  const proxy  = config.corsProxy   || "https://corsproxy.io/?";
+  let base;
+  if (apiType === "balancePlatform") {
+    base = env === "live"
+      ? "https://balanceplatform-api-live.adyen.com/bcl/v2"
+      : "https://balanceplatform-api-test.adyen.com/bcl/v2";
+  } else if (apiType === "management") {
+    base = env === "live" ? "https://management-live.adyen.com/v3" : "https://management-test.adyen.com/v3";
+  } else {
+    base = env === "live" ? "https://kyc-live.adyen.com/lem/v3" : "https://kyc-test.adyen.com/lem/v3";
+  }
+  const target  = base + urlPath;
+  const fullUrl = proxy ? proxy + encodeURIComponent(target) : target;
+  const res = await fetch(fullUrl, {
+    method,
+    headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const msg = data?.detail || data?.message || data?.title || data?.errorCode
+              || (data?.invalidFields?.[0]?.message) || JSON.stringify(data).slice(0, 300);
+    throw new Error(msg);
+  }
+  return data;
+}
+// Legacy boolean isLem support (true=lem, false=management)
+const adyenPost  = (path, key, body, isLem=true)  => adyenReq("POST",  path, key, body, isLem === false ? "management" : "lem");
+const adyenPatch = (path, key, body)               => adyenReq("PATCH", path, key, body, "lem");
+
+// ─── Adyen Config Section ─────────────────────────────────────────────────────
+function AdyenConfigSection() {
+  const [cfg, setCfg] = React.useState(() => getAdyenConfig());
+  const [testing, setTesting] = React.useState(false);
+  const [testResult, setTestResult] = React.useState(null);
+
+  const upd = (k, v) => {
+    const next = { ...cfg, [k]: v };
+    setCfg(next);
+    saveAdyenConfig(next);
+  };
+
+  const testConnection = async () => {
+    const hasAny = cfg.balancePlatformApiKey || cfg.lemApiKey || cfg.managementApiKey;
+    if (!hasAny) { setTestResult({ ok: false, msg: "Enter at least one API key first." }); return; }
+    setTesting(true); setTestResult(null);
+    const env   = cfg.environment || "test";
+    const proxy = cfg.corsProxy   || "https://corsproxy.io/?";
+    const results = [];
+    // Test Balance Platform key
+    if (cfg.balancePlatformApiKey) {
+      try {
+        const base = env === "live" ? "https://balanceplatform-api-live.adyen.com/bcl/v2" : "https://balanceplatform-api-test.adyen.com/bcl/v2";
+        const res  = await fetch(proxy + encodeURIComponent(base + "/balancePlatform"), { headers: { "X-API-Key": cfg.balancePlatformApiKey } });
+        const data = await res.json();
+        results.push(res.ok ? "Balance Platform ✓" : "Balance Platform ✗ " + (data?.detail || data?.message || "HTTP " + res.status));
+      } catch(e) { results.push("Balance Platform ✗ " + e.message); }
+    }
+    // Test LEM key
+    if (cfg.lemApiKey) {
+      try {
+        const base = env === "live" ? "https://kyc-live.adyen.com/lem/v3" : "https://kyc-test.adyen.com/lem/v3";
+        const res  = await fetch(proxy + encodeURIComponent(base + "/legalEntities?pageSize=1"), { headers: { "X-API-Key": cfg.lemApiKey } });
+        const data = await res.json();
+        results.push(res.ok ? "LEM ✓" : "LEM ✗ " + (data?.detail || data?.message || "HTTP " + res.status));
+      } catch(e) { results.push("LEM ✗ " + e.message); }
+    }
+    // Test Management key
+    if (cfg.managementApiKey) {
+      try {
+        const base = env === "live" ? "https://management-live.adyen.com/v3" : "https://management-test.adyen.com/v3";
+        const res  = await fetch(proxy + encodeURIComponent(base + "/companies?pageSize=1"), { headers: { "X-API-Key": cfg.managementApiKey } });
+        const data = await res.json();
+        results.push(res.ok ? "Management ✓" : "Management ✗ " + (data?.detail || data?.message || "HTTP " + res.status));
+      } catch(e) { results.push("Management ✗ " + e.message); }
+    }
+    const allOk = results.every(r => r.includes("✓"));
+    setTestResult({ ok: allOk, msg: results.join("  ·  ") });
+    setTesting(false);
+  };
+
+  const rowStyle = { display:"flex", flexDirection:"column", gap:6 };
+  const lbl  = { fontSize:12, color:T.muted, fontWeight:700, letterSpacing:.5, textTransform:"uppercase" };
+  const inp  = { width:"100%", padding:"10px 13px", borderRadius:8, border:`1px solid ${T.cardBorder}`, background:T.bg, color:T.text, fontSize:13, fontFamily:"monospace", outline:"none" };
+
+  return (
+    <div style={{marginTop:40}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+        <div style={{width:28,height:28,borderRadius:6,background:"#0a1628",border:"1px solid #1e3a5f",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>⚡</div>
+        <h2 style={{...S.h2,margin:0}}>Adyen Integration</h2>
+      </div>
+      <p style={{fontSize:13,color:T.muted,marginBottom:20,lineHeight:1.6}}>
+        Configure your Adyen credentials to automatically create Legal Entities and Merchant Accounts when a processing application is submitted.
+      </p>
+
+      {/* Security warning */}
+      <div style={{padding:"12px 16px",background:"#1c1400",border:"1px solid #f59e0b40",borderRadius:10,fontSize:12,color:"#fbbf24",lineHeight:1.7,marginBottom:24}}>
+        ⚠️ <strong>Security note:</strong> API keys stored here are in browser localStorage. For production use, route Adyen calls through a secure backend. Do not use live keys in shared or public environments.
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
+        <div style={rowStyle}>
+          <label style={lbl}>Environment</label>
+          <select value={cfg.environment||"test"} onChange={e=>upd("environment",e.target.value)} style={inp}>
+            <option value="test">Test</option>
+            <option value="live">Live</option>
+          </select>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>Company ID</label>
+          <input value={cfg.companyId||""} onChange={e=>upd("companyId",e.target.value)} placeholder="AIOAppInc" style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Your top-level company account ID in Adyen</span>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>Balance Platform API Key</label>
+          <input type="password" value={cfg.balancePlatformApiKey||""} onChange={e=>upd("balancePlatformApiKey",e.target.value)} placeholder="AQE..." style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Adyen Dashboard → API Credentials → <strong>Platforms tab → Web service user</strong></span>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>LEM API Key</label>
+          <input type="password" value={cfg.lemApiKey||""} onChange={e=>upd("lemApiKey",e.target.value)} placeholder="AQE..." style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Adyen Dashboard → API Credentials → <strong>Platforms tab → LEM user</strong></span>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>Management API Key</label>
+          <input type="password" value={cfg.managementApiKey||""} onChange={e=>upd("managementApiKey",e.target.value)} placeholder="AQE..." style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Adyen Dashboard → API Credentials → <strong>Payments tab → Web service user</strong></span>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>CORS Proxy URL</label>
+          <input value={cfg.corsProxy||"https://corsproxy.io/?"} onChange={e=>upd("corsProxy",e.target.value)} placeholder="https://corsproxy.io/?" style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Required for direct browser API calls — use your own proxy in production</span>
+        </div>
+      </div>
+
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <button onClick={testConnection} disabled={testing}
+          style={{...S.btn,...S.btnSecondary,opacity:testing?.5:1}}>
+          {testing?"Testing...":"Test Connection"}
+        </button>
+        {testResult && (
+          <span style={{fontSize:13,color:testResult.ok?T.green:T.red}}>{testResult.msg}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Settings Page ────────────────────────────────────────────────────────────
+function SettingsPage({ settings, persistSettings }) {
+  return (
+    <div style={S.panel}>
+      <h1 style={S.h1}>Settings</h1>
+      <p style={S.sub}>Manage acquirer contracts and pricing tiers.</p>
+      <ProcessorsTab settings={settings} persistSettings={persistSettings}/>
+      <AdyenConfigSection/>
+    </div>
+  );
+}
+
+// ─── Processors Tab ───────────────────────────────────────────────────────────
+function ProcessorsTab({ settings, persistSettings }) {
+  const [extractingId, setExtractingId] = useState(null);
+  const [editingTierId, setEditingTierId] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+  const fileRefs = useRef({});
+
+  const addProcessor = () => {
+    const p = newProcessor();
+    const updated = { ...settings, processors: [...(settings.processors||[]), p], activeProcessorId: settings.activeProcessorId || p.id };
+    persistSettings(updated);
+    setExpandedId(p.id);
+  };
+
+  const updateProcessor = (id, changes) => {
+    const updated = { ...settings, processors: settings.processors.map(p => p.id===id ? {...p,...changes} : p) };
+    persistSettings(updated);
+  };
+
+  const deleteProcessor = (id) => {
+    const updated = { ...settings, processors: settings.processors.filter(p=>p.id!==id), activeProcessorId: settings.activeProcessorId===id ? null : settings.activeProcessorId };
+    persistSettings(updated);
+  };
+
+  const setActive = (id) => persistSettings({ ...settings, activeProcessorId: id });
+
+  const setActiveTier = (processorId, tierId) => updateProcessor(processorId, { activeTierId: tierId });
+
+  const extractRates = async (proc, fileData) => {
+    setExtractingId(proc.id);
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method:"POST", headers:{"Content-Type":"application/json","x-api-key":window.__CR_API_KEY||"","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body: JSON.stringify({
+          model:"claude-sonnet-4-20250514", max_tokens:1200,
+          messages:[{role:"user",content:[
+            {type:"document",source:{type:"base64",media_type:"application/pdf",data:fileData}},
+            {type:"text",text:`Extract ALL acquirer/processor cost data from this contract. Return ONLY JSON:
+{
+  "processingBps": number (DECIMAL MULTIPLIER — divide basis points by 10000. 6bps=0.0006, 8bps=0.0008, 25bps=0.0025. Typical range 0.0003–0.005. DO NOT return raw bps integers or percentages),
+  "perTxnFee": number (per-transaction fee in USD, e.g. 0.03),
+  "schemeBps": number (DECIMAL MULTIPLIER same as above. Visa/MC scheme pass-through. 10bps=0.001, 20bps=0.002. Typical range 0.0005–0.002),
+  "monthlyFee": number (fixed monthly USD),
+  "isTiered": boolean,
+  "tiers": [
+    {
+      "id": "tier_1",
+      "label": "Tier 1 — Up to $X/mo",
+      "minVolume": number (monthly volume floor USD, 0 for first tier),
+      "maxVolume": number or null (monthly volume ceiling USD, null for top tier),
+      "processingBps": number (decimal multiplier, same rule as above — 6bps=0.0006),
+      "perTxnFee": number (USD),
+      "schemeBps": number (decimal multiplier — 10bps=0.001),
+      "monthlyFee": number (USD)
+    }
+  ],
+  "currency": "USD",
+  "notes": "string",
+  "confidence": "high|medium|low"
+}
+For tiers, set label like "Tier 1 — $0–$500K/mo", "Tier 2 — $500K–$2M/mo" etc based on the volume thresholds in the contract.
+If not tiered, still populate tiers array with a single entry using the base rates and label "Standard Rate".
+Never use null for numeric fields — use 0. All rate fields must be decimal multipliers (divide bps by 10000).`}
+          ]}]
+        })
+      });
+      const data = await res.json();
+      const parsed = parseJSON(data.content?.map(b=>b.text||"").join("")||"");
+      if (parsed) {
+        // Normalize rate fields to pure decimal multiplier (e.g. 6bps → 0.0006)
+        // AI commonly returns bps as: integer (6), percent-decimal (0.06 for 0.06%=6bps),
+        // large decimal (0.6), or correct multiplier (0.0006).
+        // Realistic max acquirer processing fee is ~150bps = 0.015, so anything >= 0.02 is wrong.
+        const normalizeBps = v => {
+          if (!v || v === 0) return 0;
+          if (v >= 1)    return v / 10000;  // integer bps:          6    → 0.0006
+          if (v >= 0.5)  return v / 1000;   // very large decimal:   0.6  → 0.0006
+          if (v >= 0.02) return v / 100;    // percent-decimal form: 0.06 → 0.0006
+          return v;                          // already correct:      0.0006 ✓
+        };
+        const normalizeTier = t => ({...t, processingBps: normalizeBps(t.processingBps), schemeBps: normalizeBps(t.schemeBps)});
+        parsed.processingBps = normalizeBps(parsed.processingBps);
+        parsed.schemeBps = normalizeBps(parsed.schemeBps);
+        if (!parsed.tiers || parsed.tiers.length===0) {
+          parsed.tiers = [{id:"flat",label:"Standard Rate",minVolume:0,maxVolume:null,processingBps:parsed.processingBps,perTxnFee:parsed.perTxnFee,schemeBps:parsed.schemeBps,monthlyFee:parsed.monthlyFee}];
+        }
+        parsed.tiers = parsed.tiers.map((t,i)=>({...normalizeTier(t), id: t.id||`tier_${i+1}`}));
+        updateProcessor(proc.id, { rates: parsed, activeTierId: parsed.tiers[0]?.id });
+      } else { alert("Could not parse contract. Check the PDF and try again."); }
+    } catch(err) { alert("Error: "+err.message); }
+    setExtractingId(null);
+  };
+
+  const handleFileUpload = (proc, file) => {
+    if (!file) return;
+    updateProcessor(proc.id, { contractFile: file.name });
+    const reader = new FileReader();
+    reader.onload = e => extractRates(proc, e.target.result.split(",")[1]);
+    reader.readAsDataURL(file);
+  };
+
+  const updateTier = (procId, tierId, field, val) => {
+    const proc = settings.processors.find(p=>p.id===procId);
+    if (!proc?.rates) return;
+    const tiers = proc.rates.tiers.map(t => t.id===tierId ? {...t,[field]:val} : t);
+    updateProcessor(procId, { rates: {...proc.rates, tiers} });
+  };
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+        <p style={{color:T.muted,fontSize:14}}>Upload processor contracts to enable true net margin calculations in proposals.</p>
+        <button style={{...S.btn,...S.btnPrimary,padding:"10px 20px"}} onClick={addProcessor}>+ Add Processor</button>
+      </div>
+
+      {(!settings.processors||settings.processors.length===0) && (
+        <div style={{...S.emptyState}}><div style={{fontSize:40,marginBottom:16}}>◈</div><div style={{fontSize:16,color:T.white,marginBottom:8}}>No processors yet</div><div style={{fontSize:14,color:T.muted}}>Add your first acquirer contract to get started.</div></div>
+      )}
+
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        {(settings.processors||[]).map(proc => {
+          const isActive = settings.activeProcessorId === proc.id;
+          const isExpanded = expandedId === proc.id;
+          const isExtracting = extractingId === proc.id;
+          const activeTier = proc.rates?.tiers?.find(t=>t.id===proc.activeTierId) || proc.rates?.tiers?.[0];
+
+          return (
+            <div key={proc.id} style={{...S.procCard,...(isActive?S.procCardActive:{})}}>
+              {/* Card header */}
+              <div style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+                <div style={{flex:1,minWidth:200}}>
+                  <input
+                    value={proc.name}
+                    onChange={e=>updateProcessor(proc.id,{name:e.target.value})}
+                    style={S.procNameInput}
+                    placeholder="Processor / Acquirer Name"
+                  />
+                  {proc.rates && activeTier && (
+                    <div style={{fontSize:12,color:T.muted,marginTop:4}}>
+                      {fmtBps(activeTier.processingBps)} + ${(activeTier.perTxnFee||0).toFixed(4)}/txn
+                      {proc.rates.isTiered && <span style={{color:T.gold,marginLeft:8}}>· {proc.rates.tiers?.length} tiers</span>}
+                    </div>
+                  )}
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  {isActive
+                    ? <div style={S.activePill}>✓ Active</div>
+                    : <button style={{...S.btn,...S.btnSecondary,padding:"6px 14px",fontSize:12}} onClick={()=>setActive(proc.id)}>Set Active</button>
+                  }
+                  <button style={{...S.btn,...S.btnGhost,padding:"6px 14px",fontSize:12}} onClick={()=>setExpandedId(isExpanded?null:proc.id)}>
+                    {isExpanded?"Collapse ▲":"Edit ▼"}
+                  </button>
+                  <button style={{...S.btn,background:"transparent",color:T.red,border:`1px solid ${T.red}40`,padding:"6px 14px",fontSize:12}} onClick={()=>deleteProcessor(proc.id)}>Delete</button>
+                </div>
+              </div>
+
+              {/* Expanded section */}
+              {isExpanded && (
+                <div style={{marginTop:24,paddingTop:24,borderTop:`1px solid ${T.cardBorder}`}}>
+                  {/* Contract upload */}
+                  <div style={{marginBottom:24}}>
+                    <div style={S.manualTitle}>Contract PDF</div>
+                    <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+                      <input ref={el=>fileRefs.current[proc.id]=el} type="file" accept=".pdf" style={{display:"none"}}
+                        onChange={e=>handleFileUpload(proc,e.target.files[0])}/>
+                      <button style={{...S.btn,...S.btnSecondary,padding:"8px 16px",fontSize:13}} onClick={()=>fileRefs.current[proc.id]?.click()} disabled={isExtracting}>
+                        {isExtracting ? "⏳ Extracting rates..." : proc.contractFile ? "↺ Re-upload Contract" : "⬆ Upload Contract PDF"}
+                      </button>
+                      {proc.contractFile && <span style={{fontSize:13,color:T.muted}}>{proc.contractFile}</span>}
+                      {proc.rates && <span style={{fontSize:12,color:T.green}}>✓ Rates extracted · {proc.rates.confidence} confidence</span>}
+                    </div>
+                    {proc.rates?.notes && <p style={{...S.adyenNote,marginTop:8}}>{proc.rates.notes}</p>}
+                  </div>
+
+                  {/* Tiers */}
+                  {proc.rates?.tiers && proc.rates.tiers.length > 0 && (
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                        <div style={S.manualTitle}>Pricing Tiers — Select Active Tier for Proposals</div>
+                        <button style={{...S.btn,...S.btnGhost,padding:"4px 12px",fontSize:11}} onClick={()=>{
+                          const newTier={id:`tier_${Date.now()}`,label:"New Tier",minVolume:0,maxVolume:null,processingBps:0,perTxnFee:0,schemeBps:0,monthlyFee:0};
+                          updateProcessor(proc.id,{rates:{...proc.rates,tiers:[...proc.rates.tiers,newTier],isTiered:true}});
+                        }}>+ Add Tier</button>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        {proc.rates.tiers.map((tier,ti)=>{
+                          const isTierActive = (proc.activeTierId||proc.rates.tiers[0]?.id) === tier.id;
+                          const isEditingThis = editingTierId === `${proc.id}_${tier.id}`;
+                          return (
+                            <div key={tier.id} style={{...S.tierCard,...(isTierActive?S.tierCardActive:{})}}>
+                              <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                                <div style={{flex:1}}>
+                                  {isEditingThis
+                                    ? <input value={tier.label} onChange={e=>updateTier(proc.id,tier.id,"label",e.target.value)} style={{...S.manualInput,fontSize:14,fontWeight:600,width:"100%"}}/>
+                                    : <div style={{fontSize:14,fontWeight:600,color:isTierActive?T.white:T.text}}>{tier.label}</div>
+                                  }
+                                  <div style={{fontSize:12,color:T.muted,marginTop:3}}>
+                                    {fmtBps(tier.processingBps)} processing · ${(tier.perTxnFee||0).toFixed(4)}/txn{tier.schemeBps>0?` · ${fmtBps(tier.schemeBps)} scheme`:""}{tier.monthlyFee>0?` · ${fmt$(tier.monthlyFee)}/mo`:""}
+                                  </div>
+                                </div>
+                                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                                  {isTierActive ? <div style={S.activePill}>✓ Active</div> : <button style={{...S.btn,...S.btnGhost,padding:"4px 12px",fontSize:11}} onClick={()=>setActiveTier(proc.id,tier.id)}>Use This Tier</button>}
+                                  <button style={{...S.btn,...S.btnGhost,padding:"4px 12px",fontSize:11}} onClick={()=>setEditingTierId(isEditingThis?null:`${proc.id}_${tier.id}`)}>{isEditingThis?"Done":"Edit"}</button>
+                                </div>
+                              </div>
+                              {isEditingThis && (
+                                <div style={{...S.manualGrid,marginTop:14}}>
+                                  {[
+                                    {label:"Min Volume ($/mo)",key:"minVolume",scale:1,unit:"$"},
+                                    {label:"Max Volume ($/mo)",key:"maxVolume",scale:1,unit:"$"},
+                                    {label:"Processing (BPS)",key:"processingBps",scale:10000,unit:"bps"},
+                                    {label:"Per Transaction ($)",key:"perTxnFee",scale:1,unit:"$"},
+                                    {label:"Scheme Fees (BPS)",key:"schemeBps",scale:10000,unit:"bps"},
+                                    {label:"Monthly Fee ($)",key:"monthlyFee",scale:1,unit:"$"},
+                                  ].map(({label,key,scale,unit})=>(
+                                    <div key={key} style={S.manualField}>
+                                      <label style={S.manualLabel}>{label}</label>
+                                      <div style={S.manualInputRow}>
+                                        <input type="number" step="any"
+                                          value={scale===10000?Math.round((tier[key]||0)*10000):(tier[key]||0)}
+                                          onChange={e=>updateTier(proc.id,tier.id,key,scale===10000?parseFloat(e.target.value||0)/10000:parseFloat(e.target.value||0))}
+                                          style={S.manualInput}/>
+                                        <span style={S.manualUnit}>{unit}</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Theme ────────────────────────────────────────────────────────────────────
+const T = {
+  bg:"#0f0f0f",
+  card:"#1a1a1a",
+  cardBorder:"#2e2e2e",
+  accent:"#f9674e",       // AIO Orange — dominant
+  accentGlow:"#f9674e18",
+  blue:"#7a80f6",         // Electric Blue — 30%
+  blueGlow:"#7a80f615",
+  gold:"#f9674e",         // use orange for highlights
+  green:"#22c55e",
+  red:"#ef4444",
+  text:"#e8e8e8",
+  muted:"#888888",
+  white:"#f5f4f0",        // Off-white
+  dark:"#f5f4f0",
+  softBlack:"#1a1a1a",
+};
+
+const S = {
+  root:{background:T.bg,minHeight:"100vh",fontFamily:"'DM Mono','Fira Code',monospace",color:T.text},
+  header:{borderBottom:`1px solid ${T.cardBorder}`,background:`${T.card}cc`,backdropFilter:"blur(12px)",position:"sticky",top:0,zIndex:100},
+  headerInner:{maxWidth:1200,margin:"0 auto",padding:"0 24px",display:"flex",alignItems:"center",justifyContent:"space-between",height:64},
+  logo:{display:"flex",alignItems:"center",gap:10},
+  logoText:{fontWeight:700,fontSize:18,letterSpacing:3,color:T.white},
+  logoSub:{fontSize:11,color:T.muted,letterSpacing:3,textTransform:"uppercase",marginLeft:4},
+  stepNav:{display:"flex",gap:4},
+  stepItem:{padding:"4px 10px",borderRadius:4,fontSize:10,letterSpacing:1,color:T.muted,textTransform:"uppercase"},
+  stepActive:{background:T.accentGlow,color:T.accent,border:`1px solid ${T.accent}40`},
+  stepDone:{color:T.green},
+  pageNav:{display:"flex",gap:4,borderLeft:`1px solid ${T.cardBorder}`,paddingLeft:16},
+  pageBtn:{background:"transparent",border:"none",color:T.muted,fontSize:13,cursor:"pointer",padding:"6px 12px",borderRadius:6,fontFamily:"inherit"},
+  pageBtnActive:{background:T.accentGlow,color:T.accent},
+  main:{maxWidth:1200,margin:"0 auto",padding:"32px 24px 80px"},
+  panel:{animation:"fadeIn 0.3s ease"},
+  overlay:{position:"fixed",inset:0,background:"#0a0f1ecc",backdropFilter:"blur(8px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"},
+  overlayCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:16,padding:"48px 64px",textAlign:"center"},
+  spinner:{width:40,height:40,border:`3px solid ${T.cardBorder}`,borderTop:`3px solid ${T.accent}`,borderRadius:"50%",margin:"0 auto 16px"},
+  spinMsg:{color:T.muted,fontSize:15},
+  h1:{fontSize:28,fontWeight:700,color:T.white,margin:"0 0 8px",letterSpacing:-0.5},
+  h2:{fontSize:13,fontWeight:600,color:T.muted,margin:"0 0 16px",letterSpacing:2,textTransform:"uppercase"},
+  sub:{color:T.muted,fontSize:15,marginBottom:32,lineHeight:1.6},
+  section:{marginBottom:40},
+  panelHeader:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:32,flexWrap:"wrap",gap:16},
+  badge:{background:T.accentGlow,border:`1px solid ${T.accent}40`,color:T.accent,padding:"6px 16px",borderRadius:4,fontSize:12,letterSpacing:2,fontWeight:700},
+  btnRow:{display:"flex",gap:12,marginTop:40,flexWrap:"wrap"},
+  btn:{padding:"12px 28px",borderRadius:6,fontFamily:"inherit",fontWeight:600,fontSize:14,cursor:"pointer",border:"none",transition:"all 0.2s",letterSpacing:0.5},
+  btnPrimary:{background:T.accent,color:T.bg},
+  btnSecondary:{background:"transparent",color:T.accent,border:`1px solid ${T.accent}60`},
+  btnGhost:{background:"transparent",color:T.muted,border:`1px solid ${T.cardBorder}`},
+  procBanner:{background:`${T.green}08`,border:`1px solid ${T.green}30`,borderRadius:8,padding:"10px 16px",marginBottom:24,fontSize:13,color:T.muted,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"},
+  bannerLink:{background:"transparent",border:"none",color:T.accent,fontSize:12,cursor:"pointer",marginLeft:"auto",fontFamily:"inherit"},
+  // Upload
+  dropzone:{border:`2px dashed ${T.cardBorder}`,borderRadius:12,padding:"60px 40px",textAlign:"center",cursor:"pointer",transition:"all 0.2s",marginBottom:24},
+  dropzoneActive:{border:`2px dashed ${T.accent}`,background:T.accentGlow},
+  dropzoneDone:{border:`2px solid ${T.green}40`,background:"#052e1640"},
+  uploadIcon:{fontSize:40,marginBottom:16,color:T.muted},
+  dropLabel:{fontSize:17,color:T.text,marginBottom:8},
+  dropMeta:{fontSize:13,color:T.muted},
+  fileIcon:{fontSize:40,marginBottom:12,color:T.green},
+  fileName:{fontSize:16,color:T.white,fontWeight:600,marginBottom:4},
+  fileMeta:{fontSize:13,color:T.muted},
+  chips:{display:"flex",flexWrap:"wrap",gap:8,marginBottom:32},
+  chip:{padding:"4px 12px",background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:4,fontSize:12,color:T.muted},
+  grid4:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:16,marginBottom:32},
+  metricCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"24px 20px"},
+  metricAccent:{border:`1px solid ${T.accent}40`,background:T.accentGlow},
+  metricVal:{fontSize:26,fontWeight:700,color:T.white,marginBottom:6},
+  metricLbl:{fontSize:12,color:T.muted,letterSpacing:1,textTransform:"uppercase"},
+  feeTable:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden"},
+  feeRow:{display:"grid",gridTemplateColumns:"1fr 120px 100px 1fr",gap:16,padding:"16px 24px",borderBottom:`1px solid ${T.cardBorder}`,alignItems:"center"},
+  feeName:{display:"flex",flexDirection:"column",gap:2},
+  feeNote:{fontSize:11,color:T.muted},
+  feeAmt:{fontWeight:600,color:T.white,textAlign:"right"},
+  feeRate:{color:T.muted,textAlign:"right",fontSize:13},
+  feeBar:{height:6,background:"#1e2d4a",borderRadius:3,overflow:"hidden"},
+  feeBarFill:{height:"100%",borderRadius:3,transition:"width 0.6s ease"},
+  highlightBox:{background:`linear-gradient(135deg,#0ea5e912,#0f172a)`,border:`1px solid ${T.accent}40`,borderRadius:12,padding:"28px 32px",display:"flex",gap:40,alignItems:"center",flexWrap:"wrap",marginBottom:40},
+  hlLeft:{flex:1,minWidth:200},
+  hlTitle:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8},
+  hlValue:{fontSize:42,fontWeight:800,color:T.accent},
+  hlSub:{fontSize:13,color:T.muted,marginTop:8},
+  hlRight:{display:"flex",gap:32},
+  hlStat:{display:"flex",flexDirection:"column",gap:4},
+  hlStatNum:{fontSize:20,fontWeight:700,color:T.white},
+  hlStatLbl:{fontSize:11,color:T.muted,letterSpacing:1},
+  mixCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"20px 16px"},
+  mixLbl:{fontSize:11,color:T.muted,letterSpacing:1,textTransform:"uppercase",marginBottom:8},
+  mixPct:{fontSize:22,fontWeight:700,color:T.white},
+  mixAmt:{fontSize:13,color:T.muted,marginTop:4},
+  notesBox:{background:`#f59e0b10`,border:`1px solid #f59e0b30`,borderRadius:8,padding:"16px 20px",fontSize:14,color:T.muted,marginBottom:24},
+  modelGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:16},
+  modelCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"24px",cursor:"pointer",transition:"all 0.2s",position:"relative"},
+  modelSelected:{border:`2px solid ${T.accent}`,background:T.accentGlow},
+  modelIcon:{fontSize:24,marginBottom:10},
+  modelName:{fontSize:16,fontWeight:700,color:T.white,marginBottom:6},
+  modelDesc:{fontSize:13,color:T.muted,lineHeight:1.5},
+  selectedBadge:{position:"absolute",top:12,right:12,background:T.accent,color:T.bg,fontSize:10,padding:"3px 10px",borderRadius:20,fontWeight:700,letterSpacing:1},
+  sliderBox:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:32},
+  slider:{width:"100%",accentColor:T.accent,height:6,cursor:"pointer"},
+  floorAlert:{background:"#ef444415",border:`1px solid ${T.red}50`,borderRadius:10,padding:"16px 20px",display:"flex",gap:16,alignItems:"flex-start",marginBottom:24,color:T.text,fontSize:14},
+  marginStack:{background:"#0a0f1e",border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden"},
+  msRow:{display:"grid",gridTemplateColumns:"1fr auto auto",gap:16,padding:"14px 20px",borderBottom:`1px solid ${T.cardBorder}`,alignItems:"center"},
+  msTotal:{background:"#0f1628",borderTop:`2px solid ${T.cardBorder}`},
+  msLabel:{fontSize:13,color:T.muted},
+  msVal:{fontSize:17,fontWeight:700,textAlign:"right"},
+  msMoney:{fontSize:13,color:T.muted,textAlign:"right",minWidth:110},
+  msArrRow:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 20px"},
+  msArrLabel:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase"},
+  msArrVal:{fontSize:28,fontWeight:800},
+  proposalBadge:{display:"inline-block",background:T.accentGlow,border:`1px solid ${T.accent}40`,color:T.accent,padding:"6px 20px",borderRadius:20,fontSize:11,letterSpacing:3},
+  savingsHero:{background:`linear-gradient(135deg,#052e16,#0a0f1e)`,border:`1px solid ${T.green}40`,borderRadius:16,padding:40,display:"flex",gap:40,alignItems:"center",marginBottom:48,flexWrap:"wrap"},
+  rateCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"24px 20px",textAlign:"center"},
+  rateLbl:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:12},
+  rateVal:{fontSize:32,fontWeight:800,color:T.accent},
+  rateSub:{fontSize:12,color:T.muted,marginTop:8},
+  compareTable:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden"},
+  compareHead:{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr",padding:"12px 24px",background:"#1e2d4a",fontSize:11,letterSpacing:1,textTransform:"uppercase",color:T.muted},
+  compareRow:{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr",padding:"16px 24px",borderBottom:`1px solid ${T.cardBorder}`},
+  compareCell:{fontSize:14,color:T.text},
+  arrBox:{background:`linear-gradient(135deg,#1e1b0a,#0a0f1e)`,border:`1px solid ${T.gold}40`,borderRadius:16,padding:36,marginBottom:40},
+  arrSplit:{background:"#0a0f1e",border:`1px solid ${T.cardBorder}`,borderRadius:10,overflow:"hidden",marginBottom:20},
+  arrSplitRow:{display:"grid",gridTemplateColumns:"1fr auto auto",gap:16,padding:"14px 20px",borderBottom:`1px solid ${T.cardBorder}`,alignItems:"center"},
+  arrSplitTotal:{background:"#0f1628",borderTop:`2px solid ${T.cardBorder}`},
+  arrSplitLbl:{fontSize:13,color:T.muted},
+  arrSplitVal:{fontSize:15,fontWeight:600,textAlign:"right",minWidth:120},
+  arrHighlight:{background:`${T.gold}10`,border:`1px solid ${T.gold}30`,borderRadius:10,padding:"24px",textAlign:"center"},
+  vpGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:12},
+  vpCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"16px 20px",display:"flex",gap:16,alignItems:"flex-start"},
+  // Snapshot row
+  snapshotRow:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12,marginBottom:36},
+  snapshotCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:10,padding:"18px 20px"},
+  snapLabel:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:8},
+  snapVal:{fontSize:28,fontWeight:800,marginBottom:4},
+  snapSub:{fontSize:12,color:T.muted},
+  // Fee config
+  feeConfigBox:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:28},
+  feeConfigGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:16,marginBottom:24},
+  feeConfigField:{display:"flex",flexDirection:"column",gap:6},
+  feeConfigResult:{display:"flex",flexDirection:"column",justifyContent:"center"},
+  feeConfigHint:{fontSize:11,color:T.muted,marginTop:4},
+  feeBreakdown:{background:"#0a0f1e",borderRadius:8,padding:"16px 20px",display:"flex",flexDirection:"column",gap:8},
+  feeBreakdownRow:{display:"flex",justifyContent:"space-between",alignItems:"center"},
+  // Settings
+  procCard:{background:T.card,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:24},
+  procCardActive:{border:`1px solid ${T.accent}40`,background:`${T.accent}06`},
+  procNameInput:{background:"transparent",border:"none",color:T.white,fontSize:17,fontWeight:700,fontFamily:"inherit",outline:"none",width:"100%"},
+  activePill:{background:`${T.green}20`,border:`1px solid ${T.green}40`,color:T.green,fontSize:11,padding:"3px 12px",borderRadius:20,fontWeight:700,letterSpacing:1},
+  tierCard:{background:"#0a0f1e",border:`1px solid ${T.cardBorder}`,borderRadius:8,padding:"14px 16px"},
+  tierCardActive:{border:`1px solid ${T.accent}40`,background:T.accentGlow},
+  emptyState:{background:T.card,border:`2px dashed ${T.cardBorder}`,borderRadius:12,padding:"60px 40px",textAlign:"center",color:T.muted},
+  adyenNote:{fontSize:12,color:T.muted,lineHeight:1.5},
+  manualTitle:{fontSize:11,color:T.muted,letterSpacing:2,textTransform:"uppercase",marginBottom:12},
+  manualGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12},
+  manualField:{display:"flex",flexDirection:"column",gap:6},
+  manualLabel:{fontSize:11,color:T.muted,letterSpacing:1},
+  manualInputRow:{display:"flex",alignItems:"center",gap:8},
+  manualInput:{background:"#1e2d4a",border:`1px solid ${T.cardBorder}`,borderRadius:6,padding:"8px 12px",color:T.white,fontSize:14,fontFamily:"inherit",width:"100%",outline:"none"},
+  manualUnit:{fontSize:12,color:T.muted,flexShrink:0},
+};
+
+const css = `
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin 0.8s linear infinite}
+*{box-sizing:border-box;margin:0;padding:0}
+input[type=range]{-webkit-appearance:none;appearance:none;background:#2e2e2e;border-radius:4px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;background:#f9674e;border-radius:50%;cursor:pointer}
+input[type=number]::-webkit-inner-spin-button{opacity:0.4}
+select{background:#1a1a1a;border:1px solid #2e2e2e;border-radius:6px;color:#e8e8e8;font-family:inherit;outline:none;cursor:pointer}
+@media(max-width:700px){.stepNav{display:none!important}}
+@media print{header{display:none}}
+`;
+
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(App));
+
+  </script>
+</body>
+</html>
