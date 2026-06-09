@@ -58,6 +58,13 @@ function adyenRateOnVolume(tier, volume, txnCount) {
   return calcAdyenCost(tier, volume, txnCount) / volume;
 }
 
+// Industry-standard blended V/MC/D wholesale interchange rates (restaurant MCCs 5812/5814)
+// Used to estimate true interchange cost for 2-tier/tiered statements where margin is hidden.
+const INTERCHANGE_SCHEDULE = {
+  cardPresent:    { rate: 0.0160, perTxn: 0.10 }, // ~1.60% + $0.10 blended CP
+  cardNotPresent: { rate: 0.0205, perTxn: 0.15 }, // ~2.05% + $0.15 blended CNP
+};
+
 // ─── Default empty state ──────────────────────────────────────────────────────
 const defaultSettings = {
   processors: [],
@@ -151,12 +158,51 @@ function App() {
       const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
         method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          model: "claude-sonnet-4-20250514", max_tokens: 1200, temperature: 0,
           messages: [{ role: "user", content: [
             { type: isImage ? "image" : "document", source: { type: "base64", media_type: isImage ? file.type : "application/pdf", data: fileData } },
-            { type: "text", text: `Analyze this merchant statement. Return ONLY JSON (no markdown):
-{"merchantName":"string","processingMonth":"string","totalVolume":number,"totalTransactions":number,"totalFees":number,"interchangeFees":number,"processorFees":number,"otherFees":number,"effectiveRate":number,"interchangeRate":number,"processorMarkup":number,"averageTicket":number,"cardPresentVolume":number,"cardNotPresentVolume":number,"cardPresentPct":number,"cardNotPresentPct":number,"visaVolume":number,"mastercardVolume":number,"amexVolume":number,"discoverVolume":number,"rewardCardPct":number,"corporateCardPct":number,"currentPricingModel":"tiered|interchange-plus|flat-rate|unknown","currentProcessorName":"string","annualVolume":number,"confidence":"high|medium|low","notes":"string"}
-Use 0 for unknown numerics.` }
+            { type: "text", text: `Analyze this merchant processing statement. Return ONLY valid JSON — no markdown, no explanation.
+
+FIELDS:
+{"merchantName":"string","processingMonth":"string","totalVolume":number,"totalTransactions":number,"totalFees":number,"interchangeFees":number,"processorFees":number,"otherFees":number,"effectiveRate":number,"interchangeRate":number,"processorMarkup":number,"statedMarkupRate":number,"statedPerTxnFee":number,"interchangeNotShown":boolean,"cardPresentAllInRate":number,"cardNotPresentAllInRate":number,"cardPresentPerTxn":number,"cardNotPresentPerTxn":number,"averageTicket":number,"cardPresentVolume":number,"cardNotPresentVolume":number,"cardPresentPct":number,"cardNotPresentPct":number,"visaVolume":number,"mastercardVolume":number,"amexVolume":number,"discoverVolume":number,"rewardCardPct":number,"corporateCardPct":number,"currentPricingModel":"tiered|interchange-plus|flat-rate|unknown","currentProcessorName":"string","annualVolume":number,"confidence":"high|medium|low","notes":"string"}
+
+RULE 1 — TIERED / BLENDED PRICING (e.g. Toast, Clover, Square, most restaurant processors):
+The processor shows ALL-IN rates broken into Card Present and Card Not Present (e.g. "CP: 2.30% + $0.10 / CNP: 2.75% + $0.15"). These rates already include interchange AND processor margin — the margin is hidden and not disclosed. This is NOT interchange-plus.
+  • Set currentPricingModel = "tiered"
+  • Set interchangeNotShown = false (it is not IC+ — it is tiered)
+  • cardPresentAllInRate = the CP all-in % rate as decimal (e.g. 0.0230)
+  • cardNotPresentAllInRate = the CNP all-in % rate as decimal (e.g. 0.0275)
+  • cardPresentPerTxn = CP per-transaction fee in USD (e.g. 0.10)
+  • cardNotPresentPerTxn = CNP per-transaction fee in USD (e.g. 0.15)
+  • totalFees = all fees on statement
+  • interchangeFees = 0 (cannot be separated from statement alone — will be estimated from schedules)
+  • processorFees = totalFees - otherFees
+  • processorMarkup = processorFees / totalVolume
+
+RULE 2 — IC+ WHERE INTERCHANGE IS NOT ITEMIZED (processor shows markup rate but not interchange):
+The statement shows a markup rate (e.g. "0.25% + $0.10/txn above interchange") but does NOT list interchange as a separate dollar amount.
+  • Set currentPricingModel = "interchange-plus"
+  • Set interchangeNotShown = true
+  • statedMarkupRate = the explicit % markup rate as decimal (e.g. 0.0025 for 0.25%)
+  • statedPerTxnFee = the explicit per-transaction markup fee in USD (e.g. 0.10)
+  • totalFees = TOTAL fees on statement (includes interchange — use the grand total)
+  • processorFees = totalVolume * statedMarkupRate + totalTransactions * statedPerTxnFee
+  • interchangeFees = totalFees - processorFees - otherFees
+  • interchangeRate = interchangeFees / totalVolume
+
+RULE 3 — IC+ WHERE INTERCHANGE IS ITEMIZED:
+The statement explicitly lists interchange as a separate dollar amount.
+  • Set currentPricingModel = "interchange-plus", interchangeNotShown = false
+  • interchangeFees = the interchange dollar amount shown
+  • processorFees = markup fees shown above interchange
+  • totalFees = interchangeFees + processorFees + otherFees
+
+RULE 4 — FLAT RATE:
+Single blended rate for all transactions.
+  • Set currentPricingModel = "flat-rate", interchangeNotShown = false
+  • interchangeFees = 0, processorFees = totalFees - otherFees
+
+processorMarkup is always a RATE (decimal), never a dollar amount. Use 0 for unknown numerics. Never null.` }
           ]}]
         })
       });
@@ -164,27 +210,63 @@ Use 0 for unknown numerics.` }
       const parsed = parseJSON(data.content?.map(b => b.text || "").join("") || "");
       if (parsed) {
         // Normalize: if any rate field looks like a percentage (>0.5) convert to decimal
-        const rateFields = ["effectiveRate","interchangeRate","processorMarkup","cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"];
+        const rateFields = ["effectiveRate","interchangeRate","processorMarkup","statedMarkupRate","cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct","cardPresentAllInRate","cardNotPresentAllInRate"];
         rateFields.forEach(f => {
           if (parsed[f] != null && parsed[f] > 0.5) parsed[f] = parsed[f] / 100;
         });
+
+        const vol  = parsed.totalVolume || 0;
+        const txns = parsed.totalTransactions || 0;
+
+        // ── IC+ WHERE INTERCHANGE IS NOT ITEMIZED ──────────────────────────────
+        // Hard-recalculate processorFees from stated markup rates, then back-calculate
+        // interchange as the remainder: interchange = totalFees - markup - otherFees
+        if (parsed.interchangeNotShown && vol > 0) {
+          const markupRate = parsed.statedMarkupRate || parsed.processorMarkup || 0;
+          const perTxnFee  = parsed.statedPerTxnFee  || 0;
+          const calcMarkup = vol * markupRate + txns * perTxnFee;
+          if (calcMarkup > 0) parsed.processorFees = calcMarkup;
+          parsed.processorMarkup = markupRate;
+          const backCalcIC = (parsed.totalFees || 0) - parsed.processorFees - (parsed.otherFees || 0);
+          parsed.interchangeFees = Math.max(0, backCalcIC);
+          parsed.interchangeRate = parsed.interchangeFees / vol;
+          if (parsed.totalFees > 0) parsed.effectiveRate = parsed.totalFees / vol;
+        }
+
+        // ── TIERED / BLENDED PRICING — estimate interchange from industry schedule ──
+        // The processor's margin is hidden inside the all-in CP/CNP rates.
+        // Use INTERCHANGE_SCHEDULE to estimate wholesale interchange cost, then derive margin.
+        if (parsed.currentPricingModel === 'tiered' && vol > 0) {
+          const cpPct  = parsed.cardPresentPct    || 0.70;
+          const cnpPct = parsed.cardNotPresentPct || 0.30;
+          const cpVol  = parsed.cardPresentVolume    || vol * cpPct;
+          const cnpVol = parsed.cardNotPresentVolume || vol * cnpPct;
+          const cpTxns  = txns * cpPct;
+          const cnpTxns = txns * cnpPct;
+          const wholesaleIC =
+            cpVol  * INTERCHANGE_SCHEDULE.cardPresent.rate    + cpTxns  * INTERCHANGE_SCHEDULE.cardPresent.perTxn +
+            cnpVol * INTERCHANGE_SCHEDULE.cardNotPresent.rate + cnpTxns * INTERCHANGE_SCHEDULE.cardNotPresent.perTxn;
+          parsed.interchangeFees = wholesaleIC;
+          parsed.interchangeRate = wholesaleIC / vol;
+          parsed.processorFees   = Math.max(0, (parsed.totalFees || 0) - wholesaleIC - (parsed.otherFees || 0));
+          parsed.processorMarkup = parsed.processorFees / vol;
+          parsed.effectiveRate   = (parsed.totalFees || 0) / vol;
+          parsed.icEstimated     = true;
+        }
+
         // Volume-derived pcts: recalculate from volumes if total is available
-        if (parsed.totalVolume > 0) {
-          if (parsed.cardPresentVolume > 0)   parsed.cardPresentPct   = parsed.cardPresentVolume   / parsed.totalVolume;
-          if (parsed.cardNotPresentVolume > 0) parsed.cardNotPresentPct = parsed.cardNotPresentVolume / parsed.totalVolume;
-          // Sanity-check pct fields — if still > 1 after normalization, zero them
+        if (vol > 0) {
+          if (parsed.cardPresentVolume > 0)    parsed.cardPresentPct    = parsed.cardPresentVolume    / vol;
+          if (parsed.cardNotPresentVolume > 0) parsed.cardNotPresentPct = parsed.cardNotPresentVolume / vol;
           ["cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"].forEach(f => {
             if (parsed[f] > 1) parsed[f] = 0;
           });
-          // Recalculate effective rate from actual numbers as a cross-check
-          if (parsed.totalFees > 0) {
-            const derived = parsed.totalFees / parsed.totalVolume;
-            // If AI rate is wildly off from derived, trust the derived value
+          if (parsed.totalFees > 0 && !parsed.interchangeNotShown && parsed.currentPricingModel !== 'tiered') {
+            const derived = parsed.totalFees / vol;
             if (Math.abs((parsed.effectiveRate || 0) - derived) > 0.01) parsed.effectiveRate = derived;
           }
-          // Same cross-check for interchange
           if (parsed.interchangeFees > 0) {
-            const derivedIC = parsed.interchangeFees / parsed.totalVolume;
+            const derivedIC = parsed.interchangeFees / vol;
             if (Math.abs((parsed.interchangeRate || 0) - derivedIC) > 0.01) parsed.interchangeRate = derivedIC;
           }
         }
@@ -252,7 +334,7 @@ Use 0 for unknown numerics.` }
       const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
         method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          model: "claude-sonnet-4-20250514", max_tokens: 1000, temperature: 0,
           messages: [{ role: "user", content: `Generate a payment processing proposal. Use EXACTLY the rates and fees provided — do not recalculate or change any numbers.
 
 MERCHANT: ${JSON.stringify({       merchantName: analysis.merchantName, totalVolume: vol, totalTransactions: txns, totalFees: analysis.totalFees, effectiveRate: analysis.effectiveRate, currentProcessorName: analysis.currentProcessorName, currentPricingModel: analysis.currentPricingModel, annualVolume: annVol })}
@@ -389,6 +471,11 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                   </div>
                   <div style={S.badge}>{analysis.currentPricingModel?.replace("-"," ").toUpperCase()}</div>
                 </div>
+                {analysis.icEstimated && (
+                  <div style={{background:"#1e3a5f",border:"1px solid #3b82f6",borderRadius:8,padding:"10px 16px",marginBottom:16,fontSize:13,color:"#93c5fd",lineHeight:1.6}}>
+                    <strong style={{color:"#60a5fa"}}>2-Tier Statement</strong> — Interchange estimated using industry blended V/MC/D schedules (CP: 1.60% + $0.10 &nbsp;|&nbsp; CNP: 2.05% + $0.15). Processor margin derived as the remainder above wholesale interchange cost.
+                  </div>
+                )}
                 <div style={S.grid4}>
                   {[{label:"Monthly Volume",val:fmt$(analysis.totalVolume)},{label:"Total Fees",val:fmt$(analysis.totalFees),accent:true},{label:"Effective Rate",val:fmtPct2(analysis.effectiveRate),accent:true},{label:"Avg Ticket",val:fmt$(analysis.averageTicket)}].map(m=>(
                     <div key={m.label} style={{...S.metricCard,...(m.accent?S.metricAccent:{})}}><div style={S.metricVal}>{m.val}</div><div style={S.metricLbl}>{m.label}</div></div>
