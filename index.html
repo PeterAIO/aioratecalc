@@ -1240,7 +1240,7 @@ function ProcessorsTab({ settings, persistSettings }) {
       const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
         method:"POST", headers:{"Content-Type":"application/json","x-api-key":window.__CR_API_KEY||"","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
         body: JSON.stringify({
-          model:"claude-sonnet-4-20250514", max_tokens:1200,
+          model:"claude-sonnet-4-20250514", max_tokens:1200, temperature:0,
           messages:[{role:"user",content:[
             {type:"document",source:{type:"base64",media_type:"application/pdf",data:fileData}},
             {type:"text",text:`Extract ALL acquirer/processor cost data from this contract. Return ONLY JSON:
@@ -1275,6 +1275,22 @@ Never use null for numeric fields — use 0.`}
       const data = await res.json();
       const parsed = parseJSON(data.content?.map(b=>b.text||"").join("")||"");
       if (parsed) {
+        // Normalize BPS fields — AI often returns integer bps (e.g. 6) or percent (e.g. 0.06)
+        // instead of the decimal multiplier (0.0006). Apply tiered correction:
+        //   v >= 1    → integer bps:  6     → 6/10000   = 0.0006
+        //   v >= 0.02 → percent form: 0.06  → 0.06/100  = 0.0006
+        //   v < 0.02  → already correct decimal
+        const normBps = v => {
+          if (!v || v === 0) return 0;
+          if (v >= 1)    return v / 10000;
+          if (v >= 0.02) return v / 100;
+          return v;
+        };
+        const normTier = t => ({...t, processingBps: normBps(t.processingBps), schemeBps: normBps(t.schemeBps)});
+        parsed.processingBps = normBps(parsed.processingBps);
+        parsed.schemeBps     = normBps(parsed.schemeBps);
+        if (parsed.tiers) parsed.tiers = parsed.tiers.map(normTier);
+
         if (!parsed.tiers || parsed.tiers.length===0) {
           parsed.tiers = [{id:"flat",label:"Standard Rate",minVolume:0,maxVolume:null,processingBps:parsed.processingBps,perTxnFee:parsed.perTxnFee,schemeBps:parsed.schemeBps,monthlyFee:parsed.monthlyFee}];
         }
