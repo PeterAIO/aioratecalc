@@ -106,7 +106,6 @@ function App() {
   const [page, setPage] = useState("proposal"); // "proposal" | "settings"
   const [settings, setSettings] = useState(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
-  const [currentUser, setCurrentUser] = useState(null); // logged-in user
 
   // Proposal flow
   const [step, setStep] = useState("upload");
@@ -368,14 +367,6 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
       <div style={{textAlign:"center"}}><div style={S.spinner} className="spin"/><p style={{color:T.muted,marginTop:16}}>Loading ClearRate...</p></div>
       <style>{css}</style>
     </div>
-  );
-
-  if (!currentUser) return (
-    <LoginPage
-      settings={settings}
-      persistSettings={persistSettings}
-      onLogin={setCurrentUser}
-    />
   );
 
   return (
@@ -1094,104 +1085,6 @@ function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, tar
       <div style={S.btnRow}>
         <button style={{...S.btn,...S.btnSecondary}} onClick={onBack}>← Back</button>
         <button style={{...S.btn,...S.btnPrimary,opacity:(pricingModel&&!belowFloor)?1:0.4}} disabled={!pricingModel||belowFloor||loading} onClick={onGenerate}>Generate Proposal →</button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Login Page ───────────────────────────────────────────────────────────────
-function LoginPage({ settings, persistSettings, onLogin }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [showSetup, setShowSetup] = useState(false);
-  // Setup form (first-time admin creation)
-  const [setupName, setSetupName] = useState("");
-  const [setupEmail, setSetupEmail] = useState("");
-  const [setupPassword, setSetupPassword] = useState("");
-  const [setupConfirm, setSetupConfirm] = useState("");
-
-  const hasUsers = settings?.users?.length > 0;
-
-  const handleLogin = () => {
-    setError("");
-    const user = (settings?.users||[]).find(u => u.email?.toLowerCase() === email.toLowerCase());
-    if (!user) { setError("No account found with that email address."); return; }
-    if (!user.password) { setError("This account has no password set. Ask an Admin to set one in Settings."); return; }
-    if (user.password !== password) { setError("Incorrect password. Please try again."); return; }
-    onLogin(user);
-  };
-
-  const handleSetup = () => {
-    setError("");
-    if (!setupName.trim()) { setError("Please enter your name."); return; }
-    if (!setupEmail.trim()) { setError("Please enter an email."); return; }
-    if (setupPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
-    if (setupPassword !== setupConfirm) { setError("Passwords don't match."); return; }
-    const adminUser = { id: Date.now().toString(), name: setupName.trim(), email: setupEmail.trim(), role: "Admin", password: setupPassword, createdAt: new Date().toISOString() };
-    const updated = { ...settings, users: [adminUser] };
-    persistSettings(updated);
-    onLogin(adminUser);
-  };
-
-  return (
-    <div style={{...S.root, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
-      <style>{css}</style>
-      <div style={S.loginCard}>
-        {/* Logo */}
-        <div style={{textAlign:"center", marginBottom:36}}>
-          <img
-            src="data:image/png;base64,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"
-            alt="AIO" style={{height:56, filter:"brightness(0) invert(0.55) sepia(1) saturate(3) hue-rotate(330deg)"}}
-          />
-          <div style={{fontSize:13,color:T.muted,letterSpacing:3,textTransform:"uppercase",marginTop:8}}>Proposal Engine</div>
-        </div>
-
-        {(!hasUsers || showSetup) && !error ? (
-          <>
-            <div style={S.loginWelcome}>{showSetup ? "Create Admin Account" : "Welcome to AIO Proposal Engine"}</div>
-            <div style={S.loginSub}>{showSetup ? "This will be the first admin with full access." : "No accounts exist yet. Create the first Admin account to get started."}</div>
-            <div style={S.loginFields}>
-              <div style={S.loginField}>
-                <label style={S.manualLabel}>Full Name</label>
-                <input type="text" value={setupName} onChange={e=>setSetupName(e.target.value)} placeholder="Your name" style={S.loginInput}/>
-              </div>
-              <div style={S.loginField}>
-                <label style={S.manualLabel}>Email Address</label>
-                <input type="email" value={setupEmail} onChange={e=>setSetupEmail(e.target.value)} placeholder="you@company.com" style={S.loginInput}/>
-              </div>
-              <div style={S.loginField}>
-                <label style={S.manualLabel}>Password</label>
-                <input type="password" value={setupPassword} onChange={e=>setSetupPassword(e.target.value)} placeholder="Min 6 characters" style={S.loginInput}/>
-              </div>
-              <div style={S.loginField}>
-                <label style={S.manualLabel}>Confirm Password</label>
-                <input type="password" value={setupConfirm} onChange={e=>setSetupConfirm(e.target.value)} placeholder="Repeat password" style={S.loginInput} onKeyDown={e=>e.key==="Enter"&&handleSetup()}/>
-              </div>
-            </div>
-            {error && <div style={S.loginError}>{error}</div>}
-            <button style={{...S.btn,...S.btnPrimary,width:"100%",marginTop:16}} onClick={handleSetup}>Create Account & Sign In →</button>
-            {hasUsers && <button style={{...S.btn,...S.btnGhost,width:"100%",marginTop:8}} onClick={()=>{setShowSetup(false);setError("");}}>← Back to Sign In</button>}
-          </>
-        ) : (
-          <>
-            <div style={S.loginWelcome}>Sign In</div>
-            <div style={S.loginSub}>Use your email and password to access the Proposal Engine.</div>
-            <div style={S.loginFields}>
-              <div style={S.loginField}>
-                <label style={S.manualLabel}>Email Address</label>
-                <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" style={S.loginInput}/>
-              </div>
-              <div style={S.loginField}>
-                <label style={S.manualLabel}>Password</label>
-                <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" style={S.loginInput} onKeyDown={e=>e.key==="Enter"&&handleLogin()}/>
-              </div>
-            </div>
-            {error && <div style={S.loginError}>{error}</div>}
-            <button style={{...S.btn,...S.btnPrimary,width:"100%",marginTop:16}} onClick={handleLogin}>Sign In →</button>
-            <button style={{...S.btn,...S.btnGhost,width:"100%",marginTop:8}} onClick={()=>{setShowSetup(true);setError("");}}>Create new account</button>
-          </>
-        )}
       </div>
     </div>
   );
