@@ -154,10 +154,10 @@ function App() {
     setLoading(true); setLoadingMsg("Analyzing merchant statement...");
     const isImage = file.type.startsWith("image/");
     try {
-      const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 1200, temperature: 0,
+          model: "claude-sonnet-4-6", max_tokens: 1200, temperature: 0,
           messages: [{ role: "user", content: [
             { type: isImage ? "image" : "document", source: { type: "base64", media_type: isImage ? file.type : "application/pdf", data: fileData } },
             { type: "text", text: `Analyze this merchant processing statement. Return ONLY valid JSON — no markdown, no explanation.
@@ -206,6 +206,11 @@ processorMarkup is always a RATE (decimal), never a dollar amount. Use 0 for unk
         })
       });
       const data = await res.json();
+      if (!res.ok || data.error) {
+        console.error("Anthropic API error:", data);
+        alert("API error (" + res.status + "): " + (data.error?.message || JSON.stringify(data)));
+        setLoading(false); return;
+      }
       const parsed = parseJSON(data.content?.map(b => b.text || "").join("") || "");
       if (parsed) {
         // Normalize: if any rate field looks like a percentage (>0.5) convert to decimal
@@ -330,10 +335,10 @@ processorMarkup is always a RATE (decimal), never a dollar amount. Use 0 for unk
     const savingsMonthly = (analysis.totalFees || 0) - proposedMonthly;
 
     try {
-      const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json", "x-api-key": window.__CR_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 1000, temperature: 0,
+          model: "claude-sonnet-4-6", max_tokens: 1000, temperature: 0,
           messages: [{ role: "user", content: `Generate a payment processing proposal. Use EXACTLY the rates and fees provided — do not recalculate or change any numbers.
 
 MERCHANT: ${JSON.stringify({       merchantName: analysis.merchantName, totalVolume: vol, totalTransactions: txns, totalFees: analysis.totalFees, effectiveRate: analysis.effectiveRate, currentProcessorName: analysis.currentProcessorName, currentPricingModel: analysis.currentPricingModel, annualVolume: annVol })}
@@ -1139,10 +1144,10 @@ function ProcessorsTab({ settings, persistSettings }) {
   const extractRates = async (proc, fileData) => {
     setExtractingId(proc.id);
     try {
-      const res = await fetch("https://corsproxy.io/?" + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method:"POST", headers:{"Content-Type":"application/json","x-api-key":window.__CR_API_KEY||"","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
         body: JSON.stringify({
-          model:"claude-sonnet-4-20250514", max_tokens:1200, temperature:0,
+          model:"claude-sonnet-4-6", max_tokens:1200, temperature:0,
           messages:[{role:"user",content:[
             {type:"document",source:{type:"base64",media_type:"application/pdf",data:fileData}},
             {type:"text",text:`Extract ALL acquirer/processor cost data from this contract. Return ONLY JSON:
