@@ -1,7 +1,9 @@
 # ClearRate / AIO Rate Calculator
 
+> **Active work is on the `v2` branch.** The `app-v2/` directory contains a Next.js 16 rewrite with a canonical data model, server-side Anthropic API, Adyen hosted onboarding, and HubSpot sync. See the **v2 Architecture** section below. `main` branch / root HTML files are frozen as reference.
+
 ## Overview
-ClearRate is a browser-based payment-processing proposal engine for AIO Payments. A sales rep uploads a merchant's current processing statement (PDF or image), Claude extracts the fees/volume/effective-rate, the app computes a competing AIO offer against AIO's margin floors, generates a branded proposal, exports it to PDF, and (in the newer build) can kick off an Adyen merchant-onboarding application. The entire app is a set of standalone single-file HTML pages — no build step, no backend; React + Babel are loaded from CDNs at runtime and all data lives in browser `localStorage`.
+ClearRate is a payment-processing proposal engine for AIO Payments. A sales rep uploads a merchant's current processing statement (PDF or image), Claude extracts the fees/volume/effective-rate, the app computes a competing AIO offer against AIO's margin floors, generates a branded proposal, and kicks off an Adyen merchant-onboarding application.
 
 ## Tech Stack
 - **Language:** JavaScript (JSX transpiled in-browser via `@babel/standalone`)
@@ -59,3 +61,79 @@ There is **no build, install, or test tooling** in this repo (no `package.json`,
 - **CDN-dependent.** React, Babel, and html2pdf load from public CDNs at runtime, so the app needs internet access to run at all. JSX is transpiled on every page load via `<script type="text/babel">` (slow first paint; not a production setup).
 - **Adyen calls go through a public CORS proxy** (`corsproxy.io` by default, configurable via `clearrate:adyen_config.corsProxy`).
 - `.gitignore` lists `node_modules/`, `.env`, `__pycache__/`, etc. — generic boilerplate; none of those toolchains are actually present.
+
+---
+
+## v2 Architecture (`app-v2/` on branch `v2`)
+
+### Stack
+- **Next.js 16.2.9** (App Router, TypeScript, `src/` dir) in `app-v2/`
+- **No CSS framework** — inline styles, dark theme CSS variables (`--bg: #0a0f1e`, `--accent: #f9674e`, etc.)
+- **AI:** Anthropic `claude-sonnet-4-6` called server-side via `ANTHROPIC_API_KEY` env var (never in localStorage)
+- **Storage (Phase 1):** same `localStorage` keys as old app — `LocalStorageAdapter` reads old records and migrates them via `migrateOldRecord()`
+- **Adyen:** hosted onboarding only — AIO creates a legal entity skeleton, Adyen returns a URL, merchant fills SSN/bank/EIN directly on `onboarding.adyen.com`
+- **HubSpot:** Private App Token (`HUBSPOT_PRIVATE_APP_TOKEN`), no OAuth
+
+### Key files
+```
+app-v2/src/
+  types/merchant.ts          ← canonical MerchantApplication type (no PII fields)
+  lib/pricing.ts             ← MARGIN_REQS, getMarginFloor, derivePricing (verbatim port)
+  lib/claude.ts              ← analyzeStatement(), generateProposal() — server-side only
+  lib/utils.ts               ← fmt$, fmtPct, fmtPct2, fmtBps, parseJSON
+  lib/storage/
+    storageInterface.ts      ← IStorage interface
+    localStorageAdapter.ts   ← migrateOldRecord() maps old → new format
+  lib/adapters/
+    adyen.ts                 ← createLegalEntityAndGetOnboardingUrl() — Phase 2 stub (written)
+    hubspot.ts               ← pushToHubSpot(), pullFromHubSpot() — Phase 3 stub (written)
+  app/
+    rep/proposals/new/       ← 5-step rep flow (upload→analysis→pricing→proposal→apply)
+    rep/settings/            ← processor/tier config
+    admin/                   ← password-gated dashboard (password: aio2024, Phase 5 replaces)
+    api/analyze/             ← POST — calls analyzeStatement() server-side
+    api/proposal/            ← POST — calls generateProposal() server-side
+  components/rep/
+    UploadStep.tsx           ← drag-drop, calls /api/analyze
+    AnalysisStep.tsx         ← 3-way fee split display
+    PricingStep.tsx          ← model selector + margin slider + derivePricing live preview
+    ProposalStep.tsx         ← savings hero + PDF export via html2pdf in a new window
+    ApplyStep.tsx            ← non-sensitive fields only (business, ownerContact, processing, agreement)
+```
+
+### To run v2
+```bash
+git checkout v2
+cd app-v2
+cp .env.local.example .env.local   # add ANTHROPIC_API_KEY
+npm run dev   # → http://localhost:3000
+```
+
+### Phase status
+| Phase | What | Status |
+|---|---|---|
+| 1 | Next.js scaffold + 5-step rep flow + localStorage | **DONE** (committed 2026-07-06) |
+| 2 | Adyen hosted onboarding (wire `adyen.ts` stub + webhook route) | **NOT STARTED** |
+| 3 | HubSpot bidirectional sync (wire `hubspot.ts` stub) | **NOT STARTED** |
+| 4 | Merchant magic link + branded landing → Adyen URL | **NOT STARTED** |
+| 5 | Auth (NextAuth/Clerk) + optional DB | **NOT STARTED** |
+
+### Critical constraints (do not reverse)
+- `MerchantApplication` has **no SSN, bank account, routing number, or EIN fields** — Adyen collects those on their hosted page
+- Pricing math (`MARGIN_REQS`, `derivePricing`) lives in `pricing.ts`, **not** in Claude prompts
+- `generateProposal()` force-overrides any AI-returned numbers with locally computed `exactRates`/`exactProjected`
+- HubSpot uses Private App Token — **no OAuth**
+- All v2 work in `app-v2/` — **do not touch the root HTML files**
+
+### Env vars needed (per phase)
+```
+ANTHROPIC_API_KEY           # Phase 1 — required now
+ADYEN_LEM_API_KEY           # Phase 2
+ADYEN_COMPANY_ID            # Phase 2
+ADYEN_ENVIRONMENT           # Phase 2 (test|live)
+ADYEN_WEBHOOK_HMAC_KEY      # Phase 2
+HUBSPOT_PRIVATE_APP_TOKEN   # Phase 3
+RESEND_API_KEY              # Phase 4
+NEXT_PUBLIC_BASE_URL        # Phase 4
+NEXTAUTH_SECRET             # Phase 5
+```
