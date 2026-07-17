@@ -102,6 +102,8 @@ export async function saveMyApplicationOnboardingAction(
     app = await postgresStorage.updateApplicationAsCustomer(userId, id, {
       adyenIds: {
         legalEntityId: result.legalEntityId,
+        accountHolderId: result.accountHolderId,
+        balanceAccountId: result.balanceAccountId,
         merchantAccountId: null,
         environment: process.env.ADYEN_ENVIRONMENT === "live" ? "live" : "test",
       },

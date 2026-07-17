@@ -90,26 +90,40 @@ export async function createLegalEntityAndGetOnboardingUrl(
   // 2. Account holder + capabilities (Config API). Capabilities MUST be requested
   //    here — this is what makes the onboarding link (step 5) valid. Only "requested"
   //    is settable on create; enabled/allowed are read-only (Adyen sets after KYC).
+  //    Split model: AIO's platform is the merchant of record and processes payments;
+  //    each sub-merchant RECEIVES its split (receiveFromPlatformPayments) and pays out
+  //    to its own bank (sendToTransferInstrument). A sub-merchant does NOT process
+  //    directly, so it does not request receivePayments.
   const accountHolder = await adyenCall(`${bcl}/accountHolders`, configKey, {
     legalEntityId: entity.id,
     description: `AIO merchant — ${legalName}`,
     reference: app.id,
     capabilities: {
-      receivePayments:          { requested: true },
-      sendToTransferInstrument: { requested: true },
+      receiveFromPlatformPayments: { requested: true },
+      sendToTransferInstrument:    { requested: true },
     },
   }, "account holder creation");
 
-  // 3. Business line (LEM). Describes what the merchant sells; required before the
-  //    link for a paymentProcessing merchant.
-  //    TODO: industryCode and salesChannels are placeholders — map from the merchant's
-  //    real category / card-present-vs-online mix instead of these defaults.
+  // 3. Business line (LEM). Describes what the merchant sells.
+  //    - salesChannels: eCommerce only when a website exists (Adyen requires
+  //      webData/webAddress for the eCommerce channel), plus pos when the merchant
+  //      takes any card-present volume. Always at least one channel.
+  //    - industryCode: this is NOT the merchant's MCC — Adyen uses its own enumerated
+  //      industry-code list (a raw MCC like "5812" 422s with "not recognised"). Left
+  //      as Adyen's retail example until we add an MCC→Adyen-industry-code mapping
+  //      from Adyen's reference list (go-live TODO). The merchant's real MCC is
+  //      collected in processing.mcc and is ready to map when that lands.
   const website = app.business?.website;
+  const cpPct = Number(app.processing?.cardPresentPct);
+  const salesChannels: string[] = [];
+  if (website) salesChannels.push("eCommerce");
+  if (Number.isNaN(cpPct) ? !website : cpPct > 0) salesChannels.push("pos");
+  if (salesChannels.length === 0) salesChannels.push("pos");
   await adyenCall(`${lem}/businessLines`, lemKey, {
     legalEntityId: entity.id,
     service: "paymentProcessing",
     industryCode: "4431A",
-    salesChannels: website ? ["eCommerce"] : ["pos"],
+    salesChannels,
     ...(website ? { webData: [{ webAddress: website }] } : {}),
   }, "business line creation");
 

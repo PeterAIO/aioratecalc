@@ -53,7 +53,9 @@ export interface WebhookOutcome {
 
 /**
  * Decide the deal stage a webhook event implies (or null to leave unchanged).
- * Stage is driven by the receivePayments capability — the "can process" signal.
+ * Stage is driven by the receiveFromPlatformPayments capability — in AIO's split
+ * model that's the sub-merchant's "can receive its funds" signal (the capability
+ * we request in adyen.ts). Keep this in sync with the requested capabilities.
  */
 export function stageFromEvent(event: any): WebhookOutcome {
   const ah = event?.data?.accountHolder;
@@ -71,7 +73,7 @@ export function stageFromEvent(event: any): WebhookOutcome {
     type === "balancePlatform.accountHolder.updated" ||
     type === "balancePlatform.accountHolder.created"
   ) {
-    const cap = ah.capabilities?.receivePayments;
+    const cap = ah.capabilities?.receiveFromPlatformPayments;
     if (!cap) return { legalEntityId, nextStage: null };
     if (cap.verificationStatus === "rejected") return { legalEntityId, nextStage: "closed_lost" };
     if (cap.allowed === true) return { legalEntityId, nextStage: "adyen_approved" };

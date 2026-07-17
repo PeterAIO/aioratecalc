@@ -161,6 +161,8 @@ export type MerchantApplication = {
   hubspotDealId: string | null;
   adyenIds: {
     legalEntityId: string | null;
+    accountHolderId: string | null;
+    balanceAccountId: string | null;
     merchantAccountId: string | null;
     environment: "test" | "live";
   } | null;
