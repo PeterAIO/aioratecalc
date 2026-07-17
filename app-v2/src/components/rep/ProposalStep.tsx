@@ -1,34 +1,24 @@
 "use client";
 
 import { fmt$, fmtPct2 } from "@/lib/utils";
-import type { StatementAnalysis, ProposalOutput, Processor, ProcessorTier } from "@/types/merchant";
-
-const T = { green: "#22c55e", blue: "#0ea5e9", red: "#ef4444", accent: "#f9674e", muted: "#64748b", white: "#e2e8f0", card: "#0f1628", cardBorder: "#1e2d45" };
+import type { StatementAnalysis, ProposalOutput } from "@/types/merchant";
+import styles from "./ProposalStep.module.css";
 
 type Props = {
   analysis: StatementAnalysis;
   proposal: ProposalOutput;
-  activeProcessor: Processor | null;
-  activeTier: ProcessorTier | null;
-  targetMargin: number;
-  netMargin: number;
   onBack: () => void;
   onApply: () => void;
   onNewProposal: () => void;
 };
 
-export default function ProposalStep({ analysis, proposal, targetMargin, netMargin, onBack, onApply, onNewProposal }: Props) {
+export default function ProposalStep({ analysis, proposal, onBack, onApply, onNewProposal }: Props) {
   const pVol = analysis.totalVolume || 1;
   const currentEffRate  = (analysis.totalFees || 0) / pVol;
   const proposedEffRate = (proposal.projectedFees?.monthly || 0) / pVol;
   const savingsMonthly  = (analysis.totalFees || 0) - (proposal.projectedFees?.monthly || 0);
   const savingsAnnual   = savingsMonthly * 12;
   const savingsPct      = (analysis.totalFees || 0) > 0 ? savingsMonthly / (analysis.totalFees || 1) : 0;
-
-  const panel: React.CSSProperties  = { maxWidth: 800, margin: "0 auto", padding: "40px 24px" };
-  const card: React.CSSProperties   = { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: 20 };
-  const btn: React.CSSProperties    = { padding: "12px 28px", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", border: "none" };
-  const rateCard: React.CSSProperties = { ...card, textAlign: "center" as const };
 
   const printProposal = () => {
     const fmtP2 = (n: number) => `${((n || 0) * 100).toFixed(2)}%`;
@@ -141,32 +131,32 @@ export default function ProposalStep({ analysis, proposal, targetMargin, netMarg
   const rates = proposal.proposedRates;
 
   return (
-    <div style={panel}>
+    <div className={styles.panel}>
       {/* Hero */}
-      <div style={{ textAlign: "center", marginBottom: 48, paddingTop: 16 }}>
-        <div style={{ display: "inline-block", background: T.accent, color: "#fff", fontSize: 10, letterSpacing: 3, padding: "4px 14px", borderRadius: 20, marginBottom: 14 }}>MERCHANT PROPOSAL</div>
-        <h1 style={{ fontSize: 38, fontWeight: 800, color: T.white, marginBottom: 12, letterSpacing: -0.5 }}>{analysis.merchantName || "Merchant"}</h1>
-        <p style={{ fontSize: 15, color: T.muted, maxWidth: 560, margin: "0 auto", lineHeight: 1.7 }}>{proposal.proposalSummary}</p>
+      <div className={styles.hero}>
+        <div className={styles.badge}>MERCHANT PROPOSAL</div>
+        <h1 className={styles.merchantName}>{analysis.merchantName || "Merchant"}</h1>
+        <p className={styles.summary}>{proposal.proposalSummary}</p>
       </div>
 
-      {/* Savings hero */}
-      <div style={{ ...card, display: "flex", gap: 32, flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", marginBottom: 28, borderColor: `${T.green}30`, background: `${T.green}06` }}>
+      {/* Savings hero (Stat-Led, no card shape) */}
+      <div className={styles.savingsBlock}>
         <div>
-          <div style={{ fontSize: 11, color: T.green, letterSpacing: 2, textTransform: "uppercase" as const, marginBottom: 10 }}>Annual Savings for Merchant</div>
-          <div style={{ fontSize: 52, fontWeight: 900, color: T.green, lineHeight: 1 }}>{fmt$(savingsAnnual)}</div>
-          <div style={{ fontSize: 13, color: T.green + "80", marginTop: 8 }}>{fmtPct2(Math.abs(savingsPct))} reduction in costs</div>
+          <div className={styles.savingsLabel}>Annual Savings for Merchant</div>
+          <div className={styles.savingsHero}>{fmt$(savingsAnnual)}</div>
+          <div className={styles.savingsSub}>{fmtPct2(Math.abs(savingsPct))} reduction in costs</div>
         </div>
-        <div style={{ display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" }}>
+        <div className={styles.statTicker}>
           {[
             { val: fmt$(savingsMonthly), lbl: "Monthly Savings" },
             { val: fmtPct2(proposedEffRate), lbl: "New Effective Rate" },
             { val: fmtPct2(currentEffRate), lbl: "Current Rate" },
           ].map((s, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 24 }}>
-              {i > 0 && <div style={{ width: 1, height: 40, background: T.cardBorder }} />}
-              <div style={{ textAlign: "center" as const }}>
-                <div style={{ fontSize: 22, fontWeight: 700, color: T.white }}>{s.val}</div>
-                <div style={{ fontSize: 11, color: T.muted, marginTop: 4 }}>{s.lbl}</div>
+            <div key={i} className={styles.statItem}>
+              {i > 0 && <div className={styles.statDivider} />}
+              <div>
+                <div className={styles.statVal}>{s.val}</div>
+                <div className={styles.statLbl}>{s.lbl}</div>
               </div>
             </div>
           ))}
@@ -174,71 +164,71 @@ export default function ProposalStep({ analysis, proposal, targetMargin, netMarg
       </div>
 
       {/* Proposed rates */}
-      <div style={{ marginBottom: 28 }}>
-        <h2 style={{ fontSize: 13, fontWeight: 700, color: T.muted, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 16 }}>Proposed Rates</h2>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+      <div className={styles.section}>
+        <h2 className={styles.sectionTitle}>Proposed Rates</h2>
+        <div className={styles.rateGrid}>
           {rates.pricingModel === "2-tier" && (
             <>
-              <div style={rateCard}><div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>Card Present</div><div style={{ fontSize: 28, fontWeight: 800, color: T.accent }}>{fmtPct2(rates.cardPresentRate)}</div><div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>+${(rates.cardPresentPerTxn || 0).toFixed(2)}/txn</div></div>
-              <div style={rateCard}><div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>Card Not Present</div><div style={{ fontSize: 28, fontWeight: 800, color: T.blue }}>{fmtPct2(rates.cardNotPresentRate)}</div><div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>+${(rates.cardNotPresentPerTxn || 0).toFixed(2)}/txn</div></div>
+              <div className={styles.rateCard}><div className={styles.rateLbl}>Card Present</div><div className={styles.rateVal}>{fmtPct2(rates.cardPresentRate)}</div><div className={styles.rateSub}>+${(rates.cardPresentPerTxn || 0).toFixed(2)}/txn</div></div>
+              <div className={styles.rateCard}><div className={styles.rateLbl}>Card Not Present</div><div className={`${styles.rateVal} ${styles["rateVal--alt"]}`}>{fmtPct2(rates.cardNotPresentRate)}</div><div className={styles.rateSub}>+${(rates.cardNotPresentPerTxn || 0).toFixed(2)}/txn</div></div>
             </>
           )}
           {rates.pricingModel === "interchange-plus" && (
             <>
-              <div style={rateCard}><div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>Markup</div><div style={{ fontSize: 28, fontWeight: 800, color: T.accent }}>{rates.basisPoints} BPS</div><div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>above interchange</div></div>
-              <div style={rateCard}><div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>Per Transaction</div><div style={{ fontSize: 28, fontWeight: 800, color: T.blue }}>${(rates.perTransaction || 0).toFixed(2)}</div><div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>auth fee</div></div>
+              <div className={styles.rateCard}><div className={styles.rateLbl}>Markup</div><div className={styles.rateVal}>{rates.basisPoints} BPS</div><div className={styles.rateSub}>above interchange</div></div>
+              <div className={styles.rateCard}><div className={styles.rateLbl}>Per Transaction</div><div className={`${styles.rateVal} ${styles["rateVal--alt"]}`}>${(rates.perTransaction || 0).toFixed(2)}</div><div className={styles.rateSub}>auth fee</div></div>
             </>
           )}
           {rates.pricingModel === "flat-rate" && (
             <>
-              <div style={rateCard}><div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>All Cards</div><div style={{ fontSize: 28, fontWeight: 800, color: T.accent }}>{fmtPct2(rates.flatRate)}</div><div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>single flat rate</div></div>
-              <div style={rateCard}><div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>Per Transaction</div><div style={{ fontSize: 28, fontWeight: 800, color: T.blue }}>${(rates.perTransaction || 0).toFixed(2)}</div><div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>auth fee</div></div>
+              <div className={styles.rateCard}><div className={styles.rateLbl}>All Cards</div><div className={styles.rateVal}>{fmtPct2(rates.flatRate)}</div><div className={styles.rateSub}>single flat rate</div></div>
+              <div className={styles.rateCard}><div className={styles.rateLbl}>Per Transaction</div><div className={`${styles.rateVal} ${styles["rateVal--alt"]}`}>${(rates.perTransaction || 0).toFixed(2)}</div><div className={styles.rateSub}>auth fee</div></div>
             </>
           )}
           {((rates as { monthlyFee?: number }).monthlyFee ?? 0) > 0 && (
-            <div style={rateCard}><div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>Monthly</div><div style={{ fontSize: 28, fontWeight: 800, color: T.muted }}>{fmt$((rates as { monthlyFee: number }).monthlyFee)}</div><div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>platform fee</div></div>
+            <div className={styles.rateCard}><div className={styles.rateLbl}>Monthly</div><div className={`${styles.rateVal} ${styles["rateVal--muted"]}`}>{fmt$((rates as { monthlyFee: number }).monthlyFee)}</div><div className={styles.rateSub}>platform fee</div></div>
           )}
         </div>
       </div>
 
       {/* Fee comparison */}
-      <div style={{ marginBottom: 28 }}>
-        <h2 style={{ fontSize: 13, fontWeight: 700, color: T.muted, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 16 }}>Fee Comparison</h2>
-        <div style={{ ...card, padding: 0, overflow: "hidden" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", background: "#0a0f1e", padding: "12px 20px" }}>
+      <div className={styles.section}>
+        <h2 className={styles.sectionTitle}>Fee Comparison</h2>
+        <div className={styles.panelSurface}>
+          <div className={styles.tableHeader}>
             {["Category", "Current", "Proposed", "Savings"].map(h => (
-              <div key={h} style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 1, textTransform: "uppercase" as const }}>{h}</div>
+              <div key={h} className={styles.tableHeaderCell}>{h}</div>
             ))}
           </div>
           {[
             { cat: "Monthly Processing Fees", current: analysis.totalFees, proposed: proposal.projectedFees?.monthly, savings: savingsMonthly },
             { cat: "Annual Processing Fees", current: (analysis.totalFees || 0) * 12, proposed: (proposal.projectedFees?.monthly || 0) * 12, savings: savingsAnnual },
           ].map((r, i) => (
-            <div key={i} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", padding: "14px 20px", borderTop: `1px solid ${T.cardBorder}` }}>
-              <div style={{ fontSize: 14, color: T.white }}>{r.cat}</div>
-              <div style={{ color: T.red, fontWeight: 600 }}>{fmt$(r.current)}</div>
-              <div style={{ color: T.blue, fontWeight: 600 }}>{fmt$(r.proposed)}</div>
-              <div style={{ color: T.green, fontWeight: 700 }}>{fmt$(r.savings)}</div>
+            <div key={i} className={styles.tableRow}>
+              <div className={styles.tableCell}>{r.cat}</div>
+              <div className={`${styles.tableCell} ${styles["tableCell--danger"]}`}>{fmt$(r.current)}</div>
+              <div className={`${styles.tableCell} ${styles["tableCell--info"]}`}>{fmt$(r.proposed)}</div>
+              <div className={`${styles.tableCell} ${styles["tableCell--success"]}`}>{fmt$(r.savings)}</div>
             </div>
           ))}
         </div>
       </div>
 
       {/* Apply CTA */}
-      <div style={{ ...card, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 20, marginBottom: 28, borderColor: `${T.blue}30`, background: "linear-gradient(135deg,#0a1628,#0f1e3d)" }}>
+      <div className={styles.ctaPanel}>
         <div>
-          <div style={{ fontSize: 18, fontWeight: 800, color: T.white, marginBottom: 6 }}>Ready to move forward?</div>
-          <div style={{ fontSize: 14, color: T.muted }}>Complete the processing application to get {analysis.merchantName || "this merchant"} onboarded with AIO.</div>
+          <div className={styles.ctaTitle}>Ready to move forward?</div>
+          <div className={styles.ctaSub}>Complete the processing application to get {analysis.merchantName || "this merchant"} onboarded with AIO.</div>
         </div>
-        <button style={{ padding: "14px 32px", borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: "pointer", border: "none", background: "linear-gradient(135deg,#0ea5e9,#0284c7)", color: "#fff", boxShadow: "0 6px 24px rgba(14,165,233,0.35)", flexShrink: 0 }} onClick={onApply}>
+        <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={onApply}>
           Apply for Processing →
         </button>
       </div>
 
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <button style={{ ...btn, background: "#1e2d45", color: T.white }} onClick={onBack}>← Adjust Pricing</button>
-        <button style={{ ...btn, background: T.accent, color: "#fff" }} onClick={printProposal}>Generate Customer Proposal</button>
-        <button style={{ ...btn, background: "transparent", color: T.muted, border: `1px solid ${T.cardBorder}` }} onClick={onNewProposal}>New Proposal</button>
+      <div className={styles.actions}>
+        <button className={`${styles.btn} ${styles.btnGhost}`} onClick={onBack}>← Adjust Pricing</button>
+        <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={printProposal}>Generate Customer Proposal</button>
+        <button className={`${styles.btn} ${styles.btnGhost}`} onClick={onNewProposal}>New Proposal</button>
       </div>
     </div>
   );

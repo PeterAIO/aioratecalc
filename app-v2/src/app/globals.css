@@ -1,24 +1,75 @@
 @import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap");
+
+/* Hallmark · design system root — see design.md at project root for the full spec.
+ * Studied-DNA from aioapp.com, refined through the admin dashboard redesign.
+ * Do not hand-roll a local copy of these tokens in a page/component file —
+ * reference them directly; add new tokens here if the system needs to grow. */
+
+@font-face {
+  font-family: "Coolvetica";
+  font-weight: 400; font-style: normal; font-display: swap;
+  src: url("/fonts/coolvetica/CoolveticaRg-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Coolvetica";
+  font-weight: 700; font-style: normal; font-display: swap;
+  src: url("/fonts/coolvetica/CoolveticaRg-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Coolvetica";
+  font-weight: 800; font-style: normal; font-display: swap;
+  src: url("/fonts/coolvetica/CoolveticaHv-Regular.woff2") format("woff2");
+}
 
 :root {
-  --bg: #0a0f1e;
-  --card: #0f1628;
-  --card-border: #1e2d45;
-  --text: #e2e8f0;
-  --muted: #64748b;
-  --accent: #f9674e;
-  --green: #22c55e;
-  --blue: #0ea5e9;
-  --gold: #f59e0b;
-  --red: #ef4444;
+  --paper:         oklch(97.5% 0.006 32);
+  --paper-2:       oklch(99%   0.003 32);
+  --ink:           oklch(24%   0.012 32);
+  --ink-2:         oklch(46%   0.012 32);
+  --ink-3:         oklch(64%   0.010 32);
+  --rule:          oklch(90%   0.010 32);
+
+  --accent:        oklch(69% 0.170 32);   /* coral — fills */
+  --accent-text:   oklch(52% 0.190 32);   /* coral — text-safe */
+  --accent-2:      oklch(63% 0.140 278);  /* periwinkle — fills */
+  --accent-2-text: oklch(48% 0.150 278);  /* periwinkle — text-safe */
+  --focus:         oklch(63% 0.140 278);
+
+  /* semantic status — encodes meaning (approved/pending/error), never decoration */
+  --success:      oklch(52% 0.140 150);
+  --success-bg:   oklch(52% 0.140 150 / 0.12);
+  --info:         oklch(55% 0.140 237);
+  --info-bg:      oklch(55% 0.140 237 / 0.12);
+  --warning:      oklch(60% 0.150 70);
+  --warning-bg:   oklch(60% 0.150 70 / 0.12);
+  --danger:       oklch(55% 0.190 25);
+  --danger-bg:    oklch(55% 0.190 25 / 0.12);
+
+  --nav-gradient: linear-gradient(135deg, oklch(63% 0.140 278 / 0.16), oklch(69% 0.170 32 / 0.16));
+  --nav-border:   oklch(69% 0.10 60 / 0.25);
+  --gradient:     linear-gradient(135deg, oklch(63% 0.140 278), oklch(69% 0.170 32));
+
+  --font-display: "Coolvetica", "Plus Jakarta Sans", -apple-system, sans-serif;
+  --font-body:    "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+  --space-3xs: 0.125rem; --space-2xs: 0.25rem; --space-xs: 0.5rem;  --space-sm: 0.75rem;
+  --space-md:  1rem;     --space-lg: 1.5rem;   --space-xl: 2.5rem;  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  --radius-sm: 12px; --radius-md: 16px; --radius-lg: 20px; --radius-pill: 999px;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --shadow-whisper: 0 1px 2px oklch(20% 0.01 32 / 0.05), 0 8px 24px oklch(20% 0.01 32 / 0.06);
 }
 
 * { box-sizing: border-box; }
+html, body { overflow-x: clip; }
 
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -27,7 +78,7 @@ input[type="range"] {
   width: 100%;
   height: 4px;
   border-radius: 2px;
-  background: #1e2d45;
+  background: var(--rule);
   outline: none;
 }
 input[type="range"]::-webkit-slider-thumb {
@@ -37,7 +88,7 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(249, 103, 78, 0.4);
+  box-shadow: var(--shadow-whisper);
 }
 
 @keyframes spin {
@@ -48,4 +99,4 @@ input[type="range"]::-webkit-slider-thumb {
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #1e2d45; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 3px; }

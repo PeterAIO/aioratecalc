@@ -1,31 +1,41 @@
 import Link from "next/link";
+import { getEffectiveRole } from "@/lib/auth/getEffectiveRole";
+import { logoutAction } from "@/lib/actions/auth";
+import styles from "./rep-layout.module.css";
 
-export default function RepLayout({ children }: { children: React.ReactNode }) {
+export default async function RepLayout({ children }: { children: React.ReactNode }) {
+  const effective = await getEffectiveRole();
+
   return (
-    <div style={{ minHeight: "100vh", background: "#0a0f1e", display: "flex", flexDirection: "column" }}>
-      {/* Header */}
-      <header style={{ borderBottom: "1px solid #1e2d45", padding: "0 24px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, background: "#0a0f1e", zIndex: 50 }}>
-        <Link href="/rep/proposals/new" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 32, height: 32, background: "#f9674e", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ color: "#fff", fontSize: 14, fontWeight: 900 }}>A</span>
-          </div>
-          <span style={{ fontSize: 16, fontWeight: 800, letterSpacing: 1, color: "#e2e8f0" }}>AIO</span>
-          <span style={{ fontSize: 12, color: "#64748b", marginLeft: 2 }}>Rate Calculator</span>
+    <div className={styles.shell}>
+      <nav className={styles.nav}>
+        <Link href="/rep/proposals/new" className={styles.navWordmark}>
+          <span className={styles.navMark}>A</span>
+          AIO
+          <span className={styles.navSub}>Rate Calculator</span>
         </Link>
-        <nav style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <div className={styles.navActions}>
+          <NavLink href="/rep">Dashboard</NavLink>
           <NavLink href="/rep/proposals/new">New Proposal</NavLink>
-          <NavLink href="/admin">Admin</NavLink>
+          <NavLink href="/rep/prospects/new">Send Customer Link</NavLink>
+          {effective?.role === "admin" && <NavLink href="/admin">Admin</NavLink>}
           <NavLink href="/rep/settings">Settings</NavLink>
-        </nav>
-      </header>
-      <main style={{ flex: 1 }}>{children}</main>
+          {effective?.name && (
+            <span className={styles.navUser}>{effective.name}</span>
+          )}
+          <form action={logoutAction}>
+            <button type="submit" className={styles.navButton}>Sign Out</button>
+          </form>
+        </div>
+      </nav>
+      <main className={styles.main}>{children}</main>
     </div>
   );
 }
 
 function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
-    <Link href={href} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600, color: "#94a3b8", textDecoration: "none", transition: "color .15s" }}>
+    <Link href={href} className={styles.navLink}>
       {children}
     </Link>
   );

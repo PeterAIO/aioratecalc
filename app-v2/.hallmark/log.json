@@ -1,0 +1,4 @@
+[
+  { "date": "2026-07-07", "scope": "app", "macrostructure": "Stat-Led (app pages) / single centered card (auth) / Stat-Led + editorial opener (public lead-gen)", "theme": "design.md — studied-DNA (aioapp.com), locked", "enrichment": "none", "brief": "Full-app rollout of the admin dashboard's design system to login/customer-login, rep shell + 5-step proposal wizard, customer + lead self-serve flow, admin pillow settings, dev role switcher" },
+  { "date": "2026-07-07", "macrostructure": "Bento Grid (adapted, app-shell)", "theme": "studied-DNA (aioapp.com)", "enrichment": "none", "brief": "Admin dashboard redesign — calm mood, real AIO brand palette" }
+]

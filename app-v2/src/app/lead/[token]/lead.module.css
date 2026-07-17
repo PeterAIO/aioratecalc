@@ -1,0 +1,34 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app
+ * macrostructure: Public lead-gen (no rep/admin nav, per design.md) — this file
+ * only styles the invalid/expired-link state; the main upload flow lives in
+ * LeadUploadStep.tsx, styled separately.
+ */
+
+.centered {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper);
+  padding: var(--space-lg);
+}
+
+.centeredInner {
+  text-align: center;
+  max-width: 24rem;
+}
+
+.title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.4rem;
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+}
+
+.subtitle {
+  font-size: 0.9rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+  margin: 0;
+}

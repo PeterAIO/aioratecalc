@@ -1,0 +1,78 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg);
+}
+
+.row--placeholder { opacity: 0.6; }
+
+.labelRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-2xs);
+}
+
+.label {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.status {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 3px var(--space-sm);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+
+.status--not_started { background: var(--rule); color: var(--ink-2); }
+.status--in_progress { background: var(--info-bg); color: var(--info); }
+.status--complete { background: var(--success-bg); color: var(--success); }
+.status--coming_soon { background: var(--rule); color: var(--ink-3); }
+
+.description {
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.cta {
+  flex-shrink: 0;
+  padding: var(--space-xs) var(--space-lg);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+  background: var(--accent);
+  color: white;
+  transition: opacity 150ms var(--ease-out), transform 100ms var(--ease-out);
+}
+
+.cta:hover { opacity: 0.92; }
+.cta:active { transform: scale(0.97); }
+
+.cta:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cta { transition-duration: 1ms; }
+}

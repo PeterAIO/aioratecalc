@@ -1,0 +1,242 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+
+.main {
+  max-width: 38rem;
+  margin-inline: auto;
+  padding: var(--space-2xl) var(--space-lg) var(--space-3xl);
+}
+
+.headerTitle {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.5rem, 2vw + 1rem, 2rem);
+  letter-spacing: -0.02em;
+  margin: 0 0 var(--space-2xs);
+}
+
+.headerSubtitle {
+  color: var(--ink-2);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  margin: 0 0 var(--space-xl);
+}
+
+/* ---------- Panels ---------- */
+
+.panel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-xl);
+  margin-bottom: var(--space-lg);
+}
+
+.field { margin-bottom: var(--space-md); }
+.field:last-child { margin-bottom: 0; }
+
+.label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: var(--space-2xs);
+  display: block;
+}
+
+.input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 150ms var(--ease-out);
+}
+
+.input:focus-visible {
+  border-color: var(--focus);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* ---------- Model pills ---------- */
+
+.modelRow {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-xs);
+  margin-bottom: var(--space-lg);
+}
+
+.modelPill {
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: capitalize;
+  cursor: pointer;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink-2);
+  transition: background 150ms var(--ease-out), color 150ms var(--ease-out), border-color 150ms var(--ease-out);
+}
+
+.modelPill[data-active="true"] {
+  border-color: var(--accent);
+  background: oklch(69% 0.17 32 / 0.1);
+  color: var(--accent-text);
+}
+
+.modelPill:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.marginRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: var(--space-xs);
+}
+
+.marginLabel { font-size: 0.85rem; color: var(--ink-2); }
+
+.marginValue {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.3rem;
+  color: var(--accent-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Error ---------- */
+
+.error {
+  font-size: 0.85rem;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+  line-height: 1.5;
+}
+
+/* ---------- Buttons ---------- */
+
+.btnPrimary {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: var(--space-sm) var(--space-xl);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 150ms var(--ease-out);
+}
+
+.btnPrimary:hover { opacity: 0.92; }
+.btnPrimary:disabled { opacity: 0.6; cursor: default; }
+.btnPrimary:active { transform: scale(0.97); }
+.btnPrimary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.btnGhost {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink-2);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  padding: var(--space-sm) var(--space-xl);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
+}
+
+.btnGhost:hover { background: var(--rule); color: var(--ink); }
+.btnGhost:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.btnGhost:active { transform: scale(0.97); }
+
+/* ---------- Success state ---------- */
+
+.successWrap {
+  max-width: 34rem;
+  margin: var(--space-3xl) auto;
+  padding: 0 var(--space-lg);
+  text-align: center;
+}
+
+.successMark {
+  font-size: 3rem;
+  margin-bottom: var(--space-md);
+  color: var(--success);
+}
+
+.successTitle {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.75rem;
+  color: var(--success);
+  margin: 0 0 var(--space-sm);
+}
+
+.successBody {
+  font-size: 0.95rem;
+  color: var(--ink-2);
+  margin: 0 0 var(--space-lg);
+  line-height: 1.7;
+}
+
+.successBody strong { color: var(--ink); }
+
+.linkRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-lg);
+  text-align: left;
+}
+
+.linkCode {
+  flex: 1;
+  font-size: 0.85rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btnCopy {
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: var(--space-xs) var(--space-md);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: opacity 150ms var(--ease-out);
+}
+
+.btnCopy[data-copied="true"] { background: var(--success); }
+.btnCopy:hover { opacity: 0.92; }
+.btnCopy:active { transform: scale(0.97); }
+.btnCopy:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+@media (max-width: 30rem) {
+  .modelRow { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modelPill, .btnPrimary, .btnGhost, .btnCopy, .input {
+    transition-duration: 1ms;
+  }
+}

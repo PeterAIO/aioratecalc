@@ -1,0 +1,257 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+/* Shared form language with rep/ApplyStep.module.css — keep the two in lockstep. */
+
+.page {
+  max-width: 50rem;
+  margin-inline: auto;
+  padding: var(--space-xl) var(--space-lg);
+}
+
+.pageTitle {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+}
+
+.pageSubtitle {
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  margin: 0 0 var(--space-xl);
+}
+
+/* ---------- Field panel ---------- */
+
+.panel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg);
+  margin-bottom: var(--space-lg);
+}
+
+.sectionTitle {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--ink);
+  margin: 0 0 var(--space-md);
+}
+
+.hint {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin: 0 0 var(--space-md);
+}
+
+.row {
+  margin-top: var(--space-md);
+}
+
+.row:first-child {
+  margin-top: 0;
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+}
+
+.inlineRow {
+  display: flex;
+  gap: var(--space-lg);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+}
+
+.label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--space-2xs);
+}
+
+.input {
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 150ms var(--ease-out);
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.input::placeholder {
+  color: var(--ink-3);
+}
+
+.textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
+.selectInline {
+  width: auto;
+}
+
+/* ---------- Agreement / checkboxes ---------- */
+
+.checkboxGroup {
+  margin-top: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.checkboxRow {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.checkbox {
+  margin-top: 2px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.checkboxText {
+  font-size: 0.8125rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+/* ---------- Error / actions ---------- */
+
+.errorBanner {
+  margin-bottom: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  color: var(--danger);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.btnPrimary {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 0.875rem;
+  padding: var(--space-sm) var(--space-lg);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 150ms var(--ease-out);
+}
+
+.btnPrimary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btnPrimary:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btnPrimary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.btnSecondary {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 0.875rem;
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--paper);
+  color: var(--ink-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
+}
+
+.btnSecondary:hover {
+  background: var(--rule);
+  color: var(--ink);
+}
+
+.btnSecondary:active {
+  transform: scale(0.97);
+}
+
+.btnSecondary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- Success state ---------- */
+
+.successWrap {
+  max-width: 37.5rem;
+  margin: var(--space-2xl) auto;
+  padding: 0 var(--space-lg);
+  text-align: center;
+}
+
+.successIcon {
+  font-size: 3.5rem;
+  margin-bottom: var(--space-md);
+  color: var(--success);
+}
+
+.successTitle {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.75rem;
+  color: var(--success);
+  margin: 0 0 var(--space-sm);
+}
+
+.successBody {
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+  line-height: 1.7;
+  margin-bottom: var(--space-xl);
+}
+
+.successBody strong {
+  color: var(--ink);
+}
+
+/* ---------- Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .input,
+  .btnPrimary,
+  .btnSecondary {
+    transition-duration: 1ms;
+  }
+}

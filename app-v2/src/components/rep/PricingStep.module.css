@@ -1,0 +1,330 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+
+.page {
+  max-width: 56.25rem;
+  margin-inline: auto;
+  padding: var(--space-2xl) var(--space-lg) var(--space-3xl);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.5rem, 2vw + 1rem, 2rem);
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+}
+
+.subtitle {
+  font-size: 0.9rem;
+  color: var(--ink-2);
+  margin: 0 0 var(--space-xl);
+  line-height: 1.55;
+}
+
+.subtitleAccent {
+  color: var(--accent-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.subtitleStrong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Model selector (pill-style cards) ---------- */
+
+.modelGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xl);
+}
+
+.modelCard {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-md);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 150ms var(--ease-out), background 150ms var(--ease-out);
+}
+
+.modelCard:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.modelHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+}
+
+.modelDot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--rule);
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.modelName {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.modelDesc {
+  font-size: 0.78rem;
+  color: var(--ink-3);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ---------- Layout ---------- */
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 21.25rem;
+  gap: var(--space-lg);
+}
+
+.layoutSide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+/* ---------- Panels ---------- */
+
+.panel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg);
+}
+
+.panel + .panel {
+  margin-top: var(--space-lg);
+}
+
+.panelTitle {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--ink-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0 0 var(--space-md);
+}
+
+.calculating {
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  text-align: center;
+  padding: var(--space-md) 0;
+}
+
+/* ---------- Rate / metric boxes ---------- */
+
+.rateGrid,
+.projectionGrid {
+  display: flex;
+  gap: var(--space-md);
+}
+
+.projectionGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.box {
+  flex: 1;
+  background: var(--paper);
+  border-radius: var(--radius-sm);
+  padding: var(--space-md);
+  text-align: center;
+}
+
+.boxLabel {
+  font-size: 0.68rem;
+  color: var(--ink-3);
+  margin-bottom: var(--space-xs);
+}
+
+.boxValue {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.75rem;
+  color: var(--ink);
+}
+
+.boxValue--metric {
+  font-family: var(--font-body);
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.boxSub {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin-top: var(--space-2xs);
+}
+
+/* semantic value colors — preserve old T.blue/T.gold/T.green/T.red mapping */
+.value--info    { color: var(--info); }
+.value--warning { color: var(--warning); }
+.value--success { color: var(--success); }
+.value--danger  { color: var(--danger); }
+.value--accent  { color: var(--accent-text); }
+
+/* ---------- Margin target ---------- */
+
+.sliderHeader {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: var(--space-xs);
+}
+
+.sliderLabel {
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+.sliderValue {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.25rem;
+  color: var(--accent-text);
+}
+
+.sliderTicks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: var(--ink-3);
+  margin-top: var(--space-2xs);
+}
+
+.fieldGroup {
+  margin-top: var(--space-md);
+}
+
+.fieldLabel {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  display: block;
+  margin-bottom: var(--space-2xs);
+}
+
+.input {
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  outline: none;
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* ---------- Margin breakdown rows ---------- */
+
+.miniRow {
+  margin-top: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--paper);
+  border-radius: var(--radius-sm);
+  display: flex;
+  justify-content: space-between;
+}
+
+.miniRowLabel {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+.miniRowValue {
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* below-cost-floor / floor-breach alerts — danger is load-bearing, not decorative */
+.alertDanger {
+  margin-top: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  color: var(--danger);
+}
+
+/* ---------- Footer actions ---------- */
+
+.actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-xl);
+}
+
+.btnGhost {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--ink-2);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  padding: var(--space-sm) var(--space-xl);
+  cursor: pointer;
+  transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
+}
+
+.btnGhost:hover { background: var(--rule); color: var(--ink); }
+.btnGhost:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.btnGhost:active { transform: scale(0.97); }
+
+.btnPrimary {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: var(--space-sm) var(--space-xl);
+  cursor: pointer;
+  box-shadow: var(--shadow-whisper);
+  transition: opacity 150ms var(--ease-out);
+}
+
+.btnPrimary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.btnPrimary:active { transform: scale(0.97); }
+.btnPrimary:disabled { cursor: not-allowed; }
+
+@media (max-width: 48rem) {
+  .modelGrid { grid-template-columns: 1fr; }
+  .layout { grid-template-columns: 1fr; }
+  .projectionGrid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modelCard, .btnGhost, .btnPrimary { transition-duration: 1ms; }
+}

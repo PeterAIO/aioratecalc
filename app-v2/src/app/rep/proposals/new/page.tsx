@@ -1,31 +1,35 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { LocalStorageAdapter } from "@/lib/storage/localStorageAdapter";
+import { useState, useEffect, Fragment } from "react";
+import { getSettingsAction, saveApplicationAction } from "@/lib/actions/applications";
 import UploadStep    from "@/components/rep/UploadStep";
 import AnalysisStep  from "@/components/rep/AnalysisStep";
 import PricingStep   from "@/components/rep/PricingStep";
 import ProposalStep  from "@/components/rep/ProposalStep";
 import ApplyStep     from "@/components/rep/ApplyStep";
 import type { MerchantApplication, StatementAnalysis, ProposalOutput, Processor, ProcessorTier, AppSettings } from "@/types/merchant";
+import styles from "./proposals-new.module.css";
 
 const STEPS = ["Upload", "Analysis", "Pricing", "Proposal", "Apply"] as const;
 type Step = 0 | 1 | 2 | 3 | 4;
 
-const T = { accent: "#f9674e", muted: "#64748b", white: "#e2e8f0", cardBorder: "#1e2d45", green: "#22c55e" };
-
 function newApp(): MerchantApplication {
   return {
     id: `app_${Date.now()}`,
+    ownerUserId: "", // stamped from the session by saveApplicationAction on first save
+    customerUserId: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     stage: "analysis",
     hubspotDealId: null,
     adyenIds: null,
     adyenOnboardingUrl: null,
-    merchantLinkToken: null,
-    merchantLinkSentAt: null,
-    merchantLinkExpiry: null,
+    targetMargin: null,
+    pricingModel: null,
+    customerLinkToken: null,
+    customerLinkPurpose: null,
+    customerLinkSentAt: null,
+    customerLinkExpiresAt: null,
     analysis: null,
     proposal: null,
     business: null,
@@ -39,13 +43,9 @@ export default function NewProposalPage() {
   const [step, setStep]           = useState<Step>(0);
   const [app, setApp]             = useState<MerchantApplication>(newApp());
   const [settings, setSettings]   = useState<AppSettings | null>(null);
-  const [pricingModel, setModel]  = useState<string>("2-tier");
-  const [targetMargin, setMargin] = useState(0.008);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const storage = new LocalStorageAdapter();
-    storage.getSettings().then(s => setSettings(s)).catch(() => {});
+    getSettingsAction().then(s => setSettings(s)).catch(() => {});
   }, []);
 
   const activeProcessor: Processor | null =
@@ -55,25 +55,22 @@ export default function NewProposalPage() {
 
   const handleAnalyzed = async (rawAnalysis: Record<string, unknown>) => {
     const analysis = rawAnalysis as StatementAnalysis;
-    const storage  = new LocalStorageAdapter();
     const updated: MerchantApplication = { ...app, analysis, stage: "analysis", updatedAt: new Date().toISOString() };
-    setApp(updated);
-    await storage.saveApplication(updated);
+    const saved = await saveApplicationAction(updated);
+    setApp(saved);
     setStep(1);
   };
 
-  const handleProposal = async (proposal: ProposalOutput, model: string, margin: number) => {
-    const storage  = new LocalStorageAdapter();
+  const handleProposal = async (proposal: ProposalOutput) => {
     const updated: MerchantApplication = { ...app, proposal, stage: "proposal_ready", updatedAt: new Date().toISOString() };
-    setApp(updated);
-    setModel(model);
-    setMargin(margin);
-    await storage.saveApplication(updated);
+    const saved = await saveApplicationAction(updated);
+    setApp(saved);
     setStep(3);
   };
 
-  const handleSaved = (updated: MerchantApplication) => {
-    setApp(updated);
+  const handleSaved = async (updated: MerchantApplication) => {
+    const saved = await saveApplicationAction(updated);
+    setApp(saved);
   };
 
   const reset = () => {
@@ -82,41 +79,27 @@ export default function NewProposalPage() {
   };
 
   return (
-    <div>
+    <div className={styles.page}>
       {/* Step indicator */}
-      <div style={{ borderBottom: "1px solid #1e2d45", padding: "0 24px" }}>
-        <div style={{ maxWidth: 800, margin: "0 auto", display: "flex", gap: 0 }}>
+      <div className={styles.stepperRow}>
+        <div className={styles.stepper}>
           {STEPS.map((name, i) => {
             const done   = i < step;
             const active = i === step;
             return (
-              <button
-                key={name}
-                disabled={i > step}
-                onClick={() => i < step ? setStep(i as Step) : undefined}
-                style={{
-                  padding: "14px 20px",
-                  background: "transparent",
-                  border: "none",
-                  borderBottom: active ? `2px solid ${T.accent}` : done ? `2px solid ${T.green}` : "2px solid transparent",
-                  cursor: i < step ? "pointer" : "default",
-                  display: "flex", alignItems: "center", gap: 8,
-                  transition: "all .15s",
-                }}
-              >
-                <span style={{
-                  width: 22, height: 22, borderRadius: "50%",
-                  background: active ? T.accent : done ? T.green : "#1e2d45",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 11, fontWeight: 700, color: active || done ? "#fff" : T.muted,
-                  flexShrink: 0,
-                }}>
-                  {done ? "✓" : i + 1}
-                </span>
-                <span style={{ fontSize: 13, fontWeight: active ? 700 : 500, color: active ? T.white : done ? T.green : T.muted }}>
-                  {name}
-                </span>
-              </button>
+              <Fragment key={name}>
+                {i > 0 && <div className={styles.connector} data-done={i <= step} />}
+                <button
+                  disabled={i > step}
+                  onClick={() => i < step ? setStep(i as Step) : undefined}
+                  data-state={active ? "active" : done ? "done" : "pending"}
+                  data-clickable={i < step}
+                  className={styles.step}
+                >
+                  <span className={styles.stepCircle}>{done ? "✓" : i + 1}</span>
+                  <span className={styles.stepLabel}>{name}</span>
+                </button>
+              </Fragment>
             );
           })}
         </div>
@@ -146,10 +129,6 @@ export default function NewProposalPage() {
         <ProposalStep
           analysis={app.analysis}
           proposal={app.proposal}
-          activeProcessor={activeProcessor}
-          activeTier={activeTier}
-          targetMargin={targetMargin}
-          netMargin={targetMargin}
           onBack={() => setStep(2)}
           onApply={() => setStep(4)}
           onNewProposal={reset}

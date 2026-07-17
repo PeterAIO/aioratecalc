@@ -1,0 +1,98 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+
+.section {
+  margin-top: var(--space-2xl);
+}
+
+.heading {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+}
+
+.subtitle {
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  line-height: 1.55;
+  margin: 0 0 var(--space-lg);
+}
+
+.panel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg);
+}
+
+.emptyState {
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 0.9rem;
+  padding: var(--space-md) 0;
+}
+
+.group + .group {
+  margin-top: var(--space-lg);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--rule);
+}
+
+.groupTitle {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent-text);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--space-sm);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm) var(--space-lg);
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.label {
+  font-size: 0.68rem;
+  color: var(--ink-3);
+}
+
+.value {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.editLink {
+  display: inline-block;
+  margin-top: var(--space-lg);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent-text);
+  text-decoration: none;
+}
+
+.editLink:hover { text-decoration: underline; }
+
+.editLink:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 30rem) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}

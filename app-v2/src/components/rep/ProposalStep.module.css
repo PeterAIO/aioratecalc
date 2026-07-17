@@ -1,0 +1,316 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+
+.panel {
+  max-width: 50rem;
+  margin-inline: auto;
+  padding: var(--space-2xl) var(--space-lg);
+}
+
+/* ---------- Hero ---------- */
+
+.hero {
+  text-align: center;
+  margin-bottom: var(--space-2xl);
+  padding-top: var(--space-md);
+  animation: fadeUp 500ms var(--ease-out) both;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.badge {
+  display: inline-block;
+  background: var(--accent);
+  color: white;
+  font-size: 0.625rem;
+  letter-spacing: 0.15em;
+  padding: var(--space-3xs) var(--space-md);
+  border-radius: var(--radius-pill);
+  margin-bottom: var(--space-md);
+}
+
+.merchantName {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.75rem, 2.4vw + 1rem, 2.375rem);
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0 0 var(--space-sm);
+}
+
+.summary {
+  font-size: 0.9rem;
+  color: var(--ink-2);
+  max-width: 35rem;
+  margin: 0 auto;
+  line-height: 1.7;
+}
+
+/* ---------- Savings stat-led block ---------- */
+
+.savingsBlock {
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: var(--space-xl) 0;
+  margin-bottom: var(--space-2xl);
+  display: flex;
+  gap: var(--space-xl);
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.savingsLabel {
+  font-size: 0.7rem;
+  color: var(--success);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: var(--space-xs);
+}
+
+.savingsHero {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(2.25rem, 3.5vw + 1rem, 3.25rem);
+  color: var(--success);
+  line-height: 1;
+}
+
+.savingsSub {
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  margin-top: var(--space-xs);
+}
+
+.statTicker {
+  display: flex;
+  gap: var(--space-lg);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.statItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+
+.statDivider {
+  width: 1px;
+  height: 2rem;
+  background: var(--rule);
+}
+
+.statVal {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-align: center;
+}
+
+.statLbl {
+  font-size: 0.7rem;
+  color: var(--ink-3);
+  margin-top: var(--space-3xs);
+  text-align: center;
+}
+
+/* ---------- Section heading ---------- */
+
+.sectionTitle {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--ink-3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin: 0 0 var(--space-md);
+}
+
+.section {
+  margin-bottom: var(--space-xl);
+}
+
+/* ---------- Rate cards ---------- */
+
+.rateGrid {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.rateCard {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg);
+  text-align: center;
+  min-width: 9rem;
+  flex: 1;
+}
+
+.rateLbl {
+  font-size: 0.68rem;
+  color: var(--ink-3);
+  margin-bottom: var(--space-2xs);
+}
+
+.rateVal {
+  font-size: 1.5rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-text);
+}
+
+.rateVal--alt { color: var(--accent-2-text); }
+.rateVal--muted { color: var(--ink-2); }
+
+.rateSub {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin-top: var(--space-2xs);
+}
+
+/* ---------- Fee comparison panel ---------- */
+
+.panelSurface {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  overflow: hidden;
+}
+
+.tableHeader {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--paper);
+  border-bottom: 1px solid var(--rule);
+}
+
+.tableHeaderCell {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--ink-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tableRow {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--rule);
+}
+
+.tableRow:first-child { border-top: none; }
+
+.tableCell { font-size: 0.85rem; color: var(--ink); align-self: center; }
+.tableCell--danger { color: var(--danger); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tableCell--info { color: var(--info); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tableCell--success { color: var(--success); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ---------- Apply CTA ---------- */
+
+.ctaPanel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  margin-bottom: var(--space-xl);
+}
+
+.ctaTitle {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--ink);
+  margin: 0 0 var(--space-2xs);
+}
+
+.ctaSub {
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+/* ---------- Buttons ---------- */
+
+.actions {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.btn {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 700;
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-pill);
+  border: none;
+  cursor: pointer;
+  transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btnPrimary {
+  background: var(--accent);
+  color: white;
+}
+
+.btnPrimary:hover {
+  background: var(--accent-text);
+}
+
+.btnSecondary {
+  background: var(--accent-2);
+  color: white;
+  flex-shrink: 0;
+}
+
+.btnSecondary:hover {
+  background: var(--accent-2-text);
+}
+
+.btnGhost {
+  background: var(--paper);
+  color: var(--ink-2);
+  border: 1px solid var(--rule);
+}
+
+.btnGhost:hover {
+  background: var(--rule);
+  color: var(--ink);
+}
+
+@media (max-width: 40rem) {
+  .tableHeader, .tableRow {
+    grid-template-columns: 1.5fr 1fr 1fr 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero { animation: none; opacity: 1; transform: none; }
+  .btn, .step { transition-duration: 1ms; }
+}

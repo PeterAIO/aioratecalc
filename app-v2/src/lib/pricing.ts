@@ -116,7 +116,6 @@ export function derivePricing(
 
   const floorTier   = getMarginFloor(vol);
   const marginFloor = Math.max(vol * floorTier.takeRate, floorTier.minMRR);
-  const aioRevenue  = projectedMonthlyFees - (vol * icRate + txns * perTxnFee + (feeOverrides.monthlyFee || 0)) * 0;
   // aioRevenue = projected - what merchant would pay at IC-only
   const icOnlyCost  = vol * icRate;
   const aioRev      = projectedMonthlyFees - icOnlyCost;
@@ -130,5 +129,64 @@ export function derivePricing(
     aioRevenue: Math.max(0, aioRev),
     marginFloor,
     cpVol, cnpVol, cpPct, cnpPct,
+  };
+}
+
+// Global admin-set padding applied to the true floor/cost before a rep is
+// allowed to see it — reps must never discover or undercut AIO's actual
+// rock-bottom margin. Pure function; the active policy is fetched from the
+// margin_policy table by the caller (see lib/actions/pricing.ts) and passed
+// in here, keeping this file free of DB access.
+export type PaddingConfig = {
+  paddingBps: number;          // padding added to the true floor's take-rate, in basis points
+  paddingMinMrrAdd: number;    // flat padding added to the true minMRR floor
+  paddingAdyenCostHide: boolean; // whether the exact Adyen cost rate is hidden from reps
+};
+
+export function getPaddedFloor(
+  trueFloor: { takeRate: number; minMRR: number },
+  padding: PaddingConfig
+): { takeRate: number; minMRR: number } {
+  return {
+    takeRate: trueFloor.takeRate + padding.paddingBps / 10000,
+    minMRR: trueFloor.minMRR + padding.paddingMinMrrAdd,
+  };
+}
+
+export type RoleScopedPricing = DerivedPricing & {
+  belowCostFloor: boolean;      // computed from the TRUE Adyen cost server-side; the cost itself is never derived from this flag
+  adyenCostRate: number | null; // null when hidden from this role (reps, per paddingAdyenCostHide)
+};
+
+// Returns a pricing view scoped to who's asking. Admins get the true
+// marginFloor/adyenCostRate; everyone else gets the padded floor and
+// (per policy) a redacted cost, plus a safe belowCostFloor boolean computed
+// from the true numbers without ever exposing them.
+export function derivePricingForRole(
+  analysis: Parameters<typeof derivePricing>[0],
+  targetMargin: number,
+  pricingModel: string,
+  feeOverrides: FeeOverrides,
+  role: "admin" | "rep",
+  activeTier: ProcessorTier | null,
+  padding: PaddingConfig
+): RoleScopedPricing {
+  const result = derivePricing(analysis, targetMargin, pricingModel, feeOverrides);
+  const trueAdyenCostRate = activeTier ? adyenRateOnVolume(activeTier, analysis.totalVolume, analysis.totalTransactions) : 0;
+  const belowCostFloor = !!activeTier && targetMargin - trueAdyenCostRate < 0;
+
+  if (role === "admin") {
+    return { ...result, belowCostFloor, adyenCostRate: activeTier ? trueAdyenCostRate : null };
+  }
+
+  const vol = analysis.totalVolume || 0;
+  const paddedFloor = getPaddedFloor(getMarginFloor(vol), padding);
+  const paddedMarginFloor = Math.max(vol * paddedFloor.takeRate, paddedFloor.minMRR);
+
+  return {
+    ...result,
+    marginFloor: paddedMarginFloor,
+    belowCostFloor,
+    adyenCostRate: padding.paddingAdyenCostHide ? null : trueAdyenCostRate,
   };
 }

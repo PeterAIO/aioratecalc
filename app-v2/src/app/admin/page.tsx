@@ -1,73 +1,40 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { LocalStorageAdapter } from "@/lib/storage/localStorageAdapter";
-import { fmt$, fmtPct2 } from "@/lib/utils";
+import Link from "next/link";
+import { listApplicationsAction, listSubmissionsAction, listRepsAction, type RepSummary } from "@/lib/actions/applications";
+import { logoutAction } from "@/lib/actions/auth";
+import { fmt$ } from "@/lib/utils";
+import { STAGE_COLORS } from "@/lib/stageColors";
 import type { MerchantApplication, CustomerSubmission } from "@/types/merchant";
+import styles from "./admin.module.css";
 
-const T = { green: "#22c55e", blue: "#0ea5e9", red: "#ef4444", accent: "#f9674e", gold: "#f59e0b", muted: "#64748b", white: "#e2e8f0", card: "#0f1628", cardBorder: "#1e2d45" };
-
-const ADMIN_PASSWORD = "aio2024";
-
-const STAGE_COLORS: Record<string, string> = {
-  analysis: T.muted, pricing: T.blue, proposal_ready: T.gold, proposal_sent: T.gold,
-  merchant_link_sent: T.accent, merchant_filling: T.accent, adyen_kyc_pending: T.blue,
-  adyen_kyc_complete: T.green, adyen_approved: T.green, closed_lost: T.red,
-};
-
+// Password gate removed — middleware.ts now guards /admin/* via real session auth.
 export default function AdminPage() {
-  const [authed, setAuthed]       = useState(false);
-  const [pw, setPw]               = useState("");
-  const [pwErr, setPwErr]         = useState(false);
   const [apps, setApps]           = useState<MerchantApplication[]>([]);
   const [subs, setSubs]           = useState<CustomerSubmission[]>([]);
+  const [reps, setReps]           = useState<RepSummary[]>([]);
   const [tab, setTab]             = useState<"apps" | "leads">("apps");
   const [selected, setSelected]   = useState<MerchantApplication | null>(null);
+  const [search, setSearch]       = useState("");
 
   useEffect(() => {
-    if (typeof window !== "undefined" && sessionStorage.getItem("admin_authed") === "1") setAuthed(true);
+    listApplicationsAction().then(setApps).catch(() => {});
+    listSubmissionsAction().then(setSubs).catch(() => {});
+    listRepsAction().then(setReps).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    if (!authed) return;
-    const storage = new LocalStorageAdapter();
-    storage.listApplications().then(setApps).catch(() => {});
-    storage.listSubmissions().then(setSubs).catch(() => {});
-  }, [authed]);
+  const repMap = new Map(reps.map(r => [r.id, r]));
 
-  const login = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (pw === ADMIN_PASSWORD) {
-      setAuthed(true);
-      sessionStorage.setItem("admin_authed", "1");
-    } else {
-      setPwErr(true);
-    }
-  };
-
-  if (!authed) {
+  const filteredApps = apps.filter(a => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
     return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0a0f1e" }}>
-        <form onSubmit={login} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 16, padding: 40, width: 360 }}>
-          <div style={{ width: 48, height: 48, background: T.accent, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 20 }}>
-            <span style={{ color: "#fff", fontSize: 22, fontWeight: 900 }}>A</span>
-          </div>
-          <h1 style={{ fontSize: 22, fontWeight: 800, color: T.white, marginBottom: 6 }}>Admin Access</h1>
-          <p style={{ fontSize: 13, color: T.muted, marginBottom: 24 }}>AIO Rate Calculator — Internal Dashboard</p>
-          <input
-            type="password" value={pw} onChange={e => { setPw(e.target.value); setPwErr(false); }}
-            placeholder="Password"
-            style={{ width: "100%", padding: "12px 14px", background: "#0a0f1e", border: `1px solid ${pwErr ? T.red : T.cardBorder}`, borderRadius: 8, color: T.white, fontSize: 14, outline: "none", boxSizing: "border-box" as const, marginBottom: 12 }}
-          />
-          {pwErr && <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>Incorrect password</div>}
-          <button type="submit" style={{ width: "100%", padding: "12px", borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: "pointer", border: "none", background: T.accent, color: "#fff" }}>Sign In</button>
-        </form>
-      </div>
+      (a.business?.dba || "").toLowerCase().includes(q) ||
+      (a.business?.legalName || "").toLowerCase().includes(q) ||
+      (a.analysis?.merchantName || "").toLowerCase().includes(q)
     );
-  }
-
-  const card: React.CSSProperties = { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: 20 };
-  const btn: React.CSSProperties  = { padding: "8px 18px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", border: "none" };
+  });
 
   const metrics = {
     total:     apps.length,
@@ -79,131 +46,211 @@ export default function AdminPage() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0a0f1e", color: T.white }}>
-      {/* Header */}
-      <header style={{ borderBottom: `1px solid ${T.cardBorder}`, padding: "0 32px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 32, height: 32, background: T.accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ color: "#fff", fontSize: 14, fontWeight: 900 }}>A</span>
-          </div>
-          <span style={{ fontSize: 15, fontWeight: 800 }}>Admin Dashboard</span>
+    <div className={styles.dashboard}>
+      <nav className={styles.nav}>
+        <div className={styles.navWordmark}>
+          <span className={styles.navMark}>A</span>
+          Admin Dashboard
         </div>
-        <button onClick={() => { sessionStorage.removeItem("admin_authed"); setAuthed(false); }} style={{ ...btn, background: "#1e2d45", color: T.muted }}>Sign Out</button>
-      </header>
+        <div className={styles.navActions}>
+          <Link href="/admin/users" className={styles.navLink}>Users</Link>
+          <Link href="/admin/settings/pillow" className={styles.navLink}>Padding</Link>
+          <form action={logoutAction}>
+            <button type="submit" className={styles.navButton}>Sign Out</button>
+          </form>
+        </div>
+      </nav>
 
-      <div style={{ padding: "32px" }}>
-        {/* Metrics */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 14, marginBottom: 32 }}>
-          {[
-            { lbl: "Total Applications", val: String(metrics.total), color: T.white },
-            { lbl: "Proposals Sent", val: String(metrics.proposals), color: T.gold },
-            { lbl: "In Onboarding", val: String(metrics.applying), color: T.blue },
-            { lbl: "Approved", val: String(metrics.approved), color: T.green },
-            { lbl: "Total Volume", val: fmt$(metrics.volume), color: T.white },
-            { lbl: "Projected Savings", val: fmt$(metrics.savings) + "/yr", color: T.green },
-          ].map(m => (
-            <div key={m.lbl} style={card}>
-              <div style={{ fontSize: 22, fontWeight: 800, color: m.color, marginBottom: 4 }}>{m.val}</div>
-              <div style={{ fontSize: 11, color: T.muted }}>{m.lbl}</div>
-            </div>
-          ))}
+      <main className={styles.main}>
+        <div className={styles.header}>
+          <h1 className={styles.headerTitle}>Applications &amp; leads</h1>
+          <p className={styles.headerSubtitle}>Every rep-driven proposal and customer self-serve lead across the pipeline, with margin oversight for approved deals.</p>
+        </div>
+
+        {/* Stat-led hero — no card shape, sits directly on the page */}
+        <div className={styles.stats}>
+          <div className={styles.statHero}>{fmt$(metrics.volume)}</div>
+          <p className={styles.statCaption}>Total volume across the pipeline</p>
+          <div className={styles.statTicker}>
+            <span><b>{metrics.total}</b> Applications</span>
+            <span className={styles.statDot}>·</span>
+            <span><b>{metrics.proposals}</b> Proposals Sent</span>
+            <span className={styles.statDot}>·</span>
+            <span><b>{metrics.applying}</b> In Onboarding</span>
+            <span className={styles.statDot}>·</span>
+            <span><b>{metrics.approved}</b> Approved</span>
+            <span className={styles.statDot}>·</span>
+            <span><b className={styles.statAccent}>{fmt$(metrics.savings)}/yr</b> Projected Savings</span>
+          </div>
         </div>
 
         {/* Tabs */}
-        <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${T.cardBorder}`, paddingBottom: 0 }}>
-          {(["apps", "leads"] as const).map(t => (
-            <button key={t} onClick={() => setTab(t)} style={{ padding: "10px 20px", background: "transparent", border: "none", borderBottom: tab === t ? `2px solid ${T.accent}` : "2px solid transparent", color: tab === t ? T.white : T.muted, fontSize: 14, fontWeight: tab === t ? 700 : 500, cursor: "pointer" }}>
-              {t === "apps" ? `Rep Applications (${apps.length})` : `Customer Leads (${subs.length})`}
+        <div className={styles.tabsRow}>
+          <div className={styles.tabs} data-active={tab} role="tablist">
+            <button role="tab" aria-selected={tab === "apps"} className={styles.tab} onClick={() => setTab("apps")}>
+              Applications ({apps.length})
             </button>
-          ))}
+            <button role="tab" aria-selected={tab === "leads"} className={styles.tab} onClick={() => setTab("leads")}>
+              Leads ({subs.length})
+            </button>
+          </div>
         </div>
 
         {tab === "apps" && (
-          <div>
-            <div style={{ ...card, padding: 0, overflow: "hidden" }}>
-              {/* Table header */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 120px 120px 100px 120px", gap: 16, padding: "12px 20px", background: "#0a0f1e" }}>
-                {["Merchant", "Stage", "Volume", "Fees", "Savings/yr", "Created"].map(h => (
-                  <div key={h} style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 1, textTransform: "uppercase" as const }}>{h}</div>
-                ))}
-              </div>
-              {apps.length === 0 && (
-                <div style={{ padding: "40px 20px", textAlign: "center", color: T.muted }}>No applications yet. Start a new proposal to see data here.</div>
-              )}
-              {apps.map(a => (
-                <button key={a.id} onClick={() => setSelected(a === selected ? null : a)} style={{ display: "grid", gridTemplateColumns: "1fr 100px 120px 120px 100px 120px", gap: 16, padding: "14px 20px", borderTop: `1px solid ${T.cardBorder}`, width: "100%", background: selected?.id === a.id ? "#1e2d4530" : "transparent", textAlign: "left" as const, cursor: "pointer", border: "none", borderBottom: "none", borderLeft: "none", borderRight: "none" }}>
-                  <div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: T.white }}>{a.business?.dba || a.business?.legalName || a.analysis?.merchantName || "—"}</div>
-                    <div style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{a.analysis?.currentProcessorName || "—"}</div>
-                  </div>
-                  <div>
-                    <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 12, background: `${STAGE_COLORS[a.stage] || T.muted}20`, color: STAGE_COLORS[a.stage] || T.muted }}>
-                      {a.stage.replace(/_/g, " ")}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 14, color: T.white }}>{a.analysis ? fmt$(a.analysis.totalVolume) : "—"}</div>
-                  <div style={{ fontSize: 14, color: T.accent }}>{a.analysis ? fmt$(a.analysis.totalFees) : "—"}</div>
-                  <div style={{ fontSize: 14, color: T.green }}>{a.proposal ? fmt$(a.proposal.savings?.annual || 0) : "—"}</div>
-                  <div style={{ fontSize: 12, color: T.muted }}>{new Date(a.createdAt).toLocaleDateString()}</div>
-                </button>
-              ))}
-            </div>
+          <div key="apps" className={styles.tabPanel}>
 
-            {/* Detail panel */}
-            {selected && (
-              <div style={{ ...card, marginTop: 20 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
-                  <div>
-                    <h2 style={{ fontSize: 18, fontWeight: 800, color: T.white }}>{selected.business?.legalName || selected.analysis?.merchantName || "Application Detail"}</h2>
-                    <div style={{ fontSize: 13, color: T.muted, marginTop: 4 }}>ID: {selected.id} · Created {new Date(selected.createdAt).toLocaleString()}</div>
-                  </div>
-                  <button onClick={() => setSelected(null)} style={{ ...btn, background: "#1e2d45", color: T.muted }}>Close</button>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                  {[
-                    { label: "Stage", val: selected.stage.replace(/_/g, " ") },
-                    { label: "HubSpot Deal ID", val: selected.hubspotDealId || "Not synced" },
-                    { label: "Adyen Legal Entity", val: selected.adyenIds?.legalEntityId || "Not created" },
-                    { label: "Onboarding URL", val: selected.adyenOnboardingUrl ? "Set" : "Not generated" },
-                    { label: "Owner", val: selected.ownerContact ? `${selected.ownerContact.firstName} ${selected.ownerContact.lastName}` : "—" },
-                    { label: "Email", val: selected.ownerContact?.email || "—" },
-                  ].map(f => (
-                    <div key={f.label}>
-                      <div style={{ fontSize: 11, color: T.muted, marginBottom: 4 }}>{f.label}</div>
-                      <div style={{ fontSize: 13, color: T.white }}>{f.val}</div>
-                    </div>
+            {/* Full table — shown when nothing is selected */}
+            {!selected && (
+              <>
+              <div className={styles.tableSearch}>
+                <input
+                  type="search"
+                  className={styles.tableSearchInput}
+                  placeholder="Search merchants…"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                />
+              </div>
+              <div className={styles.panel}>
+                <div className={styles.tableHeader}>
+                  {["Merchant", "Rep", "Stage", "Volume", "Fees", "Savings/yr", "Created"].map(h => (
+                    <div key={h} className={styles.tableHeaderCell}>{h}</div>
                   ))}
                 </div>
+                {filteredApps.length === 0 && (
+                  <div className={styles.emptyState}>{search ? "No results." : "No applications yet. Start a new proposal to see data here."}</div>
+                )}
+                {filteredApps.map(a => {
+                  const rep = repMap.get(a.ownerUserId);
+                  return (
+                    <button
+                      key={a.id}
+                      onClick={() => setSelected(a)}
+                      className={styles.tableRow}
+                    >
+                      <div className={styles.tableCell} data-label="Merchant">
+                        <div className={styles.merchantName}>{a.business?.dba || a.business?.legalName || a.analysis?.merchantName || "—"}</div>
+                        <div className={styles.merchantSub}>{a.analysis?.currentProcessorName || "—"}</div>
+                      </div>
+                      <div className={styles.tableCell} data-label="Rep">{rep?.name || rep?.email || "—"}</div>
+                      <div className={styles.tableCell} data-label="Stage">
+                        <span className={styles.badge} style={{ background: `${STAGE_COLORS[a.stage] || "#64748b"}20`, color: STAGE_COLORS[a.stage] || "#64748b" }}>
+                          {a.stage.replace(/_/g, " ")}
+                        </span>
+                      </div>
+                      <div className={`${styles.tableCell} ${styles["tableCell--numeric"]}`} data-label="Volume">{a.analysis ? fmt$(a.analysis.totalVolume) : "—"}</div>
+                      <div className={`${styles.tableCell} ${styles["tableCell--accent"]}`} data-label="Fees">{a.analysis ? fmt$(a.analysis.totalFees) : "—"}</div>
+                      <div className={`${styles.tableCell} ${styles["tableCell--success"]}`} data-label="Savings/yr">{a.proposal ? fmt$(a.proposal.savings?.annual || 0) : "—"}</div>
+                      <div className={`${styles.tableCell} ${styles["tableCell--muted"]}`} data-label="Created">{new Date(a.createdAt).toLocaleDateString()}</div>
+                    </button>
+                  );
+                })}
+              </div>
+              </>
+            )}
+
+            {/* Split view — shown once an item is selected */}
+            {selected && (
+              <div className={styles.splitLayout}>
+
+                {/* Left: searchable compact list */}
+                <div className={styles.splitListPanel}>
+                  <div className={styles.splitSearch}>
+                    <input
+                      type="search"
+                      className={styles.splitSearchInput}
+                      placeholder="Search merchants…"
+                      value={search}
+                      onChange={e => setSearch(e.target.value)}
+                    />
+                  </div>
+                  <div className={styles.splitListScroll}>
+                    {filteredApps.length === 0 && (
+                      <div className={styles.emptyState}>
+                        {search ? "No results." : "No applications yet."}
+                      </div>
+                    )}
+                    {filteredApps.map(a => (
+                      <button
+                        key={a.id}
+                        onClick={() => setSelected(a === selected ? null : a)}
+                        className={styles.splitRow}
+                        data-selected={selected?.id === a.id}
+                      >
+                        <span className={styles.splitRowName}>
+                          {a.business?.dba || a.business?.legalName || a.analysis?.merchantName || "—"}
+                        </span>
+                        <span className={styles.badge} style={{ background: `${STAGE_COLORS[a.stage] || "#64748b"}20`, color: STAGE_COLORS[a.stage] || "#64748b" }}>
+                          {a.stage.replace(/_/g, " ")}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Right: detail panel */}
+                <div className={styles.splitDetailPanel}>
+                  <div className={styles.detail}>
+                    <div className={styles.detailHeader}>
+                      <div>
+                        <h2 className={styles.detailTitle}>{selected.business?.legalName || selected.analysis?.merchantName || "Application Detail"}</h2>
+                        <div className={styles.detailMeta}>ID: {selected.id} · Created {new Date(selected.createdAt).toLocaleString()}</div>
+                      </div>
+                      <button onClick={() => { setSelected(null); setSearch(""); }} className={styles.btnGhost}>Close</button>
+                    </div>
+                    <div className={styles.detailGrid}>
+                      {[
+                        { label: "Stage", val: selected.stage.replace(/_/g, " ") },
+                        { label: "Rep (Commission)", val: repMap.get(selected.ownerUserId)?.name || "—" },
+                        { label: "Rep Email", val: repMap.get(selected.ownerUserId)?.email || "—" },
+                        { label: "HubSpot Deal ID", val: selected.hubspotDealId || "Not synced" },
+                        { label: "Adyen Legal Entity", val: selected.adyenIds?.legalEntityId || "Not created" },
+                        { label: "Onboarding URL", val: selected.adyenOnboardingUrl ? "Set" : "Not generated" },
+                        { label: "Merchant Contact", val: selected.ownerContact ? `${selected.ownerContact.firstName} ${selected.ownerContact.lastName}` : "—" },
+                        { label: "Merchant Email", val: selected.ownerContact?.email || "—" },
+                      ].map(f => (
+                        <div key={f.label}>
+                          <div className={styles.detailFieldLabel}>{f.label}</div>
+                          <div className={styles.detailFieldValue}>{f.val}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
               </div>
             )}
+
           </div>
         )}
 
         {tab === "leads" && (
-          <div style={{ ...card, padding: 0, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 120px 120px 120px", gap: 16, padding: "12px 20px", background: "#0a0f1e" }}>
-              {["Merchant", "Volume", "Fees", "Processor", "Submitted"].map(h => (
-                <div key={h} style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 1, textTransform: "uppercase" as const }}>{h}</div>
+          <div key="leads" className={styles.tabPanel}>
+            <div className={styles.panel}>
+              <div className={styles.tableHeader} style={{ gridTemplateColumns: "1fr 110px 110px 110px 100px" }}>
+                {["Merchant", "Volume", "Fees", "Processor", "Submitted"].map(h => (
+                  <div key={h} className={styles.tableHeaderCell}>{h}</div>
+                ))}
+              </div>
+              {subs.length === 0 && (
+                <div className={styles.emptyState}>No customer leads yet. Share the customer portal to collect submissions.</div>
+              )}
+              {subs.map((s, i) => (
+                <div key={i} className={styles.tableRow} style={{ gridTemplateColumns: "1fr 110px 110px 110px 100px", cursor: "default" }}>
+                  <div className={styles.tableCell} data-label="Merchant">
+                    <div className={styles.merchantName}>{s.analysis?.merchantName || "—"}</div>
+                    <div className={styles.merchantSub}>{s.contactInfo?.email || "—"}</div>
+                  </div>
+                  <div className={`${styles.tableCell} ${styles["tableCell--numeric"]}`} data-label="Volume">{s.analysis ? fmt$(s.analysis.totalVolume) : "—"}</div>
+                  <div className={`${styles.tableCell} ${styles["tableCell--accent"]}`} data-label="Fees">{s.analysis ? fmt$(s.analysis.totalFees) : "—"}</div>
+                  <div className={`${styles.tableCell} ${styles["tableCell--muted"]}`} data-label="Processor">{s.analysis?.currentProcessorName || "—"}</div>
+                  <div className={`${styles.tableCell} ${styles["tableCell--muted"]}`} data-label="Submitted">{new Date(s.submittedAt).toLocaleDateString()}</div>
+                </div>
               ))}
             </div>
-            {subs.length === 0 && (
-              <div style={{ padding: "40px 20px", textAlign: "center", color: T.muted }}>No customer leads yet. Share the customer portal to collect submissions.</div>
-            )}
-            {subs.map((s, i) => (
-              <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 120px 120px 120px 120px", gap: 16, padding: "14px 20px", borderTop: `1px solid ${T.cardBorder}` }}>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: T.white }}>{s.analysis?.merchantName || "—"}</div>
-                  <div style={{ fontSize: 12, color: T.muted }}>{s.contactInfo?.email || "—"}</div>
-                </div>
-                <div style={{ fontSize: 14, color: T.white }}>{s.analysis ? fmt$(s.analysis.totalVolume) : "—"}</div>
-                <div style={{ fontSize: 14, color: T.accent }}>{s.analysis ? fmt$(s.analysis.totalFees) : "—"}</div>
-                <div style={{ fontSize: 13, color: T.muted }}>{s.analysis?.currentProcessorName || "—"}</div>
-                <div style={{ fontSize: 12, color: T.muted }}>{new Date(s.submittedAt).toLocaleDateString()}</div>
-              </div>
-            ))}
           </div>
         )}
-      </div>
+      </main>
     </div>
   );
 }

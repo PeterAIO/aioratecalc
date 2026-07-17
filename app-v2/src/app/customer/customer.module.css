@@ -1,0 +1,264 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app
+ * macrostructure: App pages (authenticated customer) — panel surfaces, no boxed
+ * stat cards. Shared across /customer, /customer/applications/[id], and the
+ * edit/done sub-routes since they're all simple single-purpose content shells.
+ */
+
+.shell {
+  min-height: 100dvh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+
+.container {
+  max-width: 44rem;
+  margin-inline: auto;
+  padding: var(--space-2xl) var(--space-lg) var(--space-3xl);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.5rem, 2vw + 1rem, 2rem);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+  overflow-wrap: anywhere;
+}
+
+.subtitle {
+  color: var(--ink-2);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  margin: 0 0 var(--space-xl);
+}
+
+.headerRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.accountLink {
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  text-decoration: none;
+  white-space: nowrap;
+  padding-top: var(--space-2xs);
+}
+
+.accountLink:hover { color: var(--accent-text); }
+
+/* ---------- Application list (panel + rows) ---------- */
+
+.panel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  overflow: hidden;
+}
+
+.appRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  border-top: 1px solid var(--rule);
+  text-decoration: none;
+  color: inherit;
+  transition: background 150ms var(--ease-out);
+}
+
+.appRow:first-child { border-top: none; }
+.appRow:hover { background: var(--paper); }
+
+.appRow:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.appName {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.appProgress {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent-text);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.emptyState {
+  padding: var(--space-2xl) var(--space-lg);
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 0.9rem;
+}
+
+/* ---------- Segmented tabs (application detail: Checklist / My Data) ---------- */
+
+.tabsRow {
+  display: flex;
+  margin-bottom: var(--space-lg);
+}
+
+.tabs {
+  position: relative;
+  display: inline-flex;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  padding: var(--space-3xs);
+  gap: var(--space-3xs);
+}
+
+.tabs::before {
+  content: "";
+  position: absolute;
+  inset: var(--space-3xs);
+  width: calc(50% - var(--space-3xs));
+  background: var(--paper);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-whisper);
+  transition: transform 250ms var(--ease-out);
+}
+
+.tabs[data-active="data"]::before {
+  transform: translateX(100%);
+}
+
+.tab {
+  position: relative;
+  z-index: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: var(--space-xs) var(--space-lg);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 200ms var(--ease-out);
+}
+
+.tab[aria-selected="true"] { color: var(--ink); }
+
+.tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tabPanel {
+  animation: fade 250ms var(--ease-out) both;
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.tabHint {
+  margin: var(--space-md) 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  line-height: 1.55;
+}
+
+.tabHint a { color: var(--accent-text); }
+
+.editLink {
+  display: inline-block;
+  margin-top: var(--space-lg);
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent-text);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.editLink:hover { text-decoration: underline; }
+
+.editLink:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- Centered single-message states (not-found, done) ---------- */
+
+.centered {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper);
+  padding: var(--space-lg);
+}
+
+.centeredInner {
+  text-align: center;
+  max-width: 26rem;
+}
+
+.centeredTitle {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.4rem;
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+}
+
+.centeredTitle--success { color: var(--success); }
+
+.centeredSubtitle {
+  font-size: 0.9rem;
+  color: var(--ink-2);
+  line-height: 1.65;
+  margin: 0;
+}
+
+.checkmark {
+  font-size: 2.5rem;
+  color: var(--success);
+  margin-bottom: var(--space-md);
+}
+
+.btnPrimary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 0.875rem;
+  padding: var(--space-sm) var(--space-lg);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  cursor: pointer;
+  margin-top: var(--space-lg);
+  transition: opacity 150ms var(--ease-out);
+}
+
+.btnPrimary:hover { opacity: 0.92; }
+.btnPrimary:active { transform: scale(0.97); }
+
+.btnPrimary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}

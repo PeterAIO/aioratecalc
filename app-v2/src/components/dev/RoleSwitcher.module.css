@@ -1,0 +1,58 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+
+.wrap {
+  position: fixed;
+  bottom: var(--space-md);
+  right: var(--space-md);
+  z-index: 9999;
+  display: flex;
+  gap: var(--space-2xs);
+  align-items: center;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  padding: var(--space-2xs) var(--space-xs);
+  box-shadow: var(--shadow-whisper);
+  font-family: var(--font-body);
+}
+
+.label {
+  color: var(--ink-3);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding-left: var(--space-2xs);
+}
+
+.button {
+  padding: var(--space-3xs) var(--space-sm);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-family: var(--font-body);
+  transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
+}
+
+.button:hover { background: var(--paper); }
+
+.button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.button:active { transform: scale(0.97); }
+
+.button[data-active="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button { transition-duration: 1ms; }
+}

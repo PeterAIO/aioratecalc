@@ -1,11 +1,14 @@
 export type PricingModel = "flat-rate" | "2-tier" | "interchange-plus";
 
 export type DealStage =
+  | "prospect_created"      // rep created a prospect + set a margin target, no link sent yet
+  | "lead_link_sent"        // rep sent the tokenized self-serve upload link, awaiting customer
+  | "lead_analysis_pending" // customer clicked the link and uploaded a statement, analyzing
   | "analysis"
   | "pricing"
   | "proposal_ready"
   | "proposal_sent"
-  | "merchant_link_sent"
+  | "merchant_link_sent"    // post-proposal Adyen KYC handoff link sent (see customerLinkPurpose)
   | "merchant_filling"
   | "adyen_kyc_pending"
   | "adyen_kyc_complete"
@@ -150,6 +153,8 @@ export type AppSettings = {
 
 export type MerchantApplication = {
   id: string;
+  ownerUserId: string; // the rep who owns this deal — distinct from ownerContact (merchant's contact)
+  customerUserId: string | null; // set once the customer completes magic-link signup
   createdAt: string;
   updatedAt: string;
   stage: DealStage;
@@ -160,9 +165,16 @@ export type MerchantApplication = {
     environment: "test" | "live";
   } | null;
   adyenOnboardingUrl: string | null;
-  merchantLinkToken: string | null;
-  merchantLinkSentAt: string | null;
-  merchantLinkExpiry: string | null;
+  targetMargin: number | null; // rep-set margin target, exists before any analysis
+  pricingModel: PricingModel | null; // rep's pre-selected model for the prospect
+  // Generalized token slot — serves both the pre-analysis self-serve upload
+  // link (purpose "lead_upload") and the post-proposal Adyen KYC handoff
+  // link (purpose "kyc_handoff"); these are different moments in the deal
+  // lifecycle and can't share one unqualified token.
+  customerLinkToken: string | null;
+  customerLinkPurpose: "lead_upload" | "kyc_handoff" | null;
+  customerLinkSentAt: string | null;
+  customerLinkExpiresAt: string | null;
   analysis: StatementAnalysis | null;
   proposal: ProposalOutput | null;
   business: BusinessInfo | null;
@@ -183,4 +195,13 @@ export type CustomerSubmission = {
     annualCost?: number;
     savings?: { monthly: number; annual: number; pct: number };
   };
+};
+
+// The only shape a customer is ever allowed to see (enforced server-side at
+// the API response boundary) — no cost breakdown, no margin, no raw analysis.
+export type CustomerSafeQuote = {
+  effectiveRate: number;
+  monthlySavings: number;
+  annualSavings: number;
+  savingsPct: number;
 };

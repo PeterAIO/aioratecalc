@@ -1,0 +1,154 @@
+/* Hallmark · genre: modern-minimal · macrostructure: Auth (single centered card — see design.md)
+ * design-system: design.md — shared between /login and /customer/login
+ */
+
+.page {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper);
+  padding: var(--space-lg);
+}
+
+.card {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-xl);
+  width: 100%;
+  max-width: 22rem;
+}
+
+.mark {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  background: var(--gradient);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: var(--space-lg);
+}
+
+.markLetter {
+  color: white;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.35rem;
+}
+
+.title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.4rem;
+  color: var(--ink);
+  margin: 0 0 var(--space-2xs);
+}
+
+.subtitle {
+  font-size: 0.85rem;
+  color: var(--ink-3);
+  line-height: 1.55;
+  margin: 0 0 var(--space-lg);
+}
+
+.label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: var(--space-2xs);
+  display: block;
+}
+
+.input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  outline: none;
+  box-sizing: border-box;
+  margin-bottom: var(--space-md);
+  transition: border-color 150ms var(--ease-out);
+}
+
+.input:focus-visible {
+  border-color: var(--focus);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.input--error { border-color: var(--danger); }
+
+.error {
+  font-size: 0.8rem;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+  line-height: 1.5;
+}
+
+.success {
+  font-size: 0.88rem;
+  color: var(--success);
+  line-height: 1.6;
+}
+
+.devNote {
+  font-size: 0.78rem;
+  color: var(--ink-3);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+  margin-top: var(--space-md);
+}
+
+.devNote a { color: var(--accent-text); }
+
+.button {
+  width: 100%;
+  padding: var(--space-sm);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+  border: none;
+  background: var(--accent);
+  color: white;
+  transition: opacity 150ms var(--ease-out), transform 100ms var(--ease-out);
+}
+
+.button:hover { opacity: 0.92; }
+.button:active { transform: scale(0.98); }
+.button:disabled { opacity: 0.6; cursor: default; }
+
+.button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.switchLink {
+  display: block;
+  width: 100%;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  margin-top: var(--space-md);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font-body);
+}
+
+.switchLink:hover { color: var(--accent-text); }

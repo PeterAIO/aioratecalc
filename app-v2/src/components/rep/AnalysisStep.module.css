@@ -1,0 +1,326 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+
+.page {
+  max-width: 50rem;
+  margin-inline: auto;
+  padding: var(--space-2xl) var(--space-lg) var(--space-3xl);
+}
+
+.headerRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xl);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.5rem, 2vw + 1rem, 2rem);
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0 0 var(--space-2xs);
+}
+
+.metaLine {
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.confidence--high    { color: var(--success); font-weight: 600; }
+.confidence--medium  { color: var(--warning); font-weight: 600; }
+.confidence--low     { color: var(--danger); font-weight: 600; }
+
+.modelBadge {
+  background: var(--rule);
+  color: var(--ink-2);
+  padding: var(--space-2xs) var(--space-md);
+  border-radius: var(--radius-pill);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* ---------- Info banner (IC+ back-calculated) ---------- */
+
+.infoBanner {
+  margin-bottom: var(--space-lg);
+  padding: var(--space-md);
+  background: var(--info-bg);
+  border: 1px solid var(--info);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.infoBannerIcon { font-size: 1.1rem; flex-shrink: 0; }
+
+.infoBannerTitle {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--info);
+  margin-bottom: var(--space-3xs);
+}
+
+.infoBannerBody {
+  font-size: 0.78rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.infoBannerBody strong { color: var(--ink); }
+
+/* ---------- Key metrics ---------- */
+
+.metricsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xl);
+}
+
+.metricCard {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-md);
+}
+
+.metricCard--accent {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 6%, var(--paper-2));
+}
+
+.metricValue {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.4rem;
+  color: var(--ink);
+  margin-bottom: var(--space-3xs);
+}
+
+.metricValue--accent { color: var(--accent-text); }
+
+.metricLabel {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+/* ---------- Fee structure (3-way split) ---------- */
+
+.sectionTitle {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--ink-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0 0 var(--space-md);
+}
+
+.feeSplitSection { margin-bottom: var(--space-xl); }
+
+.panel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  overflow: hidden;
+}
+
+.feeRow {
+  display: grid;
+  grid-template-columns: 1fr auto auto 7.5rem;
+  gap: var(--space-md);
+  align-items: center;
+  padding: var(--space-sm) var(--space-lg);
+  border-top: 1px solid var(--rule);
+}
+
+.feeRow:first-child { border-top: none; }
+
+.feeName {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.feeNote {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin-top: var(--space-3xs);
+}
+
+.feeAmt {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.feeRate {
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.barTrack {
+  height: 6px;
+  background: var(--rule);
+  border-radius: 3px;
+}
+
+.barFill {
+  height: 100%;
+  border-radius: 3px;
+}
+
+/* semantic category colors — preserve old T.blue/T.gold/T.green mapping */
+.cat--info    { color: var(--info); }
+.cat--warning { color: var(--warning); }
+.cat--success { color: var(--success); }
+
+/* ---------- Highlight panel (gross margin) ---------- */
+
+.highlightPanel {
+  background: var(--success-bg);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  display: flex;
+  gap: var(--space-xl);
+  flex-wrap: wrap;
+  justify-content: space-between;
+  margin-bottom: var(--space-xl);
+}
+
+.highlightLabel {
+  font-size: 0.7rem;
+  color: var(--success);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: var(--space-xs);
+}
+
+.highlightValue {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 2.25rem;
+  color: var(--success);
+}
+
+.highlightSub {
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  margin-top: var(--space-xs);
+}
+
+.highlightStats {
+  display: flex;
+  gap: var(--space-xl);
+  align-items: center;
+}
+
+.highlightStat { text-align: center; }
+
+.highlightStatValue {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.highlightStatLabel {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin-top: var(--space-3xs);
+}
+
+/* ---------- Volume mix ---------- */
+
+.volumeSection { margin-bottom: var(--space-xl); }
+
+.volumeGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-sm);
+}
+
+.volumeCard {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-md);
+}
+
+.volumeLabel { font-size: 0.75rem; color: var(--ink-3); margin-bottom: var(--space-2xs); }
+.volumePct   { font-size: 1.4rem; font-weight: 800; color: var(--ink); margin-bottom: var(--space-3xs); font-variant-numeric: tabular-nums; }
+.volumeAmt   { font-size: 0.75rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+/* ---------- Notes ---------- */
+
+.notesBox {
+  padding: var(--space-md);
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  margin-bottom: var(--space-xl);
+}
+
+.notesBox strong { color: var(--ink); }
+
+/* ---------- Footer actions ---------- */
+
+.actions { display: flex; gap: var(--space-sm); }
+
+.btnGhost {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--ink-2);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  padding: var(--space-sm) var(--space-xl);
+  cursor: pointer;
+  transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
+}
+
+.btnGhost:hover { background: var(--rule); color: var(--ink); }
+.btnGhost:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.btnGhost:active { transform: scale(0.97); }
+
+.btnPrimary {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: var(--space-sm) var(--space-xl);
+  cursor: pointer;
+  box-shadow: var(--shadow-whisper);
+}
+
+.btnPrimary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.btnPrimary:active { transform: scale(0.97); }
+
+@media (max-width: 48rem) {
+  .metricsGrid { grid-template-columns: repeat(2, 1fr); }
+  .volumeGrid { grid-template-columns: repeat(2, 1fr); }
+  .feeRow { grid-template-columns: 1fr; gap: var(--space-2xs); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btnGhost, .btnPrimary { transition-duration: 1ms; }
+}
