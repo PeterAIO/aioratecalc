@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import {
   listApplicationsAction,
   sendMerchantOnboardingLinkAction,
@@ -15,7 +16,12 @@ import styles from "./rep.module.css";
 // Neutral fallback for a stage not present in STAGE_COLORS (should not occur in practice).
 const FALLBACK_STAGE_COLOR = "#9ca3af";
 
+// Stages that are still mid-build in the proposal wizard and can be reopened.
+// The wizard hydrates from ?id= and jumps to the right step (Analysis / Proposal).
+const RESUMABLE_STAGES = ["analysis", "proposal_ready"];
+
 export default function RepDashboardPage() {
+  const router = useRouter();
   const [apps, setApps] = useState<MerchantApplication[]>([]);
   const [selected, setSelected] = useState<MerchantApplication | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -189,6 +195,11 @@ export default function RepDashboardPage() {
                   <div className={styles.detailMeta}>ID: {selected.id} · Created {new Date(selected.createdAt).toLocaleString()}</div>
                 </div>
                 <div className={styles.detailActions}>
+                  {RESUMABLE_STAGES.includes(selected.stage) && (
+                    <button onClick={() => router.push(`/rep/proposals/new?id=${selected.id}`)} className={styles.btnPrimary}>
+                      {selected.stage === "proposal_ready" ? "Resume Proposal" : "Continue Analysis"}
+                    </button>
+                  )}
                   {selected.stage === "proposal_sent" && !selected.adyenOnboardingUrl && (
                     <button onClick={() => handleSendLink(selected)} disabled={busyId === selected.id} className={styles.btnPrimary}>
                       Send Onboarding Link

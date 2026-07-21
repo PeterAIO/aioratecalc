@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, Fragment } from "react";
-import { getSettingsAction, saveApplicationAction } from "@/lib/actions/applications";
+import { useState, useEffect, Fragment, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+import { getSettingsAction, saveApplicationAction, getApplicationAction } from "@/lib/actions/applications";
 import UploadStep    from "@/components/rep/UploadStep";
 import AnalysisStep  from "@/components/rep/AnalysisStep";
 import PricingStep   from "@/components/rep/PricingStep";
@@ -39,14 +40,45 @@ function newApp(): MerchantApplication {
   };
 }
 
-export default function NewProposalPage() {
+// Which step to reopen a saved application at, based on how far it got.
+// Pricing-step inputs aren't persisted, so an app with an analysis but no
+// proposal reopens at Analysis and the rep re-runs Pricing from there.
+function stepForApp(app: MerchantApplication): Step {
+  if (app.analysis && app.proposal) return 3; // Proposal
+  if (app.analysis) return 1;                  // Analysis
+  return 0;                                    // Upload
+}
+
+function NewProposalFlow() {
+  const searchParams = useSearchParams();
+  const resumeId = searchParams.get("id");
+
   const [step, setStep]           = useState<Step>(0);
   const [app, setApp]             = useState<MerchantApplication>(newApp());
   const [settings, setSettings]   = useState<AppSettings | null>(null);
+  const [loading, setLoading]     = useState<boolean>(!!resumeId);
 
   useEffect(() => {
     getSettingsAction().then(s => setSettings(s)).catch(() => {});
   }, []);
+
+  // Resume an existing application when arriving with ?id=… (from the dashboard).
+  useEffect(() => {
+    if (!resumeId) return;
+    let cancelled = false;
+    setLoading(true);
+    getApplicationAction(resumeId)
+      .then(existing => {
+        if (cancelled) return;
+        if (existing) {
+          setApp(existing);
+          setStep(stepForApp(existing));
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [resumeId]);
 
   const activeProcessor: Processor | null =
     settings?.processors?.find(p => p.isDefault) ?? settings?.processors?.[0] ?? null;
@@ -77,6 +109,10 @@ export default function NewProposalPage() {
     setApp(newApp());
     setStep(0);
   };
+
+  if (loading) {
+    return <div className={styles.page}><p style={{ padding: "2rem", opacity: 0.6 }}>Loading proposal…</p></div>;
+  }
 
   return (
     <div className={styles.page}>
@@ -143,5 +179,13 @@ export default function NewProposalPage() {
         />
       )}
     </div>
+  );
+}
+
+export default function NewProposalPage() {
+  return (
+    <Suspense>
+      <NewProposalFlow />
+    </Suspense>
   );
 }
