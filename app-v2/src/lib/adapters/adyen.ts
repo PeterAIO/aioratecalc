@@ -140,19 +140,34 @@ export async function createLegalEntityAndGetOnboardingUrl(
   }, "balance account creation");
 
   // 5. Hosted onboarding link (LEM). Expires ~4 min and is single-use — generate on demand.
-  const link = await adyenCall(`${lem}/legalEntities/${entity.id}/onboardingLinks`, lemKey, {
-    themeId: process.env.ADYEN_ONBOARDING_THEME_ID || undefined,
-    redirectUrl: process.env.NEXT_PUBLIC_BASE_URL
-      ? `${process.env.NEXT_PUBLIC_BASE_URL}/customer/applications/${app.id}/done`
-      : undefined,
-  }, "onboarding link");
+  const onboardingUrl = await createOnboardingLink(entity.id, app.id);
 
   return {
     legalEntityId: entity.id,
     accountHolderId: accountHolder.id,
     balanceAccountId: balanceAccount.id,
-    onboardingUrl: link.url,
+    onboardingUrl,
   };
+}
+
+// Mints a FRESH hosted onboarding link for an already-created legal entity.
+// These links expire in ~4 min and are single-use, so we regenerate one per
+// visit rather than persisting and re-serving a stale one — a dead link sends
+// the merchant to Adyen's /uo/error/startup-failed page. Callable on its own
+// so "Continue Verification" can hand the merchant a live link every time.
+export async function createOnboardingLink(legalEntityId: string, appId: string): Promise<string> {
+  const lemKey = process.env.ADYEN_LEM_API_KEY;
+  const env    = process.env.ADYEN_ENVIRONMENT || "test";
+  if (!lemKey) throw new Error("ADYEN_LEM_API_KEY is required (Phase 2)");
+  const { lem } = bases(env);
+
+  const link = await adyenCall(`${lem}/legalEntities/${legalEntityId}/onboardingLinks`, lemKey, {
+    themeId: process.env.ADYEN_ONBOARDING_THEME_ID || undefined,
+    redirectUrl: process.env.NEXT_PUBLIC_BASE_URL
+      ? `${process.env.NEXT_PUBLIC_BASE_URL}/customer/applications/${appId}/done`
+      : undefined,
+  }, "onboarding link");
+  return link.url;
 }
 
 // Phase 2: pushes an edited business record to an already-created legal

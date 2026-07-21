@@ -33,7 +33,10 @@ function adyenModule(app: MerchantApplication): OnboardingModule {
       label: "Payment Processing (Adyen)",
       status: "in_progress",
       description: "Finish identity verification with our processing partner.",
-      href: app.adyenOnboardingUrl,
+      // NOT the stored adyenOnboardingUrl — Adyen links are single-use and
+      // expire in minutes, so reusing a stored one fails at startup. This
+      // route mints a fresh link on each click, then redirects to Adyen.
+      href: `/customer/applications/${app.id}/continue`,
       ctaLabel: "Continue Verification",
     };
   }

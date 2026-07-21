@@ -10,6 +10,7 @@ async function main() {
   const seeds = [
     { email: "admin@aioapp.com", name: "AIO Admin", role: "admin" as const, password: "admin123" },
     { email: "rep@aioapp.com", name: "AIO Rep", role: "rep" as const, password: "rep123" },
+    { email: "customer@aioapp.com", name: "AIO Customer", role: "customer" as const, password: "customer123" },
   ];
 
   for (const seed of seeds) {
