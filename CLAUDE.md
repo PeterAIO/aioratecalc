@@ -73,7 +73,7 @@ There is **no build, install, or test tooling** in this repo (no `package.json`,
 - **Database:** Postgres via Vercel Marketplace (Neon integration), project `aioapp1/aioratecalc`. ORM: Drizzle (`drizzle-orm` + `@neondatabase/serverless`).
 - **Auth:** NextAuth v5 (Credentials provider, bcrypt, JWT sessions). No OAuth yet — AIO uses Microsoft 365, so Entra ID (Azure AD) is a plausible fast-follow, not built.
 - **Storage:** all reads/writes go through Server Actions (`src/lib/actions/`) → `PostgresAdapter` (`src/lib/storage/postgresAdapter.ts`). `LocalStorageAdapter` was deleted in Phase 1.5 — nothing in the running app touches `localStorage` for application/settings data anymore.
-- **Adyen:** hosted onboarding only — AIO creates a legal entity skeleton, Adyen returns a URL, merchant fills SSN/bank/EIN directly on `onboarding.adyen.com`. Still Phase 2, not started.
+- **Adyen:** hosted onboarding only — AIO creates a legal entity skeleton, Adyen returns a URL, merchant fills SSN/bank/EIN directly on Adyen's hosted page. Phase 2 is **built and in testing** (see phase table) — legal-entity graph + on-demand onboarding-link regeneration are wired; keys must be `\$`-escaped in `.env.local` (see gotcha above).
 - **HubSpot:** Private App Token (`HUBSPOT_PRIVATE_APP_TOKEN`), no OAuth. Still Phase 3, not started.
 
 ### Roles & the pillowed margin model (Phase 1.5)
@@ -110,7 +110,7 @@ app-v2/src/
     prospects.ts              ← createProspectAction — rep creates a prospect + tokenized customer link
     debugRole.ts               ← setDebugRoleAction (no-ops unless ENABLE_DEBUG_ROLE_SWITCH=true)
   lib/adapters/
-    adyen.ts                 ← createLegalEntityAndGetOnboardingUrl() — Phase 2 stub (written)
+    adyen.ts                 ← createLegalEntityAndGetOnboardingUrl(), createOnboardingLink(), updateLegalEntity() — Phase 2, wired & in testing
     hubspot.ts                ← pushToHubSpot(), pullFromHubSpot() — Phase 3 stub (written)
   middleware.ts               ← route protection for /rep/* and /admin/*
   app/
@@ -145,7 +145,7 @@ scripts/
 git checkout v2
 cd app-v2
 npm install
-npx vercel link --scope aioapp1 --project aioratecalc   # if not already linked
+npx vercel link --scope aioapp1 --project aioeasyob     # if not already linked (Vercel project is "aioeasyob", NOT "aioratecalc")
 npx vercel env pull .env.local                            # pulls DATABASE_URL etc.
 # then add ANTHROPIC_API_KEY and AUTH_SECRET to .env.local by hand — vercel env pull
 # only restores vars actually stored in the Vercel project, not local-only secrets
@@ -156,15 +156,18 @@ npm run dev
 **Dev login credentials** (seeded, not production-safe — rotate before this ever ships):
 - Admin: `admin@aioapp.com` / `admin123`
 - Rep: `rep@aioapp.com` / `rep123`
+- Customer: `customer@aioapp.com` / `customer123`
 
 **⚠️ `vercel integration add` / `vercel env pull` will overwrite `.env.local` wholesale**, wiping any local-only vars (like `ANTHROPIC_API_KEY`) that aren't stored in the Vercel project's env. Back up `.env.local` before running Vercel CLI commands that touch env vars.
+
+**⚠️ Adyen (and any) API keys containing `$` MUST be `\$`-escaped in `.env.local`.** Next's `@next/env` runs `dotenv-expand`, so a raw `$AB` in a key value is silently expanded away (treated as a `${AB}` reference), corrupting the key and producing Adyen `401 Unauthorized`. Single/double quotes do NOT prevent this in `@next/env` — only backslash-escaping (`\$`) does. **In the Vercel project env UI, do the opposite: paste the RAW `$`** (Vercel stores values literally and does not run dotenv-expand; a `\$` there becomes part of the key and 401s). The Adyen LEM/Config keys map as: LEM test key → `ADYEN_LEM_API_KEY`, platform web service key → `ADYEN_CONFIG_API_KEY`, HMAC → `ADYEN_WEBHOOK_HMAC_KEY`.
 
 ### Phase status
 | Phase | What | Status |
 |---|---|---|
 | 1 | Next.js scaffold + 5-step rep flow + localStorage | **DONE** (committed 2026-07-06) |
 | 1.5 | Multi-role (Customer/Rep/Admin), Postgres, NextAuth, pillowed margin, customer self-serve lead flow | **DONE** (2026-07-06) |
-| 2 | Adyen hosted onboarding (wire `adyen.ts` stub + webhook route) | **NOT STARTED** |
+| 2 | Adyen hosted onboarding (wire `adyen.ts` stub + webhook route) | **BUILT / in testing** — `adyen.ts` creates the legal-entity graph + mints onboarding links; webhook route exists; customer self-serve onboarding flow (`CustomerOnboardStep`, `saveMyApplicationOnboardingAction`) wired end-to-end. Onboarding links are single-use / ~4-min expiry, so `/customer/applications/[id]/continue` regenerates a fresh link per click via `createOnboardingLink()` — never re-serve a stored `adyenOnboardingUrl`. MCC→Adyen-industry-code mapping still a go-live TODO. |
 | 3 | HubSpot bidirectional sync (wire `hubspot.ts` stub) | **NOT STARTED** |
 | 4 | Merchant magic link email delivery (Resend) — link generation itself already exists from 1.5, just not auto-emailed | **NOT STARTED** |
 | 5 | Real OAuth (Entra ID?) as a fast-follow to Credentials; optional DB session strategy | **NOT STARTED** |
