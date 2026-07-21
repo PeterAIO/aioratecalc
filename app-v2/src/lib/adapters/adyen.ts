@@ -113,7 +113,12 @@ export async function createLegalEntityAndGetOnboardingUrl(
   //      as Adyen's retail example until we add an MCC→Adyen-industry-code mapping
   //      from Adyen's reference list (go-live TODO). The merchant's real MCC is
   //      collected in processing.mcc and is ready to map when that lands.
-  const website = app.business?.website;
+  // Adyen requires webAddress to be a full URL (http:// or https://). Merchants
+  // routinely enter a bare domain ("aioapp.com"), which 422s, so normalize here.
+  const rawWebsite = app.business?.website?.trim();
+  const website = rawWebsite
+    ? (/^https?:\/\//i.test(rawWebsite) ? rawWebsite : `https://${rawWebsite}`)
+    : undefined;
   const cpPct = Number(app.processing?.cardPresentPct);
   const salesChannels: string[] = [];
   if (website) salesChannels.push("eCommerce");
