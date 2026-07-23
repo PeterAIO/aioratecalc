@@ -1,6 +1,6 @@
 import { parseJSON } from "./utils";
 import type { StatementAnalysis, ProposalOutput, PricingModel, ProposedRates } from "@/types/merchant";
-import { derivePricing, type FeeOverrides } from "./pricing";
+import { derivePricing, blendedInterchangeEstimate, type FeeOverrides } from "./pricing";
 
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-sonnet-4-6";
@@ -169,6 +169,20 @@ Use 0 for unknown numerics. Never null.`,
       const derivedIC = (parsed.interchangeFees as number) / vol;
       if (Math.abs(((parsed.interchangeRate || 0) as number) - derivedIC) > 0.01) parsed.interchangeRate = derivedIC;
     }
+  }
+
+  // Interchange estimate when the statement doesn't itemize it (flat-rate / tiered —
+  // RULE 3 leaves interchangeFees = 0 because interchange is bundled and can't be
+  // separated). Steve 2026-07-23: assume 2.10% CP / 2.50% CNP. icEstimated tells the
+  // pricing engine to use the exact per-lane estimate, and feeding it into currentMargin
+  // below stops the merchant's "current markup" from reading as their full effective rate.
+  if (vol > 0 && (parsed.interchangeFees || 0) === 0 && !parsed.interchangeNotShown) {
+    const rawCp  = (parsed.cardPresentPct    || 0) as number;
+    const rawCnp = (parsed.cardNotPresentPct || 0) as number;
+    const cpPct  = (rawCp > 0 || rawCnp > 0) ? rawCp  : 0.9;
+    const cnpPct = (rawCp > 0 || rawCnp > 0) ? (rawCnp || 1 - rawCp) : 0.1;
+    parsed.interchangeRate = blendedInterchangeEstimate(cpPct, cnpPct);
+    parsed.icEstimated = true;
   }
 
   parsed.currentMargin = ((parsed.effectiveRate || 0) as number) - ((parsed.interchangeRate || 0) as number);

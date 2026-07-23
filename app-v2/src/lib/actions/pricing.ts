@@ -7,13 +7,15 @@ import { getEffectiveRole } from "@/lib/auth/getEffectiveRole";
 import { derivePricingForRole, type PaddingConfig, type RoleScopedPricing, type FeeOverrides } from "@/lib/pricing";
 import type { StatementAnalysis, ProcessorTier } from "@/types/merchant";
 
-const DEFAULT_PADDING: PaddingConfig = { paddingBps: 20, paddingMinMrrAdd: 0, paddingAdyenCostHide: true };
+// paddingPct is a proportion (0.5 = +50%). It is persisted in the existing integer
+// padding_bps column as basis points of proportion (5000 = 0.50) — no schema change.
+const DEFAULT_PADDING: PaddingConfig = { paddingPct: 0.5, paddingMinMrrAdd: 0, paddingAdyenCostHide: true };
 
 export async function getActivePaddingPolicy(): Promise<PaddingConfig> {
   const [row] = await db.select().from(marginPolicy).where(eq(marginPolicy.isActive, true)).limit(1);
   if (!row) return DEFAULT_PADDING;
   return {
-    paddingBps: row.paddingBps,
+    paddingPct: row.paddingBps / 10000,
     paddingMinMrrAdd: Number(row.paddingMinMrrAdd),
     paddingAdyenCostHide: row.paddingAdyenCostHide,
   };
@@ -25,7 +27,7 @@ export async function updatePaddingPolicyAction(input: PaddingConfig): Promise<v
 
   const [existing] = await db.select({ id: marginPolicy.id }).from(marginPolicy).where(eq(marginPolicy.isActive, true)).limit(1);
   const values = {
-    paddingBps: input.paddingBps,
+    paddingBps: Math.round(input.paddingPct * 10000),
     paddingMinMrrAdd: String(input.paddingMinMrrAdd),
     paddingAdyenCostHide: input.paddingAdyenCostHide,
     updatedByUserId: effective.userId,
@@ -40,7 +42,7 @@ export async function updatePaddingPolicyAction(input: PaddingConfig): Promise<v
 
 export async function getPricingPreviewAction(input: {
   analysis: StatementAnalysis;
-  targetMargin: number;
+  targetMargin?: number; // omit on first load → server applies the tier's desired margin
   pricingModel: string;
   feeOverrides: FeeOverrides;
   activeTier: ProcessorTier | null;

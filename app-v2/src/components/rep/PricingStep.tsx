@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { getPricingPreviewAction } from "@/lib/actions/pricing";
 import { fmt$, fmtPct2 } from "@/lib/utils";
 import type { StatementAnalysis, ProposalOutput, Processor, ProcessorTier } from "@/types/merchant";
@@ -30,31 +30,57 @@ const TONE_BORDER: Record<Tone, string> = { info: "var(--info)", warning: "var(-
 const TONE_BG: Record<Tone, string> = { info: "var(--info-bg)", warning: "var(--warning-bg)", success: "var(--success-bg)" };
 const TONE_CLASS: Record<Tone, string> = { info: styles["value--info"], warning: styles["value--warning"], success: styles["value--success"] };
 
+// Only 2-tier is offered today (platform limit — Steve 2026-07-23). Flat-rate and
+// interchange-plus stay in MODEL_INFO / the engine for the future, just not selectable.
+const AVAILABLE_MODELS: PricingModel[] = ["2-tier"];
+
 export default function PricingStep({ analysis, activeProcessor, activeTier, onBack, onProposal }: Props) {
   const [model, setModel]         = useState<PricingModel>("2-tier");
-  const [targetMargin, setTarget] = useState(0.008);
+  // null until the first server preview seeds it with the volume tier's desired
+  // margin — the matrix lives server-side only, so we never compute the default here.
+  const [targetMargin, setTarget] = useState<number | null>(null);
   const [manualTarget, setManual] = useState("");
+  const [cpPct, setCpPct]         = useState<number>(analysis.cardPresentPct && analysis.cardPresentPct > 0 ? analysis.cardPresentPct : 0.9);
   const [feeOverrides, setFees]   = useState<FeeOverrides>({ monthlyFee: 0, perTxnFee: 0, cpPerTxnFee: 0, cnpPerTxnFee: 0 });
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [pricing, setPricing]     = useState<RoleScopedPricing | null>(null);
 
+  const vol = analysis.totalVolume || 1;
+
+  // The rep's card-mix override, applied to the analysis so both the live preview
+  // and the persisted proposal price off the same split.
+  const effectiveAnalysis = useMemo(() => ({
+    ...analysis,
+    cardPresentPct: cpPct,
+    cardNotPresentPct: 1 - cpPct,
+    cardPresentVolume: (analysis.totalVolume || 0) * cpPct,
+    cardNotPresentVolume: (analysis.totalVolume || 0) * (1 - cpPct),
+  }), [analysis, cpPct]);
+
   // Pricing (including the margin floor / cost-basis view, which is role-
   // scoped and padded for reps) is computed server-side — this component
   // never sees or derives the true numbers itself. Debounced so dragging the
-  // margin slider doesn't fire a request per pixel.
+  // margin slider doesn't fire a request per pixel. targetMargin is sent as
+  // undefined until seeded, so the server applies the tier's desired margin.
   useEffect(() => {
     const handle = setTimeout(() => {
-      getPricingPreviewAction({ analysis, targetMargin, pricingModel: model, feeOverrides, activeTier })
-        .then(setPricing)
+      getPricingPreviewAction({ analysis: effectiveAnalysis, targetMargin: targetMargin ?? undefined, pricingModel: model, feeOverrides, activeTier })
+        .then(p => {
+          setPricing(p);
+          setTarget(prev => (prev == null ? p.appliedTargetMargin : prev));
+        })
         .catch(() => setPricing(null));
     }, 150);
     return () => clearTimeout(handle);
-  }, [analysis, targetMargin, model, feeOverrides, activeTier]);
+  }, [effectiveAnalysis, targetMargin, model, feeOverrides, activeTier]);
 
-  const vol     = analysis.totalVolume || 1;
-  const savings = pricing ? (analysis.totalFees || 0) - pricing.projectedMonthlyFees : 0;
-  const belowFloor = pricing?.belowCostFloor ?? false;
+  const savings     = pricing ? (analysis.totalFees || 0) - pricing.projectedMonthlyFees : 0;
+  const belowFloor  = pricing?.belowCostFloor ?? false;
+  const belowMin    = pricing?.belowMarginFloor ?? false;
+  const aboveMax    = !!pricing && targetMargin != null && targetMargin > pricing.maxMargin;
+  const blocked     = belowFloor || belowMin;
+  const sliderVal   = targetMargin ?? 0;
 
   const generate = async () => {
     setLoading(true);
@@ -63,7 +89,7 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
       const res  = await fetch("/api/proposal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysis, pricingModel: model, targetMargin, feeOverrides }),
+        body: JSON.stringify({ analysis: effectiveAnalysis, pricingModel: model, targetMargin: targetMargin ?? undefined, feeOverrides }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Proposal generation failed");
@@ -87,7 +113,7 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
 
       {/* Model selector */}
       <div className={styles.modelGrid}>
-        {(Object.keys(MODEL_INFO) as PricingModel[]).map(m => {
+        {AVAILABLE_MODELS.map(m => {
           const info = MODEL_INFO[m];
           const selected = model === m;
           return (
@@ -185,11 +211,12 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
             <div>
               <div className={styles.sliderHeader}>
                 <span className={styles.sliderLabel}>Target</span>
-                <span className={styles.sliderValue}>{fmtPct2(targetMargin)}</span>
+                <span className={styles.sliderValue}>{targetMargin == null ? "—" : fmtPct2(targetMargin)}</span>
               </div>
               <input
                 type="range" min="0.001" max="0.04" step="0.0005"
-                value={targetMargin}
+                value={sliderVal}
+                disabled={targetMargin == null}
                 onChange={e => { setTarget(parseFloat(e.target.value)); setManual(""); }}
               />
               <div className={styles.sliderTicks}>
@@ -219,7 +246,7 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
                     </div>
                     <div className={styles.miniRow}>
                       <span className={styles.miniRowLabel}>= Net Margin to AIO</span>
-                      <span className={`${styles.miniRowValue} ${belowFloor ? styles["value--danger"] : styles["value--success"]}`}>{fmtPct2(targetMargin - pricing.adyenCostRate)}</span>
+                      <span className={`${styles.miniRowValue} ${belowFloor ? styles["value--danger"] : styles["value--success"]}`}>{targetMargin == null ? "—" : fmtPct2(targetMargin - pricing.adyenCostRate)}</span>
                     </div>
                   </>
                 )}
@@ -228,13 +255,36 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
                     <strong>Below Cost Floor.</strong> This margin would lose AIO money on this deal — raise your target.
                   </div>
                 )}
-                {pricing.marginFloor > pricing.aioRevenue && (
+                {belowMin && (
                   <div className={styles.alertDanger}>
-                    Below minimum MRR floor of {fmt$(pricing.marginFloor)}
+                    <strong>Below margin floor.</strong> Raise your target — this is under AIO&rsquo;s minimum for {fmt$(pricing.marginFloor)}/mo of margin at this volume.
+                  </div>
+                )}
+                {aboveMax && (
+                  <div className={styles.alertWarning}>
+                    Above the target ceiling of {fmtPct2(pricing.maxMargin)} for this volume tier — allowed, but the merchant may be overpaying.
                   </div>
                 )}
               </>
             )}
+          </div>
+
+          {/* Card mix (CP/CNP split) — defaults 90/10, rep-adjustable */}
+          <div className={styles.panel}>
+            <h2 className={styles.panelTitle}>Card Mix</h2>
+            <div className={styles.fieldGroup} style={{ marginTop: 0 }}>
+              <label className={styles.fieldLabel}>Card Present (%)</label>
+              <input
+                type="number" min="0" max="100" step="1"
+                value={Math.round(cpPct * 100)}
+                onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setCpPct(Math.min(1, Math.max(0, v / 100))); }}
+                className={styles.input}
+              />
+            </div>
+            <div className={styles.miniRow}>
+              <span className={styles.miniRowLabel}>Card Not Present</span>
+              <span className={styles.miniRowValue}>{Math.round((1 - cpPct) * 100)}%</span>
+            </div>
           </div>
 
           {/* Fee overrides */}
@@ -271,11 +321,11 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
         <button className={styles.btnGhost} onClick={onBack}>← Re-analyze</button>
         <button
           className={styles.btnPrimary}
-          style={{ opacity: (loading || belowFloor || !pricing) ? 0.6 : 1 }}
-          disabled={loading || belowFloor || !pricing}
+          style={{ opacity: (loading || blocked || !pricing || targetMargin == null) ? 0.6 : 1 }}
+          disabled={loading || blocked || !pricing || targetMargin == null}
           onClick={generate}
         >
-          {loading ? "Generating Proposal…" : belowFloor ? "Below Cost Floor" : "Generate Proposal →"}
+          {loading ? "Generating Proposal…" : belowFloor ? "Below Cost Floor" : belowMin ? "Below Margin Floor" : "Generate Proposal →"}
         </button>
       </div>
     </div>

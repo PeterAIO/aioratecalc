@@ -29,7 +29,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
 
     const analysis: StatementAnalysis = await analyzeStatement(fileData, mediaType);
 
-    const targetMargin = row.targetMargin != null ? Number(row.targetMargin) : 0.008;
+    // Undefined lets derivePricing fall back to the volume tier's desired margin
+    // (Steve's matrix) instead of the old flat 0.80% default.
+    const targetMargin = row.targetMargin != null ? Number(row.targetMargin) : undefined;
     const pricingModel: PricingModel = (row.pricingModel as PricingModel | null) || "2-tier";
     const pricing = derivePricing(analysis, targetMargin, pricingModel, { monthlyFee: 0, perTxnFee: 0, cpPerTxnFee: 0, cnpPerTxnFee: 0 });
 

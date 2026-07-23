@@ -41,10 +41,10 @@ export default function PaddingSettingsPage() {
 
         <div className={styles.panel}>
           <div className={styles.field}>
-            <label className={styles.label}>Floor padding (basis points added to the true take-rate)</label>
+            <label className={styles.label}>Floor padding (% of AIO&apos;s true min margin — e.g. 50 shows reps a floor 1.5× the true min)</label>
             <input
-              type="number" step="1" value={policy.paddingBps}
-              onChange={e => setPolicy(p => p && ({ ...p, paddingBps: parseInt(e.target.value) || 0 }))}
+              type="number" step="1" min="0" value={Math.round(policy.paddingPct * 100)}
+              onChange={e => setPolicy(p => p && ({ ...p, paddingPct: Math.max(0, (parseFloat(e.target.value) || 0) / 100) }))}
               className={styles.input}
             />
           </div>
