@@ -13,6 +13,7 @@ export interface AdyenOnboardResult {
   legalEntityId: string;
   accountHolderId: string;
   balanceAccountId: string;
+  businessLineId: string;
   onboardingUrl: string;
 }
 
@@ -23,6 +24,8 @@ function bases(env: string) {
     bcl: live
       ? "https://balanceplatform-api-live.adyen.com/bcl/v2"
       : "https://balanceplatform-api-test.adyen.com/bcl/v2",
+    // Management API — stores / merchant accounts (Phase A acceptance side).
+    mgmt: live ? "https://management-live.adyen.com/v3" : "https://management-test.adyen.com/v3",
   };
 }
 
@@ -73,6 +76,10 @@ export async function createLegalEntityAndGetOnboardingUrl(
   const { lem, bcl } = bases(env);
 
   const legalName = app.business?.legalName || "Unknown";
+  // Human-readable name for the Adyen object descriptions (what shows in the
+  // Customer Area account-holder / store lists). Matches AIO's convention of the
+  // restaurant's trading name rather than an "AIO merchant —" prefix.
+  const displayName = app.business?.dba || legalName;
   const registeredAddress = {
     street: app.business?.address,
     city: app.business?.city,
@@ -96,7 +103,10 @@ export async function createLegalEntityAndGetOnboardingUrl(
   //    directly, so it does not request receivePayments.
   const accountHolder = await adyenCall(`${bcl}/accountHolders`, configKey, {
     legalEntityId: entity.id,
-    description: `AIO merchant — ${legalName}`,
+    description: displayName,
+    // Fallback reference until the AIO tenant number is known — setTenantNumberAction
+    // PATCHes this to the tenant number later (AH reference is mutable). The webhook
+    // links back by legalEntityId, not this reference, so app.id here is safe.
     reference: app.id,
     capabilities: {
       receiveFromPlatformPayments: { requested: true },
@@ -124,7 +134,7 @@ export async function createLegalEntityAndGetOnboardingUrl(
   if (website) salesChannels.push("eCommerce");
   if (Number.isNaN(cpPct) ? !website : cpPct > 0) salesChannels.push("pos");
   if (salesChannels.length === 0) salesChannels.push("pos");
-  await adyenCall(`${lem}/businessLines`, lemKey, {
+  const businessLine = await adyenCall(`${lem}/businessLines`, lemKey, {
     legalEntityId: entity.id,
     service: "paymentProcessing",
     industryCode: "4431A",
@@ -135,7 +145,7 @@ export async function createLegalEntityAndGetOnboardingUrl(
   // 4. Balance account (Config API) — where the merchant's funds settle.
   const balanceAccount = await adyenCall(`${bcl}/balanceAccounts`, configKey, {
     accountHolderId: accountHolder.id,
-    description: `${legalName} — primary`,
+    description: `${displayName} — primary`,
     defaultCurrencyCode: "USD",
   }, "balance account creation");
 
@@ -146,6 +156,7 @@ export async function createLegalEntityAndGetOnboardingUrl(
     legalEntityId: entity.id,
     accountHolderId: accountHolder.id,
     balanceAccountId: balanceAccount.id,
+    businessLineId: businessLine.id,
     onboardingUrl,
   };
 }
@@ -191,4 +202,91 @@ export async function updateLegalEntity(legalEntityId: string, app: MerchantAppl
       },
     },
   }, "legal entity update", "PATCH");
+}
+
+// Creates a store (the prod-{tenant} object terminals attach to) under AIO's
+// shared POS merchant account, linked to this restaurant's business line and
+// balance account. Adyen requires a full address, an E.164 phone, and a
+// shopperStatement (≤22 chars, not all-numeric) that shows on the cardholder's
+// statement. Returns the Adyen store id (ST…).
+async function createStore(
+  mgmtKey: string,
+  merchantId: string,
+  storeReference: string,
+  splitConfigurationId: string,
+  app: MerchantApplication,
+  opts: { businessLineId: string; balanceAccountId: string | null; environment: "test" | "live" }
+): Promise<string> {
+  const { mgmt } = bases(opts.environment);
+  const displayName = app.business?.dba || app.business?.legalName || "AIO Merchant";
+  const shopperStatement = (displayName.replace(/[^a-zA-Z0-9 ]/g, "").trim().slice(0, 22)) || "AIO Merchant";
+  const store = await adyenCall(`${mgmt}/merchants/${merchantId}/stores`, mgmtKey, {
+    description: displayName,
+    reference: storeReference,
+    shopperStatement,
+    phoneNumber: app.business?.phone,
+    address: {
+      country: "US",
+      line1: app.business?.address,
+      city: app.business?.city,
+      postalCode: app.business?.zip,
+      stateOrProvince: app.business?.state,
+    },
+    businessLineIds: [opts.businessLineId],
+    ...(opts.balanceAccountId
+      ? { splitConfiguration: { splitConfigurationId, balanceAccountId: opts.balanceAccountId } }
+      : {}),
+  }, "store creation");
+  return store.id;
+}
+
+export interface ApplyTenantResult {
+  storeId: string | null;
+  merchantAccountId: string | null;
+  storeCreated: boolean;
+}
+
+// Applies an AIO tenant number to an already-onboarded account:
+//   1. PATCHes the account-holder reference to the tenant number (mutable), so
+//      the account holder matches AIO's Customer Area convention.
+//   2. Creates the prod-{tenant} store IF the POS config is present and no store
+//      exists yet. If the config is absent, it degrades to handoff mode (no store)
+//      — the OB team creates the store from the export. A store reference can't be
+//      changed later, so we only ever create it once, with the correct name.
+export async function applyTenantNumber(
+  adyenIds: NonNullable<MerchantApplication["adyenIds"]>,
+  tenantNumber: string,
+  app: MerchantApplication
+): Promise<ApplyTenantResult> {
+  const configKey = process.env.ADYEN_CONFIG_API_KEY;
+  if (!configKey) throw new Error("ADYEN_CONFIG_API_KEY is required");
+  const { bcl } = bases(adyenIds.environment);
+
+  if (adyenIds.accountHolderId) {
+    await adyenCall(`${bcl}/accountHolders/${adyenIds.accountHolderId}`, configKey,
+      { reference: tenantNumber }, "account holder tenant reference", "PATCH");
+  }
+
+  // Store already made — never recreate (its reference is immutable).
+  if (adyenIds.storeId) {
+    return { storeId: adyenIds.storeId, merchantAccountId: adyenIds.merchantAccountId, storeCreated: false };
+  }
+
+  const merchantId = process.env.ADYEN_POS_MERCHANT_ACCOUNT;
+  const mgmtKey = process.env.ADYEN_MANAGEMENT_API_KEY;
+  const splitConfigurationId = process.env.ADYEN_SPLIT_CONFIGURATION_ID;
+  if (!merchantId || !mgmtKey || !splitConfigurationId) {
+    // Hybrid degrade: POS config not set — skip the store, hand off to the OB team.
+    return { storeId: null, merchantAccountId: null, storeCreated: false };
+  }
+  if (!adyenIds.businessLineId) {
+    throw new Error("This account predates business-line capture — the OB team must create its store manually");
+  }
+
+  const storeId = await createStore(mgmtKey, merchantId, `prod-${tenantNumber}`, splitConfigurationId, app, {
+    businessLineId: adyenIds.businessLineId,
+    balanceAccountId: adyenIds.balanceAccountId,
+    environment: adyenIds.environment,
+  });
+  return { storeId, merchantAccountId: merchantId, storeCreated: true };
 }

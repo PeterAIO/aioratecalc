@@ -74,6 +74,7 @@ There is **no build, install, or test tooling** in this repo (no `package.json`,
 - **Auth:** NextAuth v5 (Credentials provider, bcrypt, JWT sessions). No OAuth yet — AIO uses Microsoft 365, so Entra ID (Azure AD) is a plausible fast-follow, not built.
 - **Storage:** all reads/writes go through Server Actions (`src/lib/actions/`) → `PostgresAdapter` (`src/lib/storage/postgresAdapter.ts`). `LocalStorageAdapter` was deleted in Phase 1.5 — nothing in the running app touches `localStorage` for application/settings data anymore.
 - **Adyen:** hosted onboarding only — AIO creates a legal entity skeleton, Adyen returns a URL, merchant fills SSN/bank/EIN directly on Adyen's hosted page. Phase 2 is **built and in testing** (see phase table) — legal-entity graph + on-demand onboarding-link regeneration are wired; keys must be `\$`-escaped in `.env.local` (see gotcha above).
+- **Check (checkhq.com):** embedded payroll. Hosted onboarding only, same posture as Adyen — AIO creates the Check *company* from details it already holds, Check collects EIN/bank/tax data on its own hosted pages. Wired & in sandbox testing (see the payroll module below).
 - **HubSpot:** Private App Token (`HUBSPOT_PRIVATE_APP_TOKEN`), no OAuth. Still Phase 3, not started.
 
 ### Roles & the pillowed margin model (Phase 1.5)
@@ -111,6 +112,7 @@ app-v2/src/
     debugRole.ts               ← setDebugRoleAction (no-ops unless ENABLE_DEBUG_ROLE_SWITCH=true)
   lib/adapters/
     adyen.ts                 ← createLegalEntityAndGetOnboardingUrl(), createOnboardingLink(), updateLegalEntity() — Phase 2, wired & in testing
+    check.ts                  ← createCheckCompany(), createCheckOnboardLink(), getCheckOnboardStatus() — Check payroll onboarding, wired & in sandbox
     hubspot.ts                ← pushToHubSpot(), pullFromHubSpot() — Phase 3 stub (written)
   middleware.ts               ← route protection for /rep/* and /admin/*
   app/
@@ -168,6 +170,7 @@ npm run dev
 | 1 | Next.js scaffold + 5-step rep flow + localStorage | **DONE** (committed 2026-07-06) |
 | 1.5 | Multi-role (Customer/Rep/Admin), Postgres, NextAuth, pillowed margin, customer self-serve lead flow | **DONE** (2026-07-06) |
 | 2 | Adyen hosted onboarding (wire `adyen.ts` stub + webhook route) | **BUILT / in testing** — `adyen.ts` creates the legal-entity graph + mints onboarding links; webhook route exists; customer self-serve onboarding flow (`CustomerOnboardStep`, `saveMyApplicationOnboardingAction`) wired end-to-end. Onboarding links are single-use / ~4-min expiry, so `/customer/applications/[id]/continue` regenerates a fresh link per click via `createOnboardingLink()` — never re-serve a stored `adyenOnboardingUrl`. MCC→Adyen-industry-code mapping still a go-live TODO. |
+| 2.5 | Check payroll onboarding (the `payroll` module on the customer checklist) | **BUILT / sandbox** — opt-in, not auto-chained like Adyen: nothing reaches Check until the customer clicks "Set Up Payroll" at `/customer/applications/[id]/payroll`, which collects the two things AIO can't derive (first payday + authorized signer) and calls `startPayrollOnboardingAction`. Onboard links are one-time use / 24h, so `/customer/applications/[id]/payroll/continue` mints a fresh one per click — never store and re-serve one. Check has **no redirect-back URL**, so completion is detected by re-reading `company.onboard.status` when the customer views the application (`getMyApplicationWithPayrollSyncAction`), cached on `checkIds.onboardStatus` so list/dashboard views don't fan out one API call per app. Production base URL is a go-live TODO (`CHECK_API_BASE_URL`; Check doesn't publish it). |
 | 3 | HubSpot bidirectional sync (wire `hubspot.ts` stub) | **NOT STARTED** |
 | 4 | Merchant magic link email delivery (Resend) — link generation itself already exists from 1.5, just not auto-emailed | **NOT STARTED** |
 | 5 | Real OAuth (Entra ID?) as a fast-follow to Credentials; optional DB session strategy | **NOT STARTED** |
@@ -181,6 +184,8 @@ npm run dev
 - **Reps never see the true margin floor or true Adyen cost** — always go through `derivePricingForRole`/`getPricingPreviewAction`, never `derivePricing` directly from a rep-facing client component
 - `owner_user_id` (the rep who owns a deal, FK to `users.id`) and `ownerContact` (the merchant's own business contact person) are two different "owner" concepts — don't conflate them
 - `customer_link_token`/`customer_link_purpose` is a **generalized, reusable** token slot: `"lead_upload"` (Phase 1.5, pre-analysis self-serve) and `"kyc_handoff"` (Phase 2, post-proposal Adyen KYC) are different moments in the deal lifecycle sharing the same field — don't assume a token is one or the other without checking `customer_link_purpose`
+- `MerchantApplication` has **no EIN, bank account, or payroll tax fields** for Check either — Check collects those on its hosted pages, same rule as Adyen
+- Check's `industry_type` is **its own enum, not an MCC/SIC code** (`restaurant`, `food_and_beverage_retail_or_wholesale`, …) — `check.ts` maps `processing.mcc` onto it, defaulting to `restaurant`. Don't pass a raw MCC through.
 - `/api/lead/[token]/analyze` must only ever return `CustomerSafeQuote` — never the raw `StatementAnalysis` or any cost/margin field
 - `ENABLE_DEBUG_ROLE_SWITCH` must never be set in a Vercel project environment — local `.env.local` only
 
@@ -194,7 +199,13 @@ ADYEN_LEM_API_KEY           # Phase 2
 ADYEN_COMPANY_ID            # Phase 2
 ADYEN_ENVIRONMENT           # Phase 2 (test|live)
 ADYEN_WEBHOOK_HMAC_KEY      # Phase 2
-HUBSPOT_PRIVATE_APP_TOKEN   # Phase 3
+CHECK_API_KEY               # Check payroll — bearer token
+CHECK_API_BASE_URL          # Check payroll — defaults to https://sandbox.checkhq.com; set for production
+HUBSPOT_PRIVATE_APP_TOKEN   # Phase 3 — general CRM app: companies (tenant linkage), deal sync
+HUBSPOT_BILLING_PRIVATE_APP_TOKEN  # separate "EasyOB Billing" app: products (needs the
+                            # `e-commerce` scope), quotes, line items, contacts, subscriptions
+                            # + invoices read. Deliberately a second token so billing write
+                            # scopes don't widen what the sync path can reach.
 RESEND_API_KEY              # Phase 4
 NEXT_PUBLIC_BASE_URL        # Phase 1.5 — used to build the customer lead-link URL; keep in sync with actual dev port
 ```

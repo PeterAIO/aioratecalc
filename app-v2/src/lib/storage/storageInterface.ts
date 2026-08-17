@@ -13,7 +13,7 @@ export type StorageScope = { userId: string; role: "rep" | "admin" };
 export type CustomerApplicationPatch = Partial<
   Pick<
     MerchantApplication,
-    "business" | "ownerContact" | "processing" | "agreement" | "stage" | "adyenIds" | "adyenOnboardingUrl" | "hubspotDealId"
+    "business" | "ownerContact" | "processing" | "agreement" | "stage" | "adyenIds" | "adyenOnboardingUrl" | "checkIds" | "hubspotDealId"
   >
 >;
 

@@ -2,7 +2,7 @@ import { getEffectiveRole } from "@/lib/auth/getEffectiveRole";
 import { AppNav } from "@/components/nav/AppNav";
 import styles from "@/components/nav/shell.module.css";
 
-export default async function RepLayout({ children }: { children: React.ReactNode }) {
+export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const effective = await getEffectiveRole();
 
   return (

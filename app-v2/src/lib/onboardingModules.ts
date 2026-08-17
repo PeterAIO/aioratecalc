@@ -12,7 +12,7 @@ export type OnboardingModule = {
 };
 
 export function getOnboardingModules(app: MerchantApplication): OnboardingModule[] {
-  return [adyenModule(app), payrollModule()];
+  return [adyenModule(app), payrollModule(app)];
 }
 
 function adyenModule(app: MerchantApplication): OnboardingModule {
@@ -62,13 +62,53 @@ function adyenModule(app: MerchantApplication): OnboardingModule {
   };
 }
 
-// No payroll adapter/type exists yet — this is a static placeholder until a
-// real integration is built.
-function payrollModule(): OnboardingModule {
+// Payroll is opt-in: unlike Adyen, nothing exists on Check's side until the
+// customer starts this module themselves. Status reads the cached
+// checkIds.onboardStatus snapshot rather than calling Check — the list and
+// dashboard views render many applications at once (see syncPayrollStatusAction).
+function payrollModule(app: MerchantApplication): OnboardingModule {
+  const label = "Payroll (Check)";
+
+  if (app.checkIds?.companyId) {
+    if (app.checkIds.onboardStatus === "completed") {
+      return {
+        key: "payroll",
+        label,
+        status: "complete",
+        description: "Payroll setup is complete.",
+      };
+    }
+    return {
+      key: "payroll",
+      label,
+      status: "in_progress",
+      description: app.checkIds.onboardStatus === "blocking"
+        ? "Payroll needs a few more details before you can run it."
+        : "Finish setting up payroll with our payroll partner.",
+      // NOT a stored link — Check onboard links are one-time use and expire
+      // after 24h, so this route mints a fresh one per click (same rule as Adyen).
+      href: `/customer/applications/${app.id}/payroll/continue`,
+      ctaLabel: "Continue Payroll Setup",
+    };
+  }
+
+  // Check needs the legal name, address, phone, and a contact email to create
+  // the company, so payroll can't start before the business details exist.
+  if (!app.business || !app.ownerContact) {
+    return {
+      key: "payroll",
+      label,
+      status: "not_started",
+      description: "Add your business details first to set up payroll.",
+    };
+  }
+
   return {
     key: "payroll",
-    label: "Payroll",
-    status: "coming_soon",
-    description: "Coming soon.",
+    label,
+    status: "not_started",
+    description: "Run payroll for your team through AIO.",
+    href: `/customer/applications/${app.id}/payroll`,
+    ctaLabel: "Set Up Payroll",
   };
 }

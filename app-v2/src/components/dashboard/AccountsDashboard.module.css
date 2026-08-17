@@ -1,4 +1,10 @@
-/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app */
+/* Hallmark · genre: modern-minimal · macrostructure: Stat-Led · design-system: design.md
+ * Shared dashboard for /rep and /admin. The same table + split-detail layout renders for
+ * both roles; admin-only affordances (Rep column, Leads sub-view) are toggled by the caller.
+ * Merged from the former rep.module.css + admin.module.css, which this file replaces.
+ */
+
+/* ---------- Main content ---------- */
 
 .main {
   max-width: 72rem;
@@ -17,8 +23,15 @@
   font-size: clamp(1.75rem, 2.4vw + 1rem, 2.5rem);
   letter-spacing: -0.02em;
   line-height: 1.1;
-  margin: 0;
+  margin: 0 0 var(--space-xs);
   overflow-wrap: anywhere;
+}
+
+.headerSubtitle {
+  color: var(--ink-2);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  margin: 0;
 }
 
 /* ---------- Stat-Led hero (no card shape — sits directly on the page) ---------- */
@@ -67,10 +80,73 @@
   font-variant-numeric: tabular-nums;
 }
 
-.statTicker b.statAccent  { color: var(--accent-text); }
 .statTicker b.statSuccess { color: var(--success); }
 
 .statDot { color: var(--rule); }
+
+/* ---------- Segmented tabs (admin: Accounts / Leads) ---------- */
+
+.tabsRow {
+  display: flex;
+  margin-bottom: var(--space-lg);
+}
+
+.tabs {
+  position: relative;
+  display: inline-flex;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  padding: var(--space-3xs);
+  gap: var(--space-3xs);
+}
+
+.tabs::before {
+  content: "";
+  position: absolute;
+  inset: var(--space-3xs);
+  width: calc(50% - var(--space-3xs));
+  background: var(--paper);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-whisper);
+  transition: transform 250ms var(--ease-out);
+}
+
+.tabs[data-active="leads"]::before {
+  transform: translateX(100%);
+}
+
+.tab {
+  position: relative;
+  z-index: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: var(--space-xs) var(--space-lg);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 200ms var(--ease-out);
+}
+
+.tab[aria-selected="true"] { color: var(--ink); }
+
+.tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tabPanel {
+  animation: fade 250ms var(--ease-out) both;
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
 
 /* ---------- Table search bar (full-table view) ---------- */
 
@@ -109,9 +185,9 @@
   overflow: hidden;
 }
 
+/* grid-template-columns is set inline per role (the Rep column is admin-only). */
 .tableHeader {
   display: grid;
-  grid-template-columns: 1fr 130px 110px 100px 110px 100px;
   gap: var(--space-md);
   padding: var(--space-sm) var(--space-lg);
   background: var(--paper);
@@ -128,7 +204,6 @@
 
 .tableRow {
   display: grid;
-  grid-template-columns: 1fr 130px 110px 100px 110px 100px;
   gap: var(--space-md);
   width: 100%;
   padding: var(--space-md) var(--space-lg);
@@ -151,9 +226,9 @@
 
 .tableCell { font-size: 0.85rem; color: var(--ink); align-self: center; }
 .tableCell--numeric { font-variant-numeric: tabular-nums; }
-.tableCell--muted   { color: var(--ink-3); font-size: 0.8rem; }
-.tableCell--accent  { color: var(--accent-text); font-variant-numeric: tabular-nums; }
-.tableCell--success { color: var(--success); font-variant-numeric: tabular-nums; }
+.tableCell--muted { color: var(--ink-3); font-size: 0.8rem; }
+.tableCell--accent { color: var(--accent-text); font-variant-numeric: tabular-nums; }
+.tableCell--success { color: oklch(52% 0.14 150); font-variant-numeric: tabular-nums; }
 
 .merchantName { font-weight: 600; margin-bottom: 2px; }
 .merchantSub  { font-size: 0.78rem; color: var(--ink-3); }
@@ -175,7 +250,7 @@
   font-size: 0.9rem;
 }
 
-/* ---------- Split layout ---------- */
+/* ---------- Split layout (accounts view) ---------- */
 
 .splitLayout {
   display: grid;
@@ -275,16 +350,6 @@
 
 /* ---------- Detail panel ---------- */
 
-.detailWrap {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 300ms var(--ease-out);
-}
-
-.detailWrap[data-open="true"] { grid-template-rows: 1fr; }
-
-.detailInner { overflow: hidden; }
-
 .detail {
   padding: var(--space-xl);
 }
@@ -295,7 +360,6 @@
   align-items: flex-start;
   gap: var(--space-md);
   margin-bottom: var(--space-lg);
-  flex-wrap: wrap;
 }
 
 .detailTitle {
@@ -317,7 +381,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--space-lg);
-  margin-bottom: var(--space-lg);
+  margin-bottom: var(--space-xl);
 }
 
 .detailFieldLabel {
@@ -330,6 +394,8 @@
 }
 
 .detailFieldValue { font-size: 0.85rem; color: var(--ink); }
+
+/* ---------- Onboarding module pills ---------- */
 
 .modulesLabel {
   font-size: 0.7rem;
@@ -371,6 +437,7 @@
   white-space: nowrap;
   transition: opacity 150ms var(--ease-out);
 }
+
 .btnPrimary:hover { opacity: 0.92; }
 .btnPrimary:disabled { opacity: 0.6; cursor: default; }
 .btnPrimary:active { transform: scale(0.97); }
@@ -389,6 +456,7 @@
   white-space: nowrap;
   transition: opacity 150ms var(--ease-out);
 }
+
 .btnDanger:hover { opacity: 0.85; }
 .btnDanger:disabled { opacity: 0.6; cursor: default; }
 .btnDanger:active { transform: scale(0.97); }
@@ -396,17 +464,18 @@
 
 .btnGhost {
   font-family: var(--font-body);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--ink-2);
   background: var(--paper);
   border: 1px solid var(--rule);
   border-radius: var(--radius-pill);
-  padding: var(--space-xs) var(--space-md);
+  padding: var(--space-2xs) var(--space-md);
   cursor: pointer;
   white-space: nowrap;
   transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
 }
+
 .btnGhost:hover { background: var(--rule); color: var(--ink); }
 .btnGhost:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .btnGhost:active { transform: scale(0.97); }
@@ -417,7 +486,7 @@
   .tableHeader { display: none; }
 
   .tableRow {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
     gap: var(--space-2xs);
   }
 
@@ -446,19 +515,23 @@
   }
 }
 
+@media (max-width: 40rem) {
+  .main { padding-top: var(--space-lg); }
+}
+
 /* ---------- Reduced motion ---------- */
 
 @media (prefers-reduced-motion: reduce) {
-  .stats {
+  .stats, .tabPanel {
     animation: none;
     opacity: 1;
     transform: none;
   }
+  .tabs::before,
   .tableRow,
-  .splitRow,
+  .btnGhost,
   .btnPrimary,
-  .btnDanger,
-  .btnGhost {
+  .btnDanger {
     transition-duration: 1ms;
   }
 }

@@ -1,12 +1,15 @@
 import Link from "next/link";
-import { getMyApplicationAction } from "@/lib/actions/customer";
+import { getMyApplicationWithPayrollSyncAction } from "@/lib/actions/customer";
 import { getOnboardingModules } from "@/lib/onboardingModules";
 import ApplicationTabs from "@/components/customer/ApplicationTabs";
 import styles from "../../customer.module.css";
 
 export default async function CustomerApplicationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const app = await getMyApplicationAction(id);
+  // Check's onboard links carry no redirect-back URL, so the customer never
+  // returns through AIO after finishing payroll setup — viewing this page is
+  // the moment we re-read status. No-ops unless payroll is actually pending.
+  const app = await getMyApplicationWithPayrollSyncAction(id);
 
   if (!app) {
     return (

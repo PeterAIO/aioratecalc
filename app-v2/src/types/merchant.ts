@@ -82,6 +82,67 @@ export type ProposalOutput = {
   proposalSummary: string;
 };
 
+// HubSpot's own billing-frequency enum, plus "one_time" for catalog items that
+// carry no recurringbillingfrequency (hardware, installation). Kept identical to
+// HubSpot's values so a quote line maps straight onto a line item.
+export type BillingFrequency =
+  | "one_time"
+  | "weekly"
+  | "biweekly"
+  | "monthly"
+  | "quarterly"
+  | "per_six_months"
+  | "annually"
+  | "per_two_years"
+  | "per_three_years"
+  | "per_four_years"
+  | "per_five_years";
+
+// A product as it exists in AIO's HubSpot catalog. Read-only mirror — the
+// catalog is maintained in HubSpot, never here.
+// NOTE: `price` is per BILLING CYCLE, not per month. The flagship platform
+// products bill WEEKLY, so "AIO Platform (1 to 5 Order Points)" at $99 is
+// $99/week (~$429/mo). Never render a catalog price as monthly.
+export type CatalogProduct = {
+  hubspotProductId: string;
+  name: string;
+  price: number;
+  billingFrequency: BillingFrequency;
+  productType: string; // HubSpot hs_product_type: "inventory" | "Software" | "Service" | "AIO Payment Processing"
+};
+
+// A line on a quote. Price and frequency are SNAPSHOT at quote time rather than
+// joined live from the catalog — HubSpot line items work the same way (they
+// capture the product at time of sale and don't move when the catalog changes).
+export type QuoteLine = {
+  hubspotProductId: string;
+  name: string;
+  qty: number;
+  unitPrice: number;
+  billingFrequency: BillingFrequency;
+  productType: string;
+};
+
+// The rep-entered basis for a quote when there's no statement to read it from
+// (E2E.md's "configs"). When an analysis exists its numbers win; this is also
+// what Phase G compares trailing actuals against.
+export type QuoteConfig = {
+  avgTicket: number;
+  monthlyVolume: number;
+};
+
+// HubSpot billing linkage. The quote is BOTH the rep-visible CRM artifact and
+// the customer's checkout — see E2E-PLAN.md. We never create the subscription
+// or its invoices; HubSpot does that when the customer pays the quote.
+export type HubspotIds = {
+  dealId: string | null;
+  quoteId: string | null;
+  quoteLink: string | null;      // hs_quote_link — public hosted quote URL (the port-out target)
+  subscriptionId: string | null; // set only after HubSpot creates it from the checkout
+  status: string | null;         // cached subscription hs_status snapshot
+  statusAt: string | null;
+};
+
 export type BusinessInfo = {
   legalName: string;
   dba: string;
@@ -151,6 +212,27 @@ export type AppSettings = {
   };
 };
 
+// Check's own read of how far a company got through payroll onboarding.
+// "needs_attention" still allows payroll to run; "blocking" does not.
+export type CheckOnboardStatus = "completed" | "needs_attention" | "blocking";
+
+// Check (checkhq.com) payroll onboarding state — the payroll-side counterpart
+// to adyenIds. We persist the company id and the signer, never the onboard
+// link: Check links are one-time use and expire after 24h, so they're minted
+// per click (same rule as Adyen's, just a longer fuse).
+export type CheckIds = {
+  companyId: string;
+  environment: "sandbox" | "production";
+  startDate: string;                          // first payday on Check (YYYY-MM-DD)
+  signer: { name: string; title: string; email: string };
+  createdAt: string;
+  // Snapshot of Check's onboard status, refreshed when the customer views the
+  // application detail page. Cached rather than fetched everywhere so the
+  // dashboard/list views don't fan out one Check API call per application.
+  onboardStatus: CheckOnboardStatus | null;
+  onboardStatusAt: string | null;
+};
+
 export type MerchantApplication = {
   id: string;
   ownerUserId: string; // the rep who owns this deal — distinct from ownerContact (merchant's contact)
@@ -159,14 +241,22 @@ export type MerchantApplication = {
   updatedAt: string;
   stage: DealStage;
   hubspotDealId: string | null;
+  tenantLink: TenantLink | null; // Phase 3 — HubSpot Company (AIO tenant) this ezacc is linked to
   adyenIds: {
     legalEntityId: string | null;
     accountHolderId: string | null;
     balanceAccountId: string | null;
-    merchantAccountId: string | null;
+    merchantAccountId: string | null; // the shared POS merchant account the store lives under (e.g. AIOAppIncPOS)
+    storeId: string | null;           // Adyen store id (ST…) — created only once the tenant number is known
+    businessLineId: string | null;    // this restaurant's business line; links the store to the legal entity
+    tenantNumber: string | null;      // AIO tenant number (from the AIO dashboard); drives the AH reference and store ref prod-{n}
     environment: "test" | "live";
   } | null;
   adyenOnboardingUrl: string | null;
+  checkIds: CheckIds | null; // Check payroll onboarding — null until the customer opts in
+  hubspotIds: HubspotIds | null; // HubSpot deal/quote/subscription — null until a quote is built
+  quoteConfig: QuoteConfig | null; // rep-entered ticket/volume basis when there's no statement
+  quoteLines: QuoteLine[] | null;  // hardware/platform/service lines; priced at quote time
   targetMargin: number | null; // rep-set margin target, exists before any analysis
   pricingModel: PricingModel | null; // rep's pre-selected model for the prospect
   // Generalized token slot — serves both the pre-analysis self-serve upload
@@ -183,6 +273,22 @@ export type MerchantApplication = {
   ownerContact: OwnerContact | null;
   processing: ProcessingInfo | null;
   agreement: AgreementInfo | null;
+};
+
+// Phase 3 — the "tenant ↔ ezacc equivalency". Links this easyob account
+// (ezacc) to the HubSpot Company that represents the AIO tenant. HubSpot is
+// the system of record for the AIO-dashboard-created Adyen objects (AIOad),
+// so we snapshot the tenant's identifiers here at link time: it makes the
+// link self-describing in the dashboard without a live HubSpot call on every
+// render, and pre-captures exactly the AIOad identifiers the LATER
+// "replace AIOad with ezad" work will need. Recording only — no Adyen call.
+export type TenantLink = {
+  hubspotCompanyId: string;
+  companyName: string;
+  tenantRef: string | null;             // HubSpot "tenant_id" value, e.g. "prod-1024" (store ref format)
+  adyenAccountHolderId: string | null;  // AIOad account holder, e.g. "AH32..."
+  linkedAt: string;
+  linkedByUserId: string;
 };
 
 export type CustomerSubmission = {

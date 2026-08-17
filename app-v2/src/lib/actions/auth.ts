@@ -29,7 +29,9 @@ export async function loginAction(formData: FormData): Promise<string | undefine
     .from(users)
     .where(eq(users.email, email))
     .limit(1);
-  redirect(u?.role === "customer" ? "/customer" : "/rep/proposals/new");
+  // Staff land on their dashboard (the "Accounts" home), not straight into the
+  // creation wizard — the wizard is one click away via "New Account" in the nav.
+  redirect(u?.role === "customer" ? "/customer" : "/rep");
 }
 
 export async function logoutAction() {

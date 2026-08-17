@@ -10,6 +10,13 @@ import { customerLoginTokens, users } from "@/lib/db/schema";
 import { postgresStorage } from "@/lib/storage/postgresAdapter";
 import { sendMagicLinkEmail, type SendMagicLinkResult } from "@/lib/adapters/email";
 import { createLegalEntityAndGetOnboardingUrl, updateLegalEntity } from "@/lib/adapters/adyen";
+import {
+  checkEnvironment,
+  createCheckCompany,
+  createCheckOnboardLink,
+  getCheckOnboardStatus,
+  type PayrollSigner,
+} from "@/lib/adapters/check";
 import { pushToHubSpot } from "@/lib/adapters/hubspot";
 import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
 
@@ -104,7 +111,10 @@ export async function saveMyApplicationOnboardingAction(
         legalEntityId: result.legalEntityId,
         accountHolderId: result.accountHolderId,
         balanceAccountId: result.balanceAccountId,
-        merchantAccountId: null,
+        merchantAccountId: null, // set to the shared POS merchant account when the store is created (tenant number known)
+        storeId: null,
+        businessLineId: result.businessLineId,
+        tenantNumber: null,
         environment: process.env.ADYEN_ENVIRONMENT === "live" ? "live" : "test",
       },
       adyenOnboardingUrl: result.onboardingUrl,
@@ -162,4 +172,71 @@ export async function updateMyApplicationDetailsAction(
   }
 
   return { app, adyenSynced };
+}
+
+// ── Payroll (Check) ─────────────────────────────────────────────────────────
+// Opt-in, unlike Adyen: nothing is sent to Check until the customer starts the
+// payroll module themselves, so merchants who don't want AIO payroll never get
+// a Check company. Errors here DO throw (the customer clicked a button and is
+// waiting on a link) rather than following the fire-and-log convention the
+// Adyen/HubSpot chaining above uses.
+
+// Creates the Check company and returns the first onboard link. The signer is
+// whoever is authorized to onboard for the company; startDate is their first
+// payday on Check, which we can't derive from anything AIO stores.
+export async function startPayrollOnboardingAction(
+  id: string,
+  fields: { startDate: string; signer: PayrollSigner }
+): Promise<{ url: string }> {
+  const { userId } = await requireCustomer();
+  const app = await postgresStorage.getApplicationForCustomer(userId, id);
+  if (!app) throw new Error("Application not found");
+  if (!app.business || !app.ownerContact) {
+    throw new Error("Add your business details before setting up payroll");
+  }
+
+  // Already opted in — hand back a fresh link instead of creating a second
+  // Check company for the same merchant.
+  if (app.checkIds?.companyId) {
+    return { url: await createCheckOnboardLink(app.checkIds.companyId, app.checkIds.signer) };
+  }
+
+  const companyId = await createCheckCompany(app, fields.startDate);
+  await postgresStorage.updateApplicationAsCustomer(userId, id, {
+    checkIds: {
+      companyId,
+      environment: checkEnvironment(),
+      startDate: fields.startDate,
+      signer: fields.signer,
+      createdAt: new Date().toISOString(),
+      onboardStatus: null,
+      onboardStatusAt: null,
+    },
+  });
+
+  return { url: await createCheckOnboardLink(companyId, fields.signer) };
+}
+
+// Loads the application and refreshes its cached Check onboard status.
+// Check's onboard links have no redirect-back URL, so the customer never
+// returns through AIO after finishing — viewing the application is the only
+// reliable moment to re-read status. Takes an id and re-loads server-side
+// rather than accepting an application object: this is a Server Action, so a
+// caller-supplied app would let a client forge the companyId it queries.
+// Failures are swallowed — a Check outage must not break the application page.
+export async function getMyApplicationWithPayrollSyncAction(id: string): Promise<MerchantApplication | null> {
+  const { userId } = await requireCustomer();
+  const app = await postgresStorage.getApplicationForCustomer(userId, id);
+  if (!app?.checkIds?.companyId || app.checkIds.onboardStatus === "completed") return app;
+
+  try {
+    const onboardStatus = await getCheckOnboardStatus(app.checkIds.companyId);
+    if (onboardStatus === app.checkIds.onboardStatus) return app;
+    return await postgresStorage.updateApplicationAsCustomer(userId, id, {
+      checkIds: { ...app.checkIds, onboardStatus, onboardStatusAt: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error("Check onboard status refresh failed:", err instanceof Error ? err.message : err);
+    return app;
+  }
 }

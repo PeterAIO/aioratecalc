@@ -1,0 +1,16 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md — shared outer shell
+ * for authenticated app sections (rep + admin) so both mount the same AppNav. */
+
+.shell {
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  display: flex;
+  flex-direction: column;
+  overflow-x: clip;
+}
+
+.main {
+  flex: 1;
+}

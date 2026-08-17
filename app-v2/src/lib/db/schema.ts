@@ -53,8 +53,24 @@ export const merchantApplications = pgTable("merchant_applications", {
   customerUserId: uuid("customer_user_id").references(() => users.id),
   stage: text("stage").notNull(),
   hubspotDealId: text("hubspot_deal_id"),
+  // Phase 3 — links this ezacc to the HubSpot Company (AIO tenant). See TenantLink.
+  tenantLink: jsonb("tenant_link").$type<MerchantApplication["tenantLink"]>(),
   adyenIds: jsonb("adyen_ids").$type<MerchantApplication["adyenIds"]>(),
   adyenOnboardingUrl: text("adyen_onboarding_url"),
+  // Check payroll onboarding. No matching *_onboarding_url column on purpose —
+  // Check's onboard links are one-time use / 24h, so they're minted per click
+  // and never stored (see src/lib/adapters/check.ts).
+  checkIds: jsonb("check_ids").$type<MerchantApplication["checkIds"]>(),
+  // HubSpot billing. No stored checkout URL beyond hs_quote_link inside the blob,
+  // and that one is re-readable from HubSpot rather than authoritative here.
+  // We never write the subscription or its invoices — HubSpot creates both when
+  // the customer pays the quote (see E2E-PLAN.md).
+  hubspotIds: jsonb("hubspot_ids").$type<MerchantApplication["hubspotIds"]>(),
+  // The rep-entered ticket/volume basis for a quote built without a statement.
+  quoteConfig: jsonb("quote_config").$type<MerchantApplication["quoteConfig"]>(),
+  // Quote lines, priced at quote time. Prices are per BILLING CYCLE (weekly for
+  // AIO's platform fees), never per month — see BillingFrequency.
+  quoteLines: jsonb("quote_lines").$type<MerchantApplication["quoteLines"]>(),
   analysis: jsonb("analysis").$type<StatementAnalysis | null>(),
   proposal: jsonb("proposal").$type<ProposalOutput | null>(),
   business: jsonb("business").$type<BusinessInfo | null>(),
