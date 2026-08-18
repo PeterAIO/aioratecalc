@@ -23,6 +23,66 @@ after four rounds of clarification:
 
 ---
 
+## Before you write any code
+
+Orientation for whoever picks this up — human or agent.
+
+**Read order.** This section → "Human-gated inputs" (below) → the phase you're working on. The
+human-gated section lists what has **already been verified live**: HubSpot scopes, Adyen report
+auth, the inventory endpoint, the product catalog. Don't re-probe those. Everything there was
+checked against production credentials on 2026-08-18 and the results are recorded.
+
+**`AGENTS.md` is not boilerplate.** This Next.js version differs from training data. Read the
+relevant guide in `node_modules/next/dist/docs/` before writing App Router code.
+
+### Invariants — cheap to honour, expensive to unwind
+
+1. **Reps never see the true margin floor or true Adyen cost.** Always go through
+   `derivePricingForRole` / `getPricingPreviewAction`; never call `derivePricing` from a rep-facing
+   client component.
+2. **`quoteLines` and `quoteConfig` freeze at publish.** They are what we *quoted*. No sync may
+   overwrite them — the gap between them and the live billing snapshot is the entire Phase G/I
+   comparison.
+3. **No SSN, bank account, routing number, or EIN fields on `MerchantApplication`.** Adyen and
+   Check collect those on their own hosted pages. Same rule for both.
+4. **`/api/lead/[token]/analyze` returns only `CustomerSafeQuote`** — never raw `StatementAnalysis`,
+   never a cost or margin field.
+
+### Two arithmetic traps that produce plausible wrong numbers
+
+Both fail silently, and both are off by enough to embarrass someone in front of a customer.
+
+- **Platform fees bill WEEKLY.** A catalog price rendered as monthly is wrong by **4.33×**. Use
+  `monthlyEquivalent()` in `utils.ts`; never sum across billing frequencies.
+- **Restaurants pre-auth.** Adyen rows must be **deduped on `Psp Reference` at a single record
+  type**. Raw row counts overstate transaction count several-fold and divide average ticket by the
+  same factor. One day's file: 14,015 rows, ~3,468 actual payments.
+
+### Sequencing advice
+
+**Spike the HubSpot quote publish before building Phase E around it** — create a draft quote against
+a throwaway deal, publish it, read back `hs_quote_link`. It is the only external mechanism in this
+plan still resting on documentation rather than observation. Everything else has been run.
+
+Otherwise: Phase B first (pure UI, no external dependencies, and Phase I's admin views hang off it),
+then the Adyen ingest (every input verified, and it's what was actually asked for), then the quote
+spine and configurator.
+
+### Probing live services
+
+Use a throwaway `scripts/_tmp-*.ts` that loads config via `loadEnvConfig` from `@next/env`, then
+delete it. **A plain `grep` of `.env.local` will hand you a corrupted Adyen key** — values are
+`\$`-escaped because `@next/env` runs `dotenv-expand`, and only the real parser resolves them. The
+symptom is a 401 that looks like a bad credential.
+
+When probing an endpoint for the first time, **include a negative control** (garbage credential, or
+none). A 404 only proves auth succeeded if a bad key fails differently — that distinction is what
+established the Adyen report path.
+
+Do not annualise a single day of Adyen data. Restaurants swing hard by weekday.
+
+---
+
 ## Human-gated inputs (everything an agent cannot do for itself)
 
 Verified against live credentials 2026-08-18. **Anything not listed here is unblocked** — see
