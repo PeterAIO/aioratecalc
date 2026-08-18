@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { createProspectAction, getHubspotCompanyForProspectAction } from "@/lib/actions/prospects";
+import { searchTenantCompaniesAction } from "@/lib/actions/applications";
 import { listQuotableProductsAction } from "@/lib/actions/catalog";
 import {
   FOOD_TRUCK_PLATFORM_NAME,
@@ -68,6 +69,42 @@ function NewProspectFlow() {
       .catch(e => { if (!cancelled) setHubspotNotice(e instanceof Error ? e.message : "Could not reach HubSpot"); });
     return () => { cancelled = true; };
   }, [hubspotCompanyId]);
+
+  // HubSpot deprecated classic CRM cards, so there's no "start from HubSpot"
+  // button anymore — the flow inverts: start here, find the company. This is
+  // a second way to set the SAME `hubspotCompany` state the deep link sets;
+  // everything downstream (prefill, badge, submit) is shared.
+  const [hubspotQuery, setHubspotQuery]         = useState("");
+  const [hubspotResults, setHubspotResults]     = useState<TenantCompany[]>([]);
+  const [hubspotSearching, setHubspotSearching] = useState(false);
+  const [hubspotSearchError, setHubspotSearchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = hubspotQuery.trim();
+    if (q.length < 2) { setHubspotResults([]); setHubspotSearching(false); setHubspotSearchError(null); return; }
+    setHubspotSearching(true);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      searchTenantCompaniesAction(q)
+        .then(r => { if (!cancelled) { setHubspotResults(r); setHubspotSearchError(null); } })
+        .catch(e => { if (!cancelled) { setHubspotResults([]); setHubspotSearchError(e instanceof Error ? e.message : "Could not reach HubSpot"); } })
+        .finally(() => { if (!cancelled) setHubspotSearching(false); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [hubspotQuery]);
+
+  const selectHubspotCompany = (company: TenantCompany) => {
+    setHubspotCompany(company);
+    setMerchantName(prev => prev || company.name);
+    if (company.email) setContactEmail(prev => prev || company.email!);
+    setHubspotQuery("");
+    setHubspotResults([]);
+  };
+
+  const clearHubspotCompany = () => {
+    setHubspotCompany(null);
+    setHubspotNotice(null);
+  };
 
   // Optional statement upload — the rep path through the same /api/analyze
   // route the proposal wizard uses. When it succeeds the analysis rides along
@@ -193,6 +230,8 @@ function NewProspectFlow() {
     setAvgTicket(""); setMonthlyVolume(""); setFile(null); setAnalysis(null);
     setQty({}); setChannels([]);
     setLinkUrl(null); setLinkWarning(null); setCopied(false); setError(null);
+    setHubspotCompany(null); setHubspotNotice(null);
+    setHubspotQuery(""); setHubspotResults([]); setHubspotSearchError(null);
   };
 
   // Matches the server's gate (hasQuoteBasis): a statement with no readable
@@ -248,6 +287,9 @@ function NewProspectFlow() {
       {hubspotCompany && (
         <p className={styles.hubspotBadge}>
           Linked to HubSpot company: <strong>{hubspotCompany.name}</strong> ({hubspotCompany.id})
+          <button type="button" className={styles.hubspotBadgeClear} onClick={clearHubspotCompany} aria-label="Remove HubSpot link">
+            ×
+          </button>
         </p>
       )}
       {!hubspotCompany && hubspotNotice && (
@@ -265,6 +307,43 @@ function NewProspectFlow() {
           <label className={styles.label}>Customer Contact Email</label>
           <input type="email" value={contactEmail} onChange={e => setContactEmail(e.target.value)} placeholder="owner@business.com" className={styles.input} />
         </div>
+
+        {!hubspotCompany && (
+          <div className={styles.field}>
+            <label className={styles.label}>Link HubSpot Company (optional)</label>
+            <input
+              type="search"
+              value={hubspotQuery}
+              onChange={e => setHubspotQuery(e.target.value)}
+              placeholder="Search HubSpot companies…"
+              className={styles.input}
+            />
+            {hubspotSearchError && (
+              <div className={styles.error}>
+                Couldn&apos;t search HubSpot ({hubspotSearchError}) — you can still send this quote unlinked.
+              </div>
+            )}
+            {!hubspotSearchError && hubspotQuery.trim().length >= 2 && (
+              <div className={styles.hubspotResults}>
+                {hubspotSearching && <div className={styles.hubspotResultMeta}>Searching…</div>}
+                {!hubspotSearching && hubspotResults.length === 0 && (
+                  <div className={styles.hubspotResultMeta}>No matching companies.</div>
+                )}
+                {hubspotResults.map(c => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className={styles.hubspotResultRow}
+                    onClick={() => selectHubspotCompany(c)}
+                  >
+                    <span className={styles.hubspotResultName}>{c.name}</span>
+                    <span className={styles.hubspotResultMeta}>{c.id}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className={styles.panel}>
