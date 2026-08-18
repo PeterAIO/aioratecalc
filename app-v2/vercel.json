@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/adyen-actuals",
       "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/cron/hubspot-links",
+      "schedule": "0 9 * * *"
     }
   ]
 }

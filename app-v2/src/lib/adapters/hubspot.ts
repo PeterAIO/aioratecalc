@@ -198,6 +198,86 @@ export async function listProducts(): Promise<CatalogProduct[]> {
     .map(({ status: _status, ...product }) => product);
 }
 
+// ── Phase F: "Push to EasyOB" from HubSpot ──────────────────────────────────
+// HubSpot deprecated classic CRM cards, so the deep link lives on a Company
+// URL property (`easyob_link`, created manually in the HubSpot UI) instead of
+// a card data-fetch endpoint. This keeps that property in sync: every company
+// should carry `{base}/rep/prospects/new?hubspotCompanyId={id}`. Reads need
+// only the general app's existing companies.read scope; writes need
+// companies.write, which may not be granted yet — see backfillEasyobLinks.
+
+export function buildEasyobLink(companyId: string, baseUrl: string): string {
+  return `${baseUrl}/rep/prospects/new?hubspotCompanyId=${companyId}`;
+}
+
+export type EasyobLinkCompany = { id: string; properties: { easyob_link?: string | null } };
+export type EasyobLinkUpdate = { id: string; properties: { easyob_link: string } };
+
+// Pure: given a page of companies and the base URL, return only the companies
+// whose easyob_link is missing or stale. Kept separate from the network I/O
+// below so it can be unit-tested without hitting HubSpot.
+export function planEasyobLinkUpdates(companies: EasyobLinkCompany[], baseUrl: string): EasyobLinkUpdate[] {
+  const updates: EasyobLinkUpdate[] = [];
+  for (const company of companies) {
+    const expected = buildEasyobLink(company.id, baseUrl);
+    const current = (company.properties.easyob_link ?? "").trim();
+    if (current !== expected) {
+      updates.push({ id: company.id, properties: { easyob_link: expected } });
+    }
+  }
+  return updates;
+}
+
+export type EasyobLinkBackfillSummary = { checked: number; updated: number; failed: number };
+
+// Pages through every Company, then batch-PATCHes the ones missing or with a
+// stale easyob_link. A 403 on the batch update means the general app's token
+// doesn't have companies.write yet — that's surfaced as one clear error
+// rather than a per-company failure count, since it means nothing after the
+// first chunk will succeed either.
+export async function backfillEasyobLinks(): Promise<EasyobLinkBackfillSummary> {
+  const base = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
+  const companies: EasyobLinkCompany[] = [];
+  let after: string | undefined;
+
+  do {
+    const params = new URLSearchParams({ limit: "100", properties: "easyob_link" });
+    if (after) params.set("after", after);
+    const res = await fetch(`${BASE}/crm/v3/objects/companies?${params}`, { headers: headers() });
+    if (!res.ok) throw hubspotErr("HubSpot company list failed", res.status, await res.text());
+    const data = await res.json() as {
+      results?: Array<{ id: string; properties: Record<string, string | null> }>;
+      paging?: { next?: { after?: string } };
+    };
+    companies.push(...(data.results ?? []).map(c => ({ id: c.id, properties: { easyob_link: c.properties.easyob_link } })));
+    after = data.paging?.next?.after;
+  } while (after);
+
+  const updates = planEasyobLinkUpdates(companies, base);
+  let updated = 0;
+  let failed = 0;
+
+  for (let i = 0; i < updates.length; i += 100) {
+    const chunk = updates.slice(i, i + 100);
+    const res = await fetch(`${BASE}/crm/v3/objects/companies/batch/update`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ inputs: chunk }),
+    });
+    if (res.ok) {
+      updated += chunk.length;
+      continue;
+    }
+    if (res.status === 403) {
+      throw new Error("companies.write scope missing on the general app — grant crm.objects.companies.write and retry");
+    }
+    failed += chunk.length;
+    console.error("backfillEasyobLinks: batch update failed", res.status, await res.text());
+  }
+
+  return { checked: companies.length, updated, failed };
+}
+
 export async function pullFromHubSpot(hubspotDealId: string): Promise<Partial<MerchantApplication>> {
   const res = await fetch(
     `${BASE}/crm/v3/objects/deals/${hubspotDealId}?properties=dealname,dealstage,amount,current_processor,current_monthly_fees`,
