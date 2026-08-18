@@ -228,7 +228,54 @@ export function planEasyobLinkUpdates(companies: EasyobLinkCompany[], baseUrl: s
   return updates;
 }
 
-export type EasyobLinkBackfillSummary = { checked: number; updated: number; failed: number };
+export type EasyobLinkBackfillSummary = { checked: number; updated: number; failed: number; error?: string };
+
+// Companies API and platform-wide "secondly" limits are both far above these
+// counts in steady state, but a 429 does happen under load — retry a few
+// times (honoring Retry-After when HubSpot sends one) rather than just
+// counting the chunk/page as failed, and pace requests so we don't keep
+// tripping the same limit right back.
+const RETRY_AFTER_DEFAULT_MS = 1100;
+const REQUEST_SPACING_MS = 150;
+const MAX_ATTEMPTS = 3;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+  let res: Response;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    res = await fetch(url, init);
+    if (res.status !== 429 || attempt === MAX_ATTEMPTS) return res;
+    const retryAfterSec = Number(res.headers.get("Retry-After"));
+    const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : RETRY_AFTER_DEFAULT_MS;
+    await sleep(waitMs);
+  }
+  return res!;
+}
+
+// Pure guard for Fix 1: a base URL that resolves to localhost/127.0.0.1, has
+// no dot in its hostname, or doesn't parse at all is unusable for links other
+// people will click — HubSpot's URL-property validation happens to reject
+// localhost values, but we shouldn't rely on that as the only backstop.
+export function isPublicBaseUrl(url: string | undefined): url is string {
+  if (!url) return false;
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  if (hostname === "localhost" || hostname === "127.0.0.1") return false;
+  if (!hostname.includes(".")) return false;
+  return true;
+}
+
+function baseUrlErrorMessage(raw: string | undefined): string {
+  const shown = raw ? `'${raw}'` : "unset";
+  return `NEXT_PUBLIC_BASE_URL is ${shown} — refusing to write non-public links; set a public https URL`;
+}
 
 // Pages through every Company, then batch-PATCHes the ones missing or with a
 // stale easyob_link. A 403 on the batch update means the general app's token
@@ -236,14 +283,19 @@ export type EasyobLinkBackfillSummary = { checked: number; updated: number; fail
 // rather than a per-company failure count, since it means nothing after the
 // first chunk will succeed either.
 export async function backfillEasyobLinks(): Promise<EasyobLinkBackfillSummary> {
-  const base = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
+  const rawBase = process.env.NEXT_PUBLIC_BASE_URL;
+  if (!isPublicBaseUrl(rawBase)) {
+    return { checked: 0, updated: 0, failed: 0, error: baseUrlErrorMessage(rawBase) };
+  }
+  const base = rawBase;
+
   const companies: EasyobLinkCompany[] = [];
   let after: string | undefined;
 
   do {
     const params = new URLSearchParams({ limit: "100", properties: "easyob_link" });
     if (after) params.set("after", after);
-    const res = await fetch(`${BASE}/crm/v3/objects/companies?${params}`, { headers: headers() });
+    const res = await fetchWithRetry(`${BASE}/crm/v3/objects/companies?${params}`, { headers: headers() });
     if (!res.ok) throw hubspotErr("HubSpot company list failed", res.status, await res.text());
     const data = await res.json() as {
       results?: Array<{ id: string; properties: Record<string, string | null> }>;
@@ -251,6 +303,7 @@ export async function backfillEasyobLinks(): Promise<EasyobLinkBackfillSummary> 
     };
     companies.push(...(data.results ?? []).map(c => ({ id: c.id, properties: { easyob_link: c.properties.easyob_link } })));
     after = data.paging?.next?.after;
+    if (after) await sleep(REQUEST_SPACING_MS);
   } while (after);
 
   const updates = planEasyobLinkUpdates(companies, base);
@@ -259,20 +312,20 @@ export async function backfillEasyobLinks(): Promise<EasyobLinkBackfillSummary> 
 
   for (let i = 0; i < updates.length; i += 100) {
     const chunk = updates.slice(i, i + 100);
-    const res = await fetch(`${BASE}/crm/v3/objects/companies/batch/update`, {
+    const res = await fetchWithRetry(`${BASE}/crm/v3/objects/companies/batch/update`, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify({ inputs: chunk }),
     });
     if (res.ok) {
       updated += chunk.length;
-      continue;
-    }
-    if (res.status === 403) {
+    } else if (res.status === 403) {
       throw new Error("companies.write scope missing on the general app — grant crm.objects.companies.write and retry");
+    } else {
+      failed += chunk.length;
+      console.error("backfillEasyobLinks: batch update failed", res.status, await res.text());
     }
-    failed += chunk.length;
-    console.error("backfillEasyobLinks: batch update failed", res.status, await res.text());
+    if (i + 100 < updates.length) await sleep(REQUEST_SPACING_MS);
   }
 
   return { checked: companies.length, updated, failed };

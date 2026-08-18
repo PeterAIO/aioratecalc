@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildEasyobLink, planEasyobLinkUpdates, type EasyobLinkCompany } from "@/lib/adapters/hubspot";
+import { buildEasyobLink, planEasyobLinkUpdates, isPublicBaseUrl, type EasyobLinkCompany } from "@/lib/adapters/hubspot";
 
 const BASE = "https://easyob.example.com";
 
@@ -58,5 +58,32 @@ describe("planEasyobLinkUpdates", () => {
 
   it("returns an empty plan for an empty page", () => {
     expect(planEasyobLinkUpdates([], BASE)).toEqual([]);
+  });
+});
+
+describe("isPublicBaseUrl", () => {
+  it("rejects localhost", () => {
+    expect(isPublicBaseUrl("http://localhost:5001")).toBe(false);
+  });
+
+  it("rejects 127.0.0.1", () => {
+    expect(isPublicBaseUrl("http://127.0.0.1:3000")).toBe(false);
+  });
+
+  it("rejects a bare hostname with no dot", () => {
+    expect(isPublicBaseUrl("http://easyob")).toBe(false);
+  });
+
+  it("rejects an empty/unset value", () => {
+    expect(isPublicBaseUrl("")).toBe(false);
+    expect(isPublicBaseUrl(undefined)).toBe(false);
+  });
+
+  it("rejects an unparseable value", () => {
+    expect(isPublicBaseUrl("not-a-url")).toBe(false);
+  });
+
+  it("accepts a valid public https URL", () => {
+    expect(isPublicBaseUrl("https://easyob.example.com")).toBe(true);
   });
 });
