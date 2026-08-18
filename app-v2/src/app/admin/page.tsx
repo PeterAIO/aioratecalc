@@ -1,8 +1,12 @@
-import { redirect } from "next/navigation";
+import { getEffectiveRole } from "@/lib/auth/getEffectiveRole";
+import { AdminDashboard } from "@/components/dashboard/AdminDashboard";
 
-// Admin is no longer a separate destination — the dashboard at /rep renders the
-// admin-scoped view (all reps' accounts + Leads) when an admin is signed in.
-// Admin-only config still lives under /admin/* (users, margin padding).
-export default function AdminPage() {
-  redirect("/rep");
+// /admin is the single admin surface: org-wide metrics on top, then one of
+// three views chosen by ?view= — the per-rep breakdown (default), all accounts,
+// or leads. The latter two embed AccountsDashboard (role="admin"), the same
+// component /rep renders, so there is only ever one accounts table in the app.
+// Route access is enforced by middleware.ts (admin-only), like every /admin/*.
+export default async function AdminPage() {
+  const effective = await getEffectiveRole();
+  return <AdminDashboard userId={effective?.userId ?? ""} />;
 }

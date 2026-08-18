@@ -8,8 +8,10 @@ const BASE = "https://api.hubapi.com";
 const STAGE_MAP: Record<string, string> = {
   analysis: "appointmentscheduled",
   pricing: "qualifiedtobuy",
+  quote_sent: "presentationscheduled",
   proposal_ready: "presentationscheduled",
   proposal_sent: "decisionmakerboughtin",
+  quote_accepted: "decisionmakerboughtin",
   merchant_link_sent: "contractsent",
   adyen_kyc_pending: "contractsent",
   adyen_kyc_complete: "closedwon",
@@ -17,11 +19,11 @@ const STAGE_MAP: Record<string, string> = {
   closed_lost: "closedlost",
 };
 
-// Two private apps, two tokens. The general CRM app covers deal sync and the
-// company reads behind tenant linkage; a separate billing app covers products,
-// quotes, line items, subscriptions and invoices. Keeping them apart means the
-// billing app can hold write scopes without widening what the sync path can
-// reach — pick the right one per call rather than defaulting to either.
+// Two private apps, two tokens. The general CRM app is companies-read-only,
+// covering the tenant linkage lookups below; the billing app covers deals,
+// products, quotes, line items, subscriptions and invoices. The general app
+// has no deals scope, so deal sync goes through the billing app's token too —
+// pick the right one per call rather than defaulting to either.
 function tokenHeaders(token: string | undefined, varName: string) {
   if (!token) throw new Error(`${varName} is not set`);
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
@@ -51,7 +53,7 @@ export async function pushToHubSpot(app: MerchantApplication): Promise<string> {
     // Update existing deal
     const res = await fetch(`${BASE}/crm/v3/objects/deals/${app.hubspotDealId}`, {
       method: "PATCH",
-      headers: headers(),
+      headers: billingHeaders(),
       body: JSON.stringify({ properties: props }),
     });
     if (!res.ok) throw new Error(`HubSpot PATCH deal failed: ${await res.text()}`);
@@ -61,7 +63,7 @@ export async function pushToHubSpot(app: MerchantApplication): Promise<string> {
   // Create deal
   const res = await fetch(`${BASE}/crm/v3/objects/deals`, {
     method: "POST",
-    headers: headers(),
+    headers: billingHeaders(),
     body: JSON.stringify({ properties: props }),
   });
   if (!res.ok) throw new Error(`HubSpot POST deal failed: ${await res.text()}`);
@@ -83,9 +85,16 @@ export type TenantCompany = {
   tenantRef: string | null;            // HubSpot "tenant_id", e.g. "prod-1024"
   adyenAccountHolderId: string | null; // "AH32..."
   mid: string | null;
+  phone: string | null;                // Company "phone" — reliably populated, unlike location_email
+  email: string | null;                // Company "location_email" — sparsely populated; often null
 };
 
-const TENANT_COMPANY_PROPS = ["name", "tenant_id", "adyen_account_holder_id", "mid"];
+// "phone"/"location_email" added for Phase F prospect prefill (deep link from
+// the Company record). Verified live 2026-08-18: `name`/`phone` are reliably
+// populated on real Company records; `location_email` is usually null (there
+// is no standard "contact email" property on a HubSpot Company — that lives
+// on an associated Contact, which this companies-read-only token can't read).
+const TENANT_COMPANY_PROPS = ["name", "tenant_id", "adyen_account_holder_id", "mid", "phone", "location_email"];
 
 function toTenantCompany(obj: { id: string; properties: Record<string, string | null> }): TenantCompany {
   const p = obj.properties;
@@ -99,6 +108,8 @@ function toTenantCompany(obj: { id: string; properties: Record<string, string | 
     tenantRef: clean(p.tenant_id),
     adyenAccountHolderId: clean(p.adyen_account_holder_id),
     mid: clean(p.mid),
+    phone: clean(p.phone),
+    email: clean(p.location_email),
   };
 }
 
@@ -190,7 +201,7 @@ export async function listProducts(): Promise<CatalogProduct[]> {
 export async function pullFromHubSpot(hubspotDealId: string): Promise<Partial<MerchantApplication>> {
   const res = await fetch(
     `${BASE}/crm/v3/objects/deals/${hubspotDealId}?properties=dealname,dealstage,amount,current_processor,current_monthly_fees`,
-    { headers: headers() }
+    { headers: billingHeaders() }
   );
   if (!res.ok) throw new Error(`HubSpot GET deal failed: ${await res.text()}`);
   const data = await res.json() as { properties: Record<string, string> };

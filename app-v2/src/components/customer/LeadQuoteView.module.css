@@ -1,0 +1,333 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app
+ * The quote half of the public lead flow — moved here from
+ * LeadUploadStep.module.css when both quote paths converged on this component.
+ */
+
+.page {
+  min-height: 100dvh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+
+.container {
+  max-width: 40rem;
+  margin-inline: auto;
+  padding: var(--space-3xl) var(--space-lg);
+}
+
+/* ---------- Quote result (Stat-Led — headline number sits directly on the page) ---------- */
+
+.quoteHead {
+  text-align: center;
+  margin-bottom: var(--space-xl);
+  animation: fadeUp 500ms var(--ease-out) both;
+}
+
+.quoteEyebrow {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  margin-bottom: var(--space-sm);
+}
+
+.quoteBusiness {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.5rem, 2vw + 1rem, 2rem);
+  color: var(--ink);
+  margin: 0;
+}
+
+.statWrap {
+  text-align: center;
+  margin-bottom: var(--space-xl);
+  animation: fadeUp 500ms var(--ease-out) both;
+}
+
+.statCaption {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 var(--space-xs);
+}
+
+.statHero {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--success);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-size: clamp(2.75rem, 6vw + 1rem, 4rem);
+  margin-bottom: var(--space-lg);
+}
+
+/* A quoted rate isn't a saving — don't dress it in the savings green. */
+.statHero[data-tone="rate"] { color: var(--ink); }
+
+.statTicker {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: var(--space-xl);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--rule);
+}
+
+.statTickerItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3xs);
+}
+
+.statTickerValue {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.statTickerLabel {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+.basisNote {
+  font-size: 0.82rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+  text-align: center;
+  margin: 0 0 var(--space-xl);
+}
+
+.linkBtn {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-text);
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.linkBtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- Quote lines (hardware, platform, services) ---------- */
+
+.lines { margin-bottom: var(--space-xl); }
+
+.lineGroup {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg) var(--space-xl);
+  margin-bottom: var(--space-md);
+}
+
+.lineGroupTitle {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 var(--space-sm);
+}
+
+.lineRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-xs) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.lineName {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.lineNote {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  line-height: 1.5;
+  margin-top: var(--space-3xs);
+}
+
+.linePrice { text-align: right; flex-shrink: 0; }
+
+.linePriceMain {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.linePriceAlt {
+  font-size: 0.72rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lineTotalRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.lineTotalRow[data-emphasis="true"] { color: var(--ink); font-weight: 700; }
+
+.lineTotalValue {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lineTotalRow[data-emphasis="true"] .lineTotalValue { color: var(--accent-text); }
+
+.lineFootnote {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  line-height: 1.6;
+  margin: 0;
+  padding: 0 var(--space-xs);
+}
+
+/* ---------- Accept panel ---------- */
+
+.panel {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-xl);
+}
+
+.panelTitle {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0 0 var(--space-2xs);
+}
+
+.panelText {
+  font-size: 0.85rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+  margin: 0 0 var(--space-md);
+}
+
+.acceptRow {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.acceptInput {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.acceptInput:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.acceptBtn {
+  padding: var(--space-sm) var(--space-lg);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: white;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 150ms var(--ease-out), opacity 150ms var(--ease-out);
+}
+
+.acceptBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.acceptBtn:not(:disabled):hover { background: var(--accent-text); }
+.acceptBtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.acceptBtn:not(:disabled):active { transform: scale(0.97); }
+
+.acceptError {
+  font-size: 0.8rem;
+  color: var(--danger);
+  margin-top: var(--space-sm);
+}
+
+.acceptSuccess {
+  font-size: 0.85rem;
+  color: var(--success);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.devUrl {
+  margin-top: var(--space-md);
+  font-size: 0.78rem;
+  color: var(--ink-3);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+}
+
+.devUrl a { color: var(--accent-text); }
+
+.footnote {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  line-height: 1.6;
+  margin: var(--space-lg) 0 0;
+}
+
+@media (max-width: 34rem) {
+  .acceptRow { flex-direction: column; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .acceptBtn { transition-duration: 1ms; }
+  .quoteHead,
+  .statWrap {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

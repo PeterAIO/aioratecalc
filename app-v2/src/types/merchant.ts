@@ -3,11 +3,13 @@ export type PricingModel = "flat-rate" | "2-tier" | "interchange-plus";
 export type DealStage =
   | "prospect_created"      // rep created a prospect + set a margin target, no link sent yet
   | "lead_link_sent"        // rep sent the tokenized self-serve upload link, awaiting customer
+  | "quote_sent"            // link sent with a quote already prepared (rep set configs and/or uploaded the statement)
   | "lead_analysis_pending" // customer clicked the link and uploaded a statement, analyzing
   | "analysis"
   | "pricing"
   | "proposal_ready"
   | "proposal_sent"
+  | "quote_accepted"        // customer explicitly accepted the quote on the customer quote view
   | "merchant_link_sent"    // post-proposal Adyen KYC handoff link sent (see customerLinkPurpose)
   | "merchant_filling"
   | "adyen_kyc_pending"
@@ -121,6 +123,30 @@ export type QuoteLine = {
   unitPrice: number;
   billingFrequency: BillingFrequency;
   productType: string;
+};
+
+// Quote arithmetic, kept apart by billing cycle on purpose. `oneTime` and
+// `recurring` are different units and must never be added together; the
+// `monthlyEquivalent` is the only figure comparable to a statement's monthly
+// numbers, and it covers the recurring side only.
+export type QuoteTotals = {
+  oneTime: number;
+  recurring: Array<{ frequency: BillingFrequency; amount: number }>;
+  monthlyEquivalent: number;
+};
+
+// The QUOTED ordering-point count — order-point-bearing hardware lines plus the
+// non-hardware channels declared on the deal (a website is an ordering point
+// and will never appear in an inventory system). It selects the platform tier,
+// i.e. the largest recurring line on the quote, so it is part of what we
+// quoted: frozen at publish alongside quoteConfig/quoteLines, never overwritten
+// by a later sync. The DEPLOYED count is a separate, post-go-live thing that
+// comes from aioinventory — don't conflate the two.
+// `hardware` maps catalog product name → points that line contributed.
+export type OrderPoints = {
+  hardware: Record<string, number>;
+  channels: string[];
+  total: number;
 };
 
 // The rep-entered basis for a quote when there's no statement to read it from
@@ -257,6 +283,12 @@ export type MerchantApplication = {
   hubspotIds: HubspotIds | null; // HubSpot deal/quote/subscription — null until a quote is built
   quoteConfig: QuoteConfig | null; // rep-entered ticket/volume basis when there's no statement
   quoteLines: QuoteLine[] | null;  // hardware/platform/service lines; priced at quote time
+  orderPoints: OrderPoints | null; // the quoted order-point count that selected the platform tier
+  // When the customer explicitly accepted the quote on the customer quote view.
+  // Distinct from stage: stage keeps moving through onboarding, this doesn't —
+  // it's the moment the quote was agreed, and it belongs with the frozen
+  // quoteConfig/quoteLines rather than with the live deal state.
+  quoteAcceptedAt: string | null;
   targetMargin: number | null; // rep-set margin target, exists before any analysis
   pricingModel: PricingModel | null; // rep's pre-selected model for the prospect
   // Generalized token slot — serves both the pre-analysis self-serve upload
@@ -307,9 +339,35 @@ export type CustomerSubmission = {
 
 // The only shape a customer is ever allowed to see (enforced server-side at
 // the API response boundary) — no cost breakdown, no margin, no raw analysis.
+// The bar for adding a field here: would we print it on the quote we hand the
+// merchant? Their own volume/ticket and the rate we're quoting pass; AIO's
+// cost, margin, floor, or interchange assumptions do not.
+// Phase C: quote lines and the order-point count are customer-safe — they are
+// literally what's printed on the paper quote. Costs, margins and floors are
+// not, and never join this shape.
 export type CustomerSafeQuote = {
-  effectiveRate: number;
-  monthlySavings: number;
-  annualSavings: number;
-  savingsPct: number;
+  // "statement" — read off the merchant's own statement (theirs or the rep's upload).
+  // "config"    — derived from the rep-entered quoteConfig, no statement in hand.
+  basis: "statement" | "config";
+  monthlyVolume: number;
+  averageTicket: number;
+  effectiveRate: number;          // AIO's quoted all-in effective rate on that volume
+  projectedMonthlyCost: number;
+  projectedAnnualCost: number;
+  // Savings need a CURRENT cost to compare against, and only a statement
+  // supplies one. These are null on the config path on purpose — we quote a
+  // rate there rather than invent what the merchant pays today.
+  currentMonthlyCost: number | null;
+  currentEffectiveRate: number | null;
+  monthlySavings: number | null;
+  annualSavings: number | null;
+  savingsPct: number | null;
+  // Hardware / platform / service lines as quoted, price and cycle snapshotted.
+  // Empty (not null) when nothing was configured, so the view has one shape.
+  lines: QuoteLine[];
+  // Totals for those lines. Null when there are none. Never one number: the
+  // one-time and recurring halves are different units.
+  lineTotals: QuoteTotals | null;
+  // Stated on the quote as the basis for the platform-fee line.
+  orderPoints: OrderPoints | null;
 };

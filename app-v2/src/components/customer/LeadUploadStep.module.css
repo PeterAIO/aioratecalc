@@ -134,215 +134,25 @@
   transform: scale(0.97);
 }
 
-/* ---------- Quote result (Stat-Led — headline number sits directly on the page) ---------- */
-
-.quoteHead {
-  text-align: center;
-  margin-bottom: var(--space-xl);
-  animation: fadeUp 500ms var(--ease-out) both;
-}
-
-.quoteEyebrow {
-  display: inline-block;
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent-text);
-  margin-bottom: var(--space-sm);
-}
-
-.quoteBusiness {
-  font-family: var(--font-display);
-  font-weight: 800;
-  font-size: clamp(1.5rem, 2vw + 1rem, 2rem);
-  color: var(--ink);
-  margin: 0;
-}
-
-.statWrap {
-  text-align: center;
-  margin-bottom: var(--space-2xl);
-  animation: fadeUp 500ms var(--ease-out) both;
-}
-
-.statCaption {
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin: 0 0 var(--space-xs);
-}
-
-.statHero {
-  font-family: var(--font-display);
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  color: var(--success);
-  line-height: 1;
-  letter-spacing: -0.02em;
-  font-size: clamp(2.75rem, 6vw + 1rem, 4rem);
-  margin-bottom: var(--space-lg);
-}
-
-.statTicker {
-  display: flex;
-  justify-content: center;
-  align-items: baseline;
-  gap: var(--space-2xl);
-  padding-top: var(--space-lg);
-  border-top: 1px solid var(--rule);
-}
-
-.statTickerItem {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3xs);
-}
-
-.statTickerValue {
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-
-.statTickerLabel {
-  font-size: 0.75rem;
-  color: var(--ink-3);
-}
-
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-/* ---------- Access panel ---------- */
-
-.panel {
-  background: var(--paper-2);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-whisper);
-  padding: var(--space-xl);
-}
-
-.panelTitle {
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--ink);
-  margin: 0 0 var(--space-2xs);
-}
-
-.panelText {
-  font-size: 0.85rem;
-  color: var(--ink-2);
-  line-height: 1.6;
-  margin: 0 0 var(--space-md);
-}
-
-.accessRow {
-  display: flex;
-  gap: var(--space-sm);
-}
-
-.accessInput {
-  flex: 1;
-  padding: var(--space-sm) var(--space-md);
-  background: var(--paper);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-sm);
-  color: var(--ink);
-  font-family: var(--font-body);
-  font-size: 0.9rem;
-  outline: none;
-}
-
-.accessInput:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
-}
-
-.accessBtn {
-  padding: var(--space-sm) var(--space-lg);
+.btnGhostLink {
+  display: block;
+  margin: var(--space-md) auto 0;
   border: none;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: white;
+  background: none;
+  padding: var(--space-2xs) var(--space-xs);
   font-family: var(--font-body);
-  font-size: 0.9rem;
+  font-size: 0.83rem;
   font-weight: 700;
+  color: var(--ink-2);
   cursor: pointer;
-  white-space: nowrap;
-  transition: background 150ms var(--ease-out), opacity 150ms var(--ease-out);
 }
 
-.accessBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.accessBtn:not(:disabled):hover {
-  background: var(--accent-text);
-}
-
-.accessBtn:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-
-.accessBtn:not(:disabled):active {
-  transform: scale(0.97);
-}
-
-.accessError {
-  font-size: 0.8rem;
-  color: var(--danger);
-  margin-top: var(--space-sm);
-}
-
-.accessSuccess {
-  font-size: 0.85rem;
-  color: var(--success);
-  line-height: 1.6;
-  margin: 0;
-}
-
-.devUrl {
-  margin-top: var(--space-md);
-  font-size: 0.78rem;
-  color: var(--ink-3);
-  padding: var(--space-sm) var(--space-md);
-  background: var(--paper);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-sm);
-  word-break: break-all;
-}
-
-.devUrl a {
-  color: var(--accent-text);
-}
-
-.footnote {
-  text-align: center;
-  font-size: 0.8rem;
-  color: var(--ink-3);
-  line-height: 1.6;
-  margin: var(--space-lg) 0 0;
-}
+.btnGhostLink:hover { color: var(--ink); }
+.btnGhostLink:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 @media (prefers-reduced-motion: reduce) {
   .dropzone,
-  .btnPrimary,
-  .accessBtn {
+  .btnPrimary {
     transition-duration: 1ms;
-  }
-  .quoteHead,
-  .statWrap {
-    animation: none;
-    opacity: 1;
-    transform: none;
   }
 }

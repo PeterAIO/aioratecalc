@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, useEffect } from "react";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
   listApplicationsAction,
   listSubmissionsAction,
@@ -16,6 +16,7 @@ import {
 } from "@/lib/actions/applications";
 import { fmt$ } from "@/lib/utils";
 import { STAGE_COLORS } from "@/lib/stageColors";
+import { PROPOSAL_STAGES, ONBOARDING_STAGES } from "@/lib/stages";
 import { getOnboardingModules } from "@/lib/onboardingModules";
 import type { MerchantApplication, CustomerSubmission } from "@/types/merchant";
 import type { TenantCompany } from "@/lib/adapters/hubspot";
@@ -34,14 +35,62 @@ const ADMIN_COLS = "1fr 110px 140px 110px 100px 100px 90px";
 
 type Role = "rep" | "admin";
 
-export function AccountsDashboard({ role, userId }: { role: Role; userId: string }) {
+type AccountsDashboardProps = {
+  role: Role;
+  userId: string;
+  // Set when this is nested inside another page's chrome (/admin). The embedding
+  // page owns the title, the stat hero and the accounts/leads switch, so all
+  // three are suppressed here to avoid showing them twice. Unset = the
+  // standalone /rep behaviour, unchanged.
+  embedded?: boolean;
+  // Controlled sub-view, used with `embedded` so the host page's own view param
+  // drives which table renders instead of this component's ?tab=.
+  view?: "accounts" | "leads";
+  // ownerUserId to narrow the accounts table to (drill-down from a rep row).
+  repFilter?: string | null;
+  onClearRepFilter?: () => void;
+};
+
+// useSearchParams (for the ?tab= param below) requires a Suspense boundary
+// above it, so the actual implementation is wrapped here rather than at every
+// call site (rep/page.tsx renders this directly; AdminDashboard.tsx nests it).
+export function AccountsDashboard(props: AccountsDashboardProps) {
+  return (
+    <Suspense>
+      <AccountsDashboardInner {...props} />
+    </Suspense>
+  );
+}
+
+function AccountsDashboardInner({
+  role,
+  userId,
+  embedded,
+  view,
+  repFilter,
+  onClearRepFilter,
+}: AccountsDashboardProps) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const isAdmin = role === "admin";
 
   const [apps, setApps]         = useState<MerchantApplication[]>([]);
   const [subs, setSubs]         = useState<CustomerSubmission[]>([]);
   const [reps, setReps]         = useState<RepSummary[]>([]);
-  const [tab, setTab]           = useState<"accounts" | "leads">("accounts");
+  // Sourced straight from the URL (not local state) so a link into this page
+  // (/rep?tab=leads) actually switches the panel, and so the URL and the panel
+  // always agree on which one is active. When embedded, the host page passes
+  // the resolved view in instead — see AdminDashboard.tsx.
+  const tab: "accounts" | "leads" =
+    view ?? (isAdmin && searchParams.get("tab") === "leads" ? "leads" : "accounts");
+  const setTab = (next: "accounts" | "leads") => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "leads") params.set("tab", "leads");
+    else params.delete("tab");
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
   const [selected, setSelected] = useState<MerchantApplication | null>(null);
   const [busyId, setBusyId]     = useState<string | null>(null);
   const [search, setSearch]     = useState("");
@@ -72,8 +121,8 @@ export function AccountsDashboard({ role, userId }: { role: Role; userId: string
 
   const metrics = {
     total:     apps.length,
-    proposals: apps.filter(a => ["proposal_ready", "proposal_sent"].includes(a.stage)).length,
-    applying:  apps.filter(a => ["merchant_link_sent", "adyen_kyc_pending", "adyen_kyc_complete"].includes(a.stage)).length,
+    proposals: apps.filter(a => PROPOSAL_STAGES.includes(a.stage)).length,
+    applying:  apps.filter(a => ONBOARDING_STAGES.includes(a.stage)).length,
     approved:  apps.filter(a => a.stage === "adyen_approved").length,
     volume:    apps.reduce((sum, a) => sum + (a.analysis?.totalVolume || 0), 0),
     savings:   apps.reduce((sum, a) => sum + (a.proposal?.savings?.annual || 0), 0),
@@ -85,6 +134,7 @@ export function AccountsDashboard({ role, userId }: { role: Role; userId: string
   };
 
   const filteredApps = apps.filter(a => {
+    if (repFilter && a.ownerUserId !== repFilter) return false;
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (
@@ -214,37 +264,43 @@ export function AccountsDashboard({ role, userId }: { role: Role; userId: string
     : "No accounts yet. Upload a statement or send a customer link to get started.";
 
   return (
-    <div className={styles.main}>
-      <div className={styles.header}>
-        <h1 className={styles.headerTitle}>Accounts</h1>
-        <p className={styles.headerSubtitle}>
-          {isAdmin
-            ? "Every account across all reps, plus customer self-serve leads — with margin oversight for approved deals."
-            : "Your merchants across the whole pipeline, from first statement to approved onboarding."}
-        </p>
-      </div>
-
-      {/* Stat-led hero — no card shape, sits directly on the page */}
-      <div className={styles.stats}>
-        <div className={styles.statHero}>{fmt$(metrics.volume)}</div>
-        <p className={styles.statCaption}>
-          {isAdmin ? "Total volume across the pipeline" : "Total volume across your pipeline"}
-        </p>
-        <div className={styles.statTicker}>
-          <span><b>{metrics.total}</b> Accounts</span>
-          <span className={styles.statDot}>·</span>
-          <span><b>{metrics.proposals}</b> Proposals Sent</span>
-          <span className={styles.statDot}>·</span>
-          <span><b>{metrics.applying}</b> In Onboarding</span>
-          <span className={styles.statDot}>·</span>
-          <span><b>{metrics.approved}</b> Approved</span>
-          <span className={styles.statDot}>·</span>
-          <span><b className={styles.statSuccess}>{fmt$(metrics.savings)}/yr</b> Projected Savings</span>
+    <div className={embedded ? styles.mainEmbedded : styles.main}>
+      {!embedded && (
+        <div className={styles.header}>
+          <h1 className={styles.headerTitle}>Accounts</h1>
+          <p className={styles.headerSubtitle}>
+            {isAdmin
+              ? "Every account across all reps, plus customer self-serve leads — with margin oversight for approved deals."
+              : "Your merchants across the whole pipeline, from first statement to approved onboarding."}
+          </p>
         </div>
-      </div>
+      )}
 
-      {/* Admin gets a Leads sub-view alongside Accounts; reps only have Accounts. */}
-      {isAdmin && (
+      {/* Stat-led hero — no card shape, sits directly on the page. The embedding
+          page (/admin) shows its own org-wide hero, so it is dropped there. */}
+      {!embedded && (
+        <div className={styles.stats}>
+          <div className={styles.statHero}>{fmt$(metrics.volume)}</div>
+          <p className={styles.statCaption}>
+            {isAdmin ? "Total volume across the pipeline" : "Total volume across your pipeline"}
+          </p>
+          <div className={styles.statTicker}>
+            <span><b>{metrics.total}</b> Accounts</span>
+            <span className={styles.statDot}>·</span>
+            <span><b>{metrics.proposals}</b> Proposals Sent</span>
+            <span className={styles.statDot}>·</span>
+            <span><b>{metrics.applying}</b> In Onboarding</span>
+            <span className={styles.statDot}>·</span>
+            <span><b>{metrics.approved}</b> Approved</span>
+            <span className={styles.statDot}>·</span>
+            <span><b className={styles.statSuccess}>{fmt$(metrics.savings)}/yr</b> Projected Savings</span>
+          </div>
+        </div>
+      )}
+
+      {/* Admin gets a Leads sub-view alongside Accounts; reps only have Accounts.
+          Embedded, the host page's own view toggle takes over this job. */}
+      {isAdmin && !embedded && (
         <div className={styles.tabsRow}>
           <div className={styles.tabs} data-active={tab} role="tablist">
             <button role="tab" aria-selected={tab === "accounts"} className={styles.tab} onClick={() => setTab("accounts")}>
@@ -259,6 +315,24 @@ export function AccountsDashboard({ role, userId }: { role: Role; userId: string
 
       {tab === "accounts" && (
         <>
+          {/* Drill-down chip — set when the host page narrowed this list to one
+              rep; dismissing it clears the filter back to every account. */}
+          {repFilter && (
+            <div className={styles.filterChipRow}>
+              <span className={styles.filterChip}>
+                Rep: {repMap.get(repFilter)?.name || repMap.get(repFilter)?.email || repFilter}
+                <button
+                  type="button"
+                  className={styles.filterChipClear}
+                  onClick={onClearRepFilter}
+                  aria-label="Clear rep filter"
+                >
+                  ×
+                </button>
+              </span>
+            </div>
+          )}
+
           {/* Full table — shown when nothing is selected */}
           {!selected && (
             <>

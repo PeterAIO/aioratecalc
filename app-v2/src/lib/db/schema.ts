@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, boolean, integer, numeric, jsonb, serial } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, boolean, integer, numeric, jsonb, serial, date, index, uniqueIndex } from "drizzle-orm/pg-core";
+import type { ReportAnomalies } from "@/lib/adyen/paymentsAccountingParser";
 import type {
   StatementAnalysis,
   ProposalOutput,
@@ -71,6 +72,15 @@ export const merchantApplications = pgTable("merchant_applications", {
   // Quote lines, priced at quote time. Prices are per BILLING CYCLE (weekly for
   // AIO's platform fees), never per month — see BillingFrequency.
   quoteLines: jsonb("quote_lines").$type<MerchantApplication["quoteLines"]>(),
+  // The quoted ordering-point count that selected the platform tier. Belongs to
+  // the same frozen-at-publish bucket as quoteConfig/quoteLines — it's part of
+  // what we quoted, and the later quoted-vs-deployed comparison depends on it
+  // not moving.
+  orderPoints: jsonb("order_points").$type<MerchantApplication["orderPoints"]>(),
+  // Set once, when the customer accepts the quote on the customer quote view.
+  // Frozen alongside quoteConfig/quoteLines — the record of what was agreed,
+  // not a piece of live deal state (that's `stage`).
+  quoteAcceptedAt: timestamp("quote_accepted_at", { withTimezone: true }),
   analysis: jsonb("analysis").$type<StatementAnalysis | null>(),
   proposal: jsonb("proposal").$type<ProposalOutput | null>(),
   business: jsonb("business").$type<BusinessInfo | null>(),
@@ -100,6 +110,62 @@ export const customerSubmissions = pgTable("customer_submissions", {
   contactInfo: jsonb("contact_info").$type<CustomerSubmission["contactInfo"]>().notNull(),
   analysis: jsonb("analysis").$type<StatementAnalysis>(),
   quote: jsonb("quote").$type<CustomerSubmission["quote"]>(),
+});
+
+// ── Phase G: Adyen actuals ingest ──────────────────────────────────────────
+// Aggregated at ingest — never per-transaction rows, never the raw CSV.
+// Money follows the rest of the schema: numeric with scale 2, in dollars.
+
+// Staging aggregate, one row per (report file, tenant, day of sale).
+// The report filename is part of the key on purpose: a daily file is written on
+// a BOOKING-date basis but we roll up on DAY OF SALE, so one file can carry rows
+// dated to earlier days. Keying on (tenant, day) alone would let one file's
+// partial spill overwrite another file's totals for the same day. Keyed this way,
+// reprocessing file F is "delete where filename = F, re-insert" — a clean
+// recompute with no double count and no collateral damage. ~44 tenants × a
+// couple of sale dates per file, so the volume is trivial.
+export const merchantDailyActuals = pgTable("merchant_daily_actuals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  reportFilename: text("report_filename").notNull(),
+  tenantNumber: text("tenant_number").notNull(),
+  saleDate: date("sale_date").notNull(),
+  month: text("month").notNull(), // "YYYY-MM", derived from saleDate
+  grossVolume: numeric("gross_volume", { precision: 14, scale: 2 }).notNull(),
+  transactionCount: integer("transaction_count").notNull(),
+  aioCommission: numeric("aio_commission", { precision: 14, scale: 2 }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("merchant_daily_actuals_file_tenant_day_key").on(t.reportFilename, t.tenantNumber, t.saleDate),
+  // Serves the month re-sum in actualsIngest.recomputeMonth().
+  index("merchant_daily_actuals_tenant_month_idx").on(t.tenantNumber, t.month),
+]);
+
+// What the admin comparison view reads: gross volume, transaction count and
+// AIO's commission per tenant per month (average ticket = volume ÷ count).
+// Always SET from a full re-sum of merchant_daily_actuals, never incremented.
+export const merchantMonthlyActuals = pgTable("merchant_monthly_actuals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantNumber: text("tenant_number").notNull(),
+  month: text("month").notNull(), // "YYYY-MM"
+  grossVolume: numeric("gross_volume", { precision: 14, scale: 2 }).notNull(),
+  transactionCount: integer("transaction_count").notNull(),
+  aioCommission: numeric("aio_commission", { precision: 14, scale: 2 }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("merchant_monthly_actuals_tenant_month_key").on(t.tenantNumber, t.month),
+]);
+
+// Which report files we've already ingested. Webhooks duplicate and reports get
+// refetched, so this makes a re-delivery a no-op; it also lets the nightly cron
+// backstop ask "which expected days are missing?". Written LAST in the ingest,
+// so a crash mid-ingest leaves the file unrecorded and it is simply retried.
+export const adyenProcessedReports = pgTable("adyen_processed_reports", {
+  filename: text("filename").primaryKey(),
+  reportDate: date("report_date"),
+  rowCount: integer("row_count").notNull(),
+  transactionCount: integer("transaction_count").notNull(),
+  anomalies: jsonb("anomalies").$type<ReportAnomalies | null>(),
+  processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 // Short-lived, single-use passwordless login tokens for the customer role.

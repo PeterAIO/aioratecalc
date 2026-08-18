@@ -30,6 +30,8 @@ function newApp(): MerchantApplication {
     hubspotIds: null,
     quoteConfig: null,
     quoteLines: null,
+    orderPoints: null,
+    quoteAcceptedAt: null,
     targetMargin: null,
     pricingModel: null,
     customerLinkToken: null,

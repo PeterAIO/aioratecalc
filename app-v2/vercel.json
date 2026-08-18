@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/adyen-actuals",
+      "schedule": "0 9 * * *"
+    }
+  ]
+}

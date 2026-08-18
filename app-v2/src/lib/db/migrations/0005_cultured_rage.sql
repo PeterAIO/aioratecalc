@@ -1,0 +1,1 @@
+ALTER TABLE "merchant_applications" ADD COLUMN "quote_accepted_at" timestamp with time zone;

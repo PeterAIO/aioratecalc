@@ -1,0 +1,1 @@
+ALTER TABLE "merchant_applications" ADD COLUMN "order_points" jsonb;

@@ -3,25 +3,13 @@
 // server or DB. No "server-only" / DB imports here on purpose.
 import crypto from "crypto";
 import type { DealStage } from "@/types/merchant";
+import { STAGE_RANK } from "@/lib/stages";
 
-// Forward-only stage ranking. Adyen delivers webhooks at-least-once and out of
-// order, so we only ever advance a deal, never regress it (a stale "pending"
-// event must not undo an "approved" one).
-export const STAGE_RANK: Record<string, number> = {
-  prospect_created: 0,
-  lead_link_sent: 1,
-  lead_analysis_pending: 2,
-  analysis: 3,
-  pricing: 4,
-  proposal_ready: 5,
-  proposal_sent: 6,
-  merchant_link_sent: 7,
-  merchant_filling: 8,
-  adyen_kyc_pending: 9,
-  adyen_kyc_complete: 10,
-  adyen_approved: 11,
-  closed_lost: 12,
-};
+// Forward-only stage ranking, imported from the canonical module (src/lib/stages.ts)
+// so it can't drift from the dashboards' stage-group buckets. Adyen delivers
+// webhooks at-least-once and out of order, so we only ever advance a deal,
+// never regress it (a stale "pending" event must not undo an "approved" one).
+export { STAGE_RANK };
 
 /**
  * Verify a Balance Platform webhook HMAC signature.
@@ -86,5 +74,5 @@ export function stageFromEvent(event: any): WebhookOutcome {
 
 /** True if `next` is strictly further along than `current` (forward-only guard). */
 export function shouldAdvance(current: string, next: DealStage): boolean {
-  return (STAGE_RANK[next] ?? -1) > (STAGE_RANK[current] ?? -1);
+  return (STAGE_RANK[next] ?? -1) > (STAGE_RANK[current as DealStage] ?? -1);
 }

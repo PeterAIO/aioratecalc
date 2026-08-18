@@ -125,7 +125,10 @@ would be redundant scope surface.
 ### Env vars — paste-able now
 
 ```
-ADYEN_POS_MERCHANT_ACCOUNT=AIOAppIncPOS   # verified live 2026-08-18
+ADYEN_POS_MERCHANT_ACCOUNT=AIOAppIncPOS   # verified live 2026-08-18; report download path
+ADYEN_REPORT_API_KEY=...                  # report service user; LIVE key (\$-escape it)
+ADYEN_REPORT_BASE_URL=...                 # optional; defaults to https://ca-live.adyen.com/reports/download
+                                          #   NOT derived from ADYEN_ENVIRONMENT — that var is `test`
 INVENTORY_METRICS_URL=...                 # blocker #3
 INVENTORY_METRICS_KEY=...                 # blocker #3
 RESEND_API_KEY=...                        # empty; Phase D only
@@ -809,6 +812,18 @@ customer: HubSpot company ID (from `hubspotCompanyMap`), customer name, and unit
 category. Roughly 60 lines plus an EasyOB-side client. Note the standing warning at the top of
 `inventoryStats.js`: it is a hand-maintained server-side copy of the rules in `js/inventory.js`
 and nothing enforces the two staying in sync.
+
+**Update 2026-08-18: the endpoint exists.** `exports.deployedByCompany` (`functions/index.js`),
+same `X-Metrics-Key` auth as `metrics`, built and passing fixtures but **not yet deployed**.
+Category resolution per unit is a three-step chain — `mv.category` on the movement → a lookup in
+admin-added `data.productRecords` → a movement-derived fallback that infers the category from other
+movements of the same product (preferring a stock-IN movement's category on conflict, since the
+stock-in form auto-fills from the product list; first-seen otherwise) → `"(uncategorized)"`. The
+fallback exists because the ~26 core products in `js/inventory.js`'s `HARDCODED_PRODUCTS` (POS
+Terminal, Kiosk, MPOS, Tableside AI Device, …) are invisible to the functions code and deliberately
+not mirrored there. Any unit that still lands in `"(uncategorized)"` after all three steps is a
+genuine unknown, not a bug, and EasyOB's admin view must surface it as needs-review — never count it
+toward a tier or silently drop it, same rule as the tablet and unmapped-customer cases above.
 
 **Which categories count** — resolved 2026-08-18:
 

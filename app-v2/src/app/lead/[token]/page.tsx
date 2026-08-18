@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { merchantApplications } from "@/lib/db/schema";
 import LeadUploadStep from "@/components/customer/LeadUploadStep";
+import { buildCustomerSafeQuote } from "@/lib/leadQuote";
 import styles from "./lead.module.css";
 
 // Public route — not matched by middleware.ts, no auth. The token itself
@@ -26,5 +27,27 @@ export default async function LeadPage({ params }: { params: Promise<{ token: st
 
   const businessName = row.business?.dba || row.business?.legalName || null;
   const contactEmail = row.ownerContact?.email || null;
-  return <LeadUploadStep token={token} businessName={businessName} contactEmail={contactEmail} />;
+
+  // Dual statement path: when the rep already gave us a basis — their own
+  // statement upload or the ticket/volume configs — the customer opens
+  // straight to the quote instead of being asked for a statement first.
+  // Built server-side, and only the CustomerSafeQuote crosses to the client.
+  const preparedQuote = buildCustomerSafeQuote({
+    analysis: row.analysis,
+    quoteConfig: row.quoteConfig,
+    targetMargin: row.targetMargin != null ? Number(row.targetMargin) : null,
+    pricingModel: row.pricingModel,
+    quoteLines: row.quoteLines,
+    orderPoints: row.orderPoints,
+  });
+
+  return (
+    <LeadUploadStep
+      token={token}
+      businessName={businessName}
+      contactEmail={contactEmail}
+      preparedQuote={preparedQuote}
+      alreadyAccepted={!!row.quoteAcceptedAt}
+    />
+  );
 }

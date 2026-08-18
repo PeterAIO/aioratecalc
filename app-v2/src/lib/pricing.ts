@@ -5,7 +5,7 @@
 //   maxMargin     = soft ceiling (above it the rep gets a non-blocking warning)
 //   desiredArr    = target annual revenue per account — reference only, not used in math
 
-import type { ProcessorTier } from "@/types/merchant";
+import type { ProcessorTier, QuoteConfig, StatementAnalysis } from "@/types/merchant";
 
 export const MARGIN_REQS = [
   { maxVol: 25000,    minMargin: 0.0067, desiredMargin: 0.0133,   maxMargin: 0.0200, desiredArr: 2000 },
@@ -60,6 +60,80 @@ export const INTERCHANGE_ESTIMATE = {
 
 export function blendedInterchangeEstimate(cpPct: number, cnpPct: number): number {
   return cpPct * INTERCHANGE_ESTIMATE.cardPresent + cnpPct * INTERCHANGE_ESTIMATE.cardNotPresent;
+}
+
+// ── Statement-less quotes ───────────────────────────────────────────────────
+// When a rep quotes from configs (average ticket + monthly volume) with no
+// statement in hand, these are the only assumptions the quote rests on. Both
+// are already answered, and both are the same values derivePricing falls back
+// to when a statement omits them — so a config quote and a statement quote
+// that happen to agree on volume/ticket price identically.
+//
+// PROVISIONAL, pending PRICING-QUESTIONS-FOR-STEVE #4: the 90/10 split is
+// Steve's blended default, not a per-MCC one. A restaurant is overwhelmingly
+// card-present, so if the answer ever becomes MCC-aware this is the constant
+// that moves. Interchange itself is NOT provisional — INTERCHANGE_ESTIMATE
+// above carries Steve's 2026-07-23 answer to question #1.
+//
+// Deliberately absent: an assumed CURRENT effective rate. Quoting savings
+// without a statement would mean inventing what the merchant pays today
+// (PRICING-QUESTIONS #2, unanswered), so the config path quotes a rate and
+// leaves CustomerSafeQuote's savings fields null instead.
+export const CONFIG_QUOTE_ASSUMPTIONS = {
+  cardPresentPct: 0.9,
+  cardNotPresentPct: 0.1,
+};
+
+// Projects a rep-entered quoteConfig into the analysis shape the rest of the
+// pricing pipeline already speaks, so derivePricing / derivePricingForRole /
+// getPricingPreviewAction need no statement-less variant of their own — and
+// so the role-scoped path is identical for both quote bases.
+// Fields a statement would supply but a config cannot (card brand mix, the
+// merchant's current processor and fees) stay zeroed; `confidence: "low"` and
+// `icEstimated: true` mark the result as derived rather than read.
+export function analysisFromQuoteConfig(config: QuoteConfig): StatementAnalysis {
+  const vol = config.monthlyVolume || 0;
+  const ticket = config.avgTicket || 0;
+  const txns = ticket > 0 ? Math.round(vol / ticket) : 0;
+  const { cardPresentPct: cpPct, cardNotPresentPct: cnpPct } = CONFIG_QUOTE_ASSUMPTIONS;
+  const icRate = blendedInterchangeEstimate(cpPct, cnpPct);
+
+  return {
+    merchantName: "",
+    processingMonth: "",
+    totalVolume: vol,
+    totalTransactions: txns,
+    // No statement, so nothing is known about what they pay today. Left at 0
+    // rather than estimated — see the note on CONFIG_QUOTE_ASSUMPTIONS.
+    totalFees: 0,
+    interchangeFees: vol * icRate,
+    processorFees: 0,
+    otherFees: 0,
+    effectiveRate: 0,
+    interchangeRate: icRate,
+    processorMarkup: 0,
+    statedMarkupRate: 0,
+    statedPerTxnFee: 0,
+    interchangeNotShown: true,
+    averageTicket: ticket,
+    cardPresentVolume: vol * cpPct,
+    cardNotPresentVolume: vol * cnpPct,
+    cardPresentPct: cpPct,
+    cardNotPresentPct: cnpPct,
+    visaVolume: 0,
+    mastercardVolume: 0,
+    amexVolume: 0,
+    discoverVolume: 0,
+    rewardCardPct: 0,
+    corporateCardPct: 0,
+    currentPricingModel: "unknown",
+    currentProcessorName: "",
+    annualVolume: vol * 12,
+    confidence: "low",
+    notes: "Derived from rep-entered volume and average ticket — no statement was provided.",
+    currentMargin: 0,
+    icEstimated: true,
+  };
 }
 
 export type FeeOverrides = {

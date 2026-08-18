@@ -3,8 +3,9 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { merchantApplications } from "@/lib/db/schema";
 import { analyzeStatement } from "@/lib/claude";
-import { derivePricing } from "@/lib/pricing";
-import type { StatementAnalysis, CustomerSafeQuote, PricingModel } from "@/types/merchant";
+import { shouldAdvance } from "@/lib/adapters/adyenWebhook";
+import { buildCustomerSafeQuote } from "@/lib/leadQuote";
+import type { StatementAnalysis } from "@/types/merchant";
 
 // Public, unauthenticated by design — the token itself (time-limited,
 // single-purpose) is the auth. Deliberately separate from /api/analyze so
@@ -27,25 +28,44 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       return NextResponse.json({ error: "This link has expired" }, { status: 410 });
     }
 
+    const quoteFrom = (analysis: StatementAnalysis | null) =>
+      // Same projection the prepared-quote render on /lead/[token] uses, so the
+      // customer-safe boundary is one function rather than two implementations.
+      buildCustomerSafeQuote({
+        analysis,
+        quoteConfig: row.quoteConfig,
+        targetMargin: row.targetMargin != null ? Number(row.targetMargin) : null,
+        pricingModel: row.pricingModel,
+        quoteLines: row.quoteLines,
+        orderPoints: row.orderPoints,
+      });
+
+    // Once the customer has accepted, the quote's basis is frozen. The link
+    // stays live for the rest of its TTL, so without this a re-opened link
+    // could replace the analysis the accepted quote was priced on — and drag
+    // an onboarding deal back to `analysis`. Checked before Claude is called.
+    if (row.quoteAcceptedAt || !shouldAdvance(row.stage, "quote_accepted")) {
+      const accepted = quoteFrom(row.analysis);
+      if (!accepted) {
+        return NextResponse.json({ error: "This quote has already been accepted" }, { status: 409 });
+      }
+      return NextResponse.json({ quote: accepted, accepted: true });
+    }
+
     const analysis: StatementAnalysis = await analyzeStatement(fileData, mediaType);
 
-    // Undefined lets derivePricing fall back to the volume tier's desired margin
-    // (Steve's matrix) instead of the old flat 0.80% default.
-    const targetMargin = row.targetMargin != null ? Number(row.targetMargin) : undefined;
-    const pricingModel: PricingModel = (row.pricingModel as PricingModel | null) || "2-tier";
-    const pricing = derivePricing(analysis, targetMargin, pricingModel, { monthlyFee: 0, perTxnFee: 0, cpPerTxnFee: 0, cnpPerTxnFee: 0 });
+    const quote = quoteFrom(analysis);
+    if (!quote) {
+      return NextResponse.json({ error: "We couldn't read a monthly volume off that statement" }, { status: 422 });
+    }
 
-    const vol = analysis.totalVolume || 0;
-    const monthlySavings = (analysis.totalFees || 0) - pricing.projectedMonthlyFees;
-    const quote: CustomerSafeQuote = {
-      effectiveRate: vol > 0 ? pricing.projectedMonthlyFees / vol : 0,
-      monthlySavings,
-      annualSavings: monthlySavings * 12,
-      savingsPct: (analysis.totalFees || 0) > 0 ? monthlySavings / (analysis.totalFees || 1) : 0,
-    };
-
+    // Forward-only, same rule as the accept route and the Adyen webhook.
     await db.update(merchantApplications)
-      .set({ analysis, stage: "analysis", updatedAt: new Date() })
+      .set({
+        analysis,
+        ...(shouldAdvance(row.stage, "analysis") ? { stage: "analysis" as const } : {}),
+        updatedAt: new Date(),
+      })
       .where(eq(merchantApplications.id, row.id));
 
     return NextResponse.json({ quote });

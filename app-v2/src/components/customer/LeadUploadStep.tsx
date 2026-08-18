@@ -1,50 +1,33 @@
 "use client";
 
 import { useState, useRef } from "react";
-import { fmt$, fmtPct2 } from "@/lib/utils";
 import type { CustomerSafeQuote } from "@/types/merchant";
+import LeadQuoteView from "./LeadQuoteView";
 import styles from "./LeadUploadStep.module.css";
 
+// The public lead flow's client shell. Two entries into the same destination:
+// a quote the rep prepared arrives as `preparedQuote` and renders immediately,
+// and a customer who has none uploads a statement to generate one. Both end on
+// LeadQuoteView. The quote is always a CustomerSafeQuote — this component never
+// sees the raw analysis.
 type Props = {
   token: string;
   businessName: string | null;
   contactEmail: string | null;
+  preparedQuote?: CustomerSafeQuote | null;
+  alreadyAccepted?: boolean;
 };
 
-export default function LeadUploadStep({ token, businessName, contactEmail }: Props) {
+export default function LeadUploadStep({
+  token, businessName, contactEmail, preparedQuote = null, alreadyAccepted = false,
+}: Props) {
   const [file, setFile]         = useState<File | null>(null);
   const [fileData, setFileData] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState<string | null>(null);
-  const [quote, setQuote]       = useState<CustomerSafeQuote | null>(null);
+  const [quote, setQuote]       = useState<CustomerSafeQuote | null>(preparedQuote);
   const fileRef = useRef<HTMLInputElement>(null);
-
-  const [accessEmail, setAccessEmail]     = useState(contactEmail || "");
-  const [requestingAccess, setRequesting] = useState(false);
-  const [accessSent, setAccessSent]       = useState(false);
-  const [accessDevUrl, setAccessDevUrl]   = useState<string | null>(null);
-  const [accessError, setAccessError]     = useState<string | null>(null);
-
-  const requestAccess = async () => {
-    if (!accessEmail) return;
-    setRequesting(true);
-    setAccessError(null);
-    try {
-      const res = await fetch(`/api/lead/${token}/request-access`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: accessEmail }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Request failed");
-      setAccessSent(true);
-      setAccessDevUrl(data.devUrl || null);
-    } catch (err) {
-      setAccessError(err instanceof Error ? err.message : "Request failed");
-    }
-    setRequesting(false);
-  };
 
   const readFile = (f: File, cb: (data: string) => void) => {
     const r = new FileReader();
@@ -79,70 +62,20 @@ export default function LeadUploadStep({ token, businessName, contactEmail }: Pr
 
   if (quote) {
     return (
-      <div className={styles.page}>
-        <div className={styles.container}>
-          <div className={styles.quoteHead}>
-            <div className={styles.quoteEyebrow}>Your Quote</div>
-            <h1 className={styles.quoteBusiness}>{businessName || "Your Business"}</h1>
-          </div>
-
-          <div className={styles.statWrap}>
-            <div className={styles.statCaption}>Estimated Annual Savings</div>
-            <div className={styles.statHero}>{fmt$(quote.annualSavings)}</div>
-            <div className={styles.statTicker}>
-              <div className={styles.statTickerItem}>
-                <div className={styles.statTickerValue}>{fmt$(quote.monthlySavings)}</div>
-                <div className={styles.statTickerLabel}>Monthly Savings</div>
-              </div>
-              <div className={styles.statTickerItem}>
-                <div className={styles.statTickerValue}>{fmtPct2(quote.effectiveRate)}</div>
-                <div className={styles.statTickerLabel}>New Effective Rate</div>
-              </div>
-            </div>
-          </div>
-
-          <div className={styles.panel}>
-            {accessSent ? (
-              <div>
-                <p className={styles.accessSuccess}>
-                  Check your email for a link to continue setting up your account.
-                </p>
-                {accessDevUrl && (
-                  <div className={styles.devUrl}>
-                    Dev mode (no email configured):{" "}
-                    <a href={accessDevUrl}>{accessDevUrl}</a>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <h2 className={styles.panelTitle}>Ready to move forward?</h2>
-                <p className={styles.panelText}>
-                  Create your free account to finish onboarding yourself — no need to wait on a rep.
-                </p>
-                <div className={styles.accessRow}>
-                  <input
-                    type="email" value={accessEmail} onChange={e => setAccessEmail(e.target.value)}
-                    placeholder="you@business.com"
-                    className={styles.accessInput}
-                  />
-                  <button
-                    onClick={requestAccess}
-                    disabled={!accessEmail || requestingAccess}
-                    className={styles.accessBtn}
-                  >
-                    {requestingAccess ? "Sending…" : "Continue →"}
-                  </button>
-                </div>
-                {accessError && <div className={styles.accessError}>{accessError}</div>}
-              </>
-            )}
-          </div>
-          <p className={styles.footnote}>
-            Prefer to talk it through? Your AIO representative will follow up shortly too.
-          </p>
-        </div>
-      </div>
+      <LeadQuoteView
+        token={token}
+        quote={quote}
+        businessName={businessName}
+        contactEmail={contactEmail}
+        alreadyAccepted={alreadyAccepted}
+        // Offered only when the quote came prepared — a customer who just
+        // uploaded a statement has nothing better to replace it with — and
+        // never once the quote is accepted: the accepted quote's basis is
+        // frozen server-side, so a re-upload would produce no new quote.
+        onUploadStatement={
+          !alreadyAccepted && preparedQuote && quote === preparedQuote ? () => setQuote(null) : undefined
+        }
+      />
     );
   }
 
@@ -195,6 +128,12 @@ export default function LeadUploadStep({ token, businessName, contactEmail }: Pr
         >
           {loading ? "Analyzing statement…" : "Get My Quote →"}
         </button>
+
+        {preparedQuote && (
+          <button className={styles.btnGhostLink} onClick={() => setQuote(preparedQuote)}>
+            ← Back to my quote
+          </button>
+        )}
       </div>
     </div>
   );

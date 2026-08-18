@@ -14,6 +14,7 @@ import {
 import { listApplicationsAction, listRepsAction, type RepSummary } from "@/lib/actions/applications";
 import { fmt$ } from "@/lib/utils";
 import { STAGE_COLORS } from "@/lib/stageColors";
+import { PROPOSAL_STAGES } from "@/lib/stages";
 import type { MerchantApplication } from "@/types/merchant";
 import styles from "./users.module.css";
 
@@ -60,7 +61,7 @@ export default function AdminUsersPage() {
     volume:    repClients.reduce((sum, a) => sum + (a.analysis?.totalVolume || 0), 0),
     savings:   repClients.reduce((sum, a) => sum + (a.proposal?.savings?.annual || 0), 0),
     approved:  repClients.filter(a => a.stage === "adyen_approved").length,
-    proposals: repClients.filter(a => ["proposal_ready", "proposal_sent"].includes(a.stage)).length,
+    proposals: repClients.filter(a => PROPOSAL_STAGES.includes(a.stage)).length,
   }), [repClients]);
 
   const selectedApp = apps.find(a => a.id === selectedAppId) || null;

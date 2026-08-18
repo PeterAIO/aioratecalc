@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
+import { parseAdminView, type AdminView } from "@/lib/adminView";
 import { logoutAction } from "@/lib/actions/auth";
 import styles from "./AppNav.module.css";
 
 type NavRole = "rep" | "admin" | null | undefined;
 
-type MenuId = "create" | "settings";
+type MenuId = "create" | "settings" | "account";
 
 export function AppNav({ role, userName }: { role: NavRole; userName?: string }) {
   const pathname = usePathname();
@@ -39,57 +40,130 @@ export function AppNav({ role, userName }: { role: NavRole; userName?: string })
   const isAdmin = role === "admin";
 
   return (
-    <nav className={styles.nav} ref={navRef}>
-      <Link href="/rep" className={styles.navWordmark}>
-        <span className={styles.navMark}>A</span>
-        AIO
-        <span className={styles.navSub}>Rate Calculator</span>
-      </Link>
+    <nav className={isAdmin ? `${styles.nav} ${styles.navAdmin}` : styles.nav} ref={navRef}>
+      <div className={styles.navLeft}>
+        <Link href={isAdmin ? "/admin" : "/rep"} className={styles.navWordmark}>
+          <span className={styles.navMark}>A</span>
+          AIO
+          <span className={styles.navSub}>{isAdmin ? "Admin Console" : "Rate Calculator"}</span>
+        </Link>
+        {isAdmin && <span className={styles.navBadge}>Admin</span>}
+      </div>
       <div className={styles.navActions}>
-        <NavLink href="/rep" pathname={pathname}>Accounts</NavLink>
-
-        <NavDropdown
-          id="create"
-          label="New Account"
-          primary
-          open={openMenu === "create"}
-          onToggle={() => setOpenMenu(m => (m === "create" ? null : "create"))}
-        >
-          <MenuLink href="/rep/proposals/new" pathname={pathname} desc="Enter the merchant's statement yourself">
-            Upload a statement
-          </MenuLink>
-          <MenuLink href="/rep/prospects/new" pathname={pathname} desc="Let the customer upload it themselves">
-            Send a customer link
-          </MenuLink>
-        </NavDropdown>
-
         {isAdmin ? (
-          <NavDropdown
-            id="settings"
-            label="Settings"
-            open={openMenu === "settings"}
-            onToggle={() => setOpenMenu(m => (m === "settings" ? null : "settings"))}
-          >
-            <MenuLink href="/rep/settings" pathname={pathname}>Processors &amp; tiers</MenuLink>
-            <MenuLink href="/admin/users" pathname={pathname}>Users</MenuLink>
-            <MenuLink href="/admin/settings/pillow" pathname={pathname}>Margin padding</MenuLink>
-          </NavDropdown>
+          <>
+            <AdminViewLinks pathname={pathname} />
+            <NavDropdown
+              id="create"
+              label="New Account"
+              primary
+              open={openMenu === "create"}
+              onToggle={() => setOpenMenu(m => (m === "create" ? null : "create"))}
+            >
+              <MenuLink href="/rep/proposals/new" pathname={pathname} desc="Enter the merchant's statement yourself">
+                Upload a statement
+              </MenuLink>
+              <MenuLink href="/rep/prospects/new" pathname={pathname} desc="Let the customer upload it themselves">
+                Send a customer link
+              </MenuLink>
+            </NavDropdown>
+            <NavDropdown
+              id="settings"
+              label="Settings"
+              open={openMenu === "settings"}
+              onToggle={() => setOpenMenu(m => (m === "settings" ? null : "settings"))}
+            >
+              <MenuLink href="/rep/settings" pathname={pathname}>Processors &amp; tiers</MenuLink>
+              <MenuLink href="/admin/settings/pillow" pathname={pathname}>Margin padding</MenuLink>
+              <MenuLink href="/admin/users" pathname={pathname}>Users</MenuLink>
+            </NavDropdown>
+            <NavDropdown
+              id="account"
+              label={userName ?? "Account"}
+              open={openMenu === "account"}
+              onToggle={() => setOpenMenu(m => (m === "account" ? null : "account"))}
+            >
+              <form action={logoutAction}>
+                <button type="submit" className={styles.menuItem}>Sign Out</button>
+              </form>
+            </NavDropdown>
+          </>
         ) : (
-          <NavLink href="/rep/settings" pathname={pathname}>Settings</NavLink>
-        )}
+          <>
+            <NavLink href="/rep" pathname={pathname}>Accounts</NavLink>
 
-        {userName && <span className={styles.navUser}>{userName}</span>}
-        <form action={logoutAction}>
-          <button type="submit" className={styles.navButton}>Sign Out</button>
-        </form>
+            <NavDropdown
+              id="create"
+              label="New Account"
+              primary
+              open={openMenu === "create"}
+              onToggle={() => setOpenMenu(m => (m === "create" ? null : "create"))}
+            >
+              <MenuLink href="/rep/proposals/new" pathname={pathname} desc="Enter the merchant's statement yourself">
+                Upload a statement
+              </MenuLink>
+              <MenuLink href="/rep/prospects/new" pathname={pathname} desc="Let the customer upload it themselves">
+                Send a customer link
+              </MenuLink>
+            </NavDropdown>
+
+            <NavLink href="/rep/settings" pathname={pathname}>Settings</NavLink>
+
+            {userName && <span className={styles.navUser}>{userName}</span>}
+            <form action={logoutAction}>
+              <button type="submit" className={styles.navButton}>Sign Out</button>
+            </form>
+          </>
+        )}
       </div>
     </nav>
   );
 }
 
-function NavLink({ href, pathname, children }: { href: string; pathname: string; children: React.ReactNode }) {
+// Dashboard and Accounts are two views of the same /admin route, so the active
+// state has to read ?view= as well as the pathname. useSearchParams needs a
+// Suspense boundary above it; the fallback renders the default view's state.
+function AdminViewLinks({ pathname }: { pathname: string }) {
   return (
-    <Link href={href} className={styles.navLink} aria-current={pathname === href ? "page" : undefined}>
+    <Suspense fallback={<AdminViewLinksView pathname={pathname} view="reps" />}>
+      <AdminViewLinksInner pathname={pathname} />
+    </Suspense>
+  );
+}
+
+function AdminViewLinksInner({ pathname }: { pathname: string }) {
+  const view = parseAdminView(useSearchParams().get("view"));
+  return <AdminViewLinksView pathname={pathname} view={view} />;
+}
+
+function AdminViewLinksView({ pathname, view }: { pathname: string; view: AdminView }) {
+  const onAdmin = pathname === "/admin";
+  return (
+    <>
+      <NavLink href="/admin" pathname={pathname} active={onAdmin && view === "reps"}>
+        Dashboard
+      </NavLink>
+      <NavLink href="/admin?view=accounts" pathname={pathname} active={onAdmin && view !== "reps"}>
+        Accounts
+      </NavLink>
+    </>
+  );
+}
+
+function NavLink({
+  href,
+  pathname,
+  active,
+  children,
+}: {
+  href: string;
+  pathname: string;
+  active?: boolean;
+  children: React.ReactNode;
+}) {
+  const isActive = active !== undefined ? active : pathname === href;
+  return (
+    <Link href={href} className={styles.navLink} aria-current={isActive ? "page" : undefined}>
       {children}
     </Link>
   );
