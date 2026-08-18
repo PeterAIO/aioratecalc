@@ -1,6 +1,49 @@
+# STEVE SANDBOX — read this first
+
+This checkout is branch **`steve`**, a sandbox fork of `v2`. Live site: https://steve-aioeasyob.vercel.app
+
+You are helping Steve, who has no local environment. Seeing a change live means: commit, push `steve`, wait ~2 minutes, hard-refresh that URL.
+
+## Git (non-negotiable)
+
+- `git pull origin steve` before editing. Stay on `steve`.
+- Commit and push **directly to `steve`**.
+- Do **not** create a new branch (`claude/*`, `feature/*`, anything else).
+- Do **not** open a pull request.
+- Do **not** push or merge to `main` or `v2`.
+- If your default is “new branch + PR”, override it: land the work on `steve` and `git push origin steve`.
+- After every push, tell Steve to refresh https://steve-aioeasyob.vercel.app. Do not tell him to clone, pull, or run a local server.
+- Never commit secrets, `.env`, or API keys.
+
+## What to edit
+
+- Only `app-v2/` (Next.js App Router, TypeScript). That is the real product.
+- Root HTML files (`index.html`, `clearrate-main/`) are a frozen old app. Never touch them.
+- Match the existing dark theme and inline styles. No Tailwind/shadcn unless asked.
+- Do not upgrade Next.js, React, or other dependencies unless asked.
+- Do not run database migrations (`drizzle-kit push`, `db:migrate`, schema-breaking SQL) unless Steve explicitly asks and you have warned that this sandbox shares production’s Postgres.
+
+## Product constraints (do not reverse)
+
+- `MerchantApplication` has no SSN, bank account, routing number, or EIN. Adyen and Check collect those on their hosted pages.
+- Pricing math lives in `app-v2/src/lib/pricing.ts`, not in Claude prompts. `generateProposal()` force-overrides AI-returned numbers with locally computed rates.
+- Reps must never see the true margin floor or true Adyen cost. Role-scoped pricing goes through `derivePricingForRole` / `getPricingPreviewAction`. Do not move that math to the client.
+- `/api/lead/[token]/analyze` returns `CustomerSafeQuote` only.
+- `owner_user_id` (the sales rep who owns the deal) is not `ownerContact` (the merchant’s contact person).
+- This sandbox shares the production database. Do not change `/admin/settings/pillow` or otherwise mutate global margin policy unless Steve explicitly asks.
+
+## Logins (seeded, not production-safe)
+
+- Admin: `admin@aioapp.com` / `admin123`
+- Rep: `rep@aioapp.com` / `rep123`
+
+The rest of this file is architecture. Follow the **v2 Architecture** section. Ignore any instructions about running a local env.
+
+---
+
 # ClearRate / AIO Rate Calculator
 
-> **Active work is on the `v2` branch.** The `app-v2/` directory contains a Next.js rewrite with a canonical data model, a Postgres-backed multi-role (Customer/Rep/Admin) permission model with a pillowed margin system, server-side Anthropic API, and stubs for Adyen hosted onboarding and HubSpot sync. See the **v2 Architecture** section below. `main` branch / root HTML files are frozen as reference.
+> **This branch is `steve` (sandbox). Canonical product work is `v2`.** The `app-v2/` directory contains a Next.js rewrite with a canonical data model, a Postgres-backed multi-role (Customer/Rep/Admin) permission model with a pillowed margin system, server-side Anthropic API, and stubs for Adyen hosted onboarding and HubSpot sync. See the **v2 Architecture** section below. `main` branch / root HTML files are frozen as reference.
 
 ## Overview
 ClearRate is a payment-processing proposal engine for AIO Payments. A sales rep uploads a merchant's current processing statement (PDF or image), Claude extracts the fees/volume/effective-rate, the app computes a competing AIO offer against AIO's margin floors, generates a branded proposal, and kicks off an Adyen merchant-onboarding application.
