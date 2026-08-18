@@ -1,7 +1,7 @@
 # E2E Implementation Plan
 
-Gap analysis of the current app against `E2E.md`, turned into phased work. Updated 2026-08-17
-after three rounds of clarification:
+Gap analysis of the current app against `E2E.md`, turned into phased work. Updated 2026-08-18
+after four rounds of clarification:
 
 1. **Statement upload stays, as a dual path.** Either the rep uploads the statement themselves
    and *then* sends the link (customer sees a prepared quote), or the rep sends the link with no
@@ -12,6 +12,98 @@ after three rounds of clarification:
    only minor additions (a Rep column, a Leads tab, extra Settings items).
 3. **Billing = HubSpot subscriptions.** Investigated against the live HubSpot portal
    (244508708). Findings below materially change Phases C, E, and G.
+4. **Ordering points are a first-class concept**, in both proposal generation and the admin
+   overview — every place an order can be placed (POS terminals, kiosks, MPOS, website). They
+   already exist in HubSpot as the platform-tier boundary, and the deployed hardware half can be
+   sourced from the `aioinventory` app. See **Phase H**.
+5. **The admin overview is a per-restaurant P&L.** Steve wants to see, at a glance, every
+   meaningful way AIO makes money off a given restaurant — combining inventory, Adyen transactions
+   and billing. That makes cost (which only inventory has) as load-bearing as revenue. See
+   **Phase I**.
+
+---
+
+## Human-gated inputs (everything an agent cannot do for itself)
+
+Verified against live credentials 2026-08-18. **Anything not listed here is unblocked** — see
+"Buildable now" at the bottom.
+
+### Hard blockers — each kills a phase until done
+
+| # | Action | Where | Status |
+| --- | --- | --- | --- |
+| 1 | Add `crm.objects.contacts.read` + `.write` | HubSpot → EasyOB Billing app | **✅ DONE** — re-probed 200. Phase E unblocked. |
+| 2 | Schedule the Aggregate Settlement Details Report | Adyen CA → `AIOAppIncPOS` → Reports | **NO LONGER BLOCKING** — 21 reports are already being generated and are downloadable today, including a store-attributed daily one. Now an efficiency nice-to-have. See "Reports that already exist". |
+| 3 | Wire `INVENTORY_METRICS_URL` + `INVENTORY_METRICS_KEY` | `aioinventory` Firebase | **✅ DONE** — endpoint verified end to end (401 without key, 400 without dates, 200 with both). |
+| 4 | Firebase deploy access | — | **✅ CONFIRMED** — CLI 15.26.0, logged in, `aio-inventory-b9b29` visible, `METRICS_KEY` readable via Secret Manager. |
+| 5 | ~~Platforms-tab report credential~~ | — | **✅ NOT NEEDED.** AIO's commission is derivable per store from `Split Payment Data` in the existing merchant-scoped report — verified on 2,815/2,815 transactions with zero parse failures. Don't spend an access request on this. |
+
+**No external blockers remain.** Every Phase G/I data source is reachable with credentials already
+in `.env.local`.
+
+**Live inventory baseline (2026-08-18), for sizing Phase I:** 3,236 units in stock at $717,618 cost ·
+**1,275 units deployed across 92 customers at $207,244 cost** · 0 in transit · July flow: 261
+received, 258 deployed, 0 RMA/total-loss · 34 product lines. **Cost coverage is 0.909** — 9% of
+stock carries no cost, which is exactly why the per-account P&L must publish its coverage ratio
+rather than a bare number. 1,275 units over 92 customers is ~14 devices per customer, so
+per-customer breakdowns will be small payloads.
+
+### Scope status — probed live, do not re-guess
+
+| Token | Scope | Result |
+| --- | --- | --- |
+| `HUBSPOT_PRIVATE_APP_TOKEN` | companies.read | **200** ✅ (tenant linkage + Phase F work; earlier notes claiming this token was empty are stale) |
+| `HUBSPOT_PRIVATE_APP_TOKEN` | deals.read | 403 — **no action needed**, see below |
+| `HUBSPOT_BILLING_PRIVATE_APP_TOKEN` | products / quotes / line_items / deals / subscriptions / invoices read | **200** ✅ |
+| `HUBSPOT_BILLING_PRIVATE_APP_TOKEN` | contacts.read | **403** ❌ → blocker #1 |
+
+**The general token's missing deals scope is a code fix, not a scope request.** The billing token
+already holds deals read/write (quotes require them), so point `pushToHubSpot`/`pullFromHubSpot` at
+`billingHeaders()` and leave the general app as companies-read-only. Two tokens able to write deals
+would be redundant scope surface.
+
+### Env vars — paste-able now
+
+```
+ADYEN_POS_MERCHANT_ACCOUNT=AIOAppIncPOS   # verified live 2026-08-18
+INVENTORY_METRICS_URL=...                 # blocker #3
+INVENTORY_METRICS_KEY=...                 # blocker #3
+RESEND_API_KEY=...                        # empty; Phase D only
+```
+`ADYEN_COMPANY_ID` and `ADYEN_MANAGEMENT_API_KEY` are **empty** but only feed the dormant
+onboarding code — ignore unless that work resumes.
+
+### Decisions only you can make (no dashboard, just answers)
+
+| Question | Blocks | Recommendation if you'd rather not decide |
+| --- | --- | --- |
+| Tablet order-point resolution | Phase H counting | Per-account admin override |
+| Headline metric for the P&L list | Phase I sort order | Hardware payback in months |
+| Is the tier re-evaluated as clients grow, and who acts on a mismatch? | Phase H admin view | Report first, task queue later |
+| Which catalog products may reps quote? | Phase C picker | Exclude $0 processing placeholders + CAMP Invoice |
+| Is hardware COGS the right cost basis, or landed cost? | Phase I | COGS, flag the gap |
+| Foodbuy scope | Phase E module | Ship `coming_soon` |
+
+### Asks of other people — send now, arrive later
+
+- **Platforms report credential access** (blocker #5) — whoever administers the Adyen CA.
+- **Confirm weekly billing is intended** on all platform tiers — whoever runs billing. Contradicts
+  the "monthly invoices" assumption and sets every quote's headline number.
+- **Does Adyen split commission arrive gross or net of scheme/interchange cost?** Decides whether
+  `calcAdyenCost` gets subtracted in Phase I.
+- **PRICING-QUESTIONS-FOR-STEVE answers** — needed for statement-less quotes (Phase A).
+- **HubSpot catalog hygiene** — set `hs_product_type` on the four untyped products; decide on
+  "AIO Pre Auth"; trim trailing whitespace. Delegable.
+- **Which webhook surface** Adyen report notifications arrive on (classic vs Balance Platform) —
+  decides which HMAC verifier the route needs.
+
+### Buildable now — zero further input
+
+Phase B (admin portal identity, pure UI) · Phase A (quote spine: types, migration, customer quote
+view, accept) · Phase C (configurator — `listProducts()` verified against live HubSpot, frequency
+math already shipped in `utils.ts`) · the deal-sync token swap above · the Adyen report client and
+CSV parser, which can be written and unit-tested against a sample file before any report is
+scheduled · `merchant_monthly_actuals` schema and idempotent upsert.
 
 ---
 
@@ -225,6 +317,10 @@ parallel `hardware_items` table would immediately drift.
 - **Rep configurator** grouped by `hs_product_type` (Hardware / Software / Service);
   **customer display** on the quote view (Phase A), showing rate + hardware + subscription
   together as E2E.md step 3's "full quote".
+- **The platform tier is not a free choice — it's derived from the ordering-point count.**
+  "AIO Platform (1 to 5 Order Points)" vs "(6 + Order Points)" is the single largest recurring
+  line on the quote, and which one applies is a function of the configured order points, not a
+  dropdown a rep picks. See Phase H.
 
 Verify: a quote containing AIO Platform (1-5) + a POS Unit renders "$99/week (~$429/mo)" and
 "$749 one-time" as distinct lines, never added together.
@@ -398,30 +494,168 @@ count per client per month; average ticket is volume ÷ count. Every client sits
 POS merchant account** and is distinguished by its **store** (`prod-{tenantNumber}`), so the store
 is the attribution dimension.
 
-**Source: the Aggregate Settlement Details Report.** It's summarized by merchant account, **store**,
-payment method, and day of sale, and carries both totals and **transaction counts** — exactly the
-two numbers needed, already aggregated. Roll day-of-sale up to calendar month.
+#### Reports that already exist — verified live 2026-08-18
 
-Rejected alternatives, and why they'd be wrong here:
+The earlier plan assumed the Aggregate Settlement Details Report had to be scheduled first. It
+doesn't: probing 36 candidate filenames found **21 already downloadable** with the existing
+merchant-scoped key. Adyen has been generating these all along.
+
+| Report | Cadence | Coverage found | Store dimension |
+| --- | --- | --- | --- |
+| `payments_accounting_report_{yyyy_MM_dd}.csv` | daily | every date probed | **✅ `Store` column, `prod-{n}`** |
+| `received_payments_report_{yyyy_MM_dd}.csv` | daily | every date probed | not checked |
+| `settlement_detail_report_batch_{n}.csv` | per settlement batch | **batches 1 → 300+** (500 absent) | ❌ none — but see Merchant Reference |
+| `aggregate_settlement_detail_report_batch_{n}.csv` | — | **absent** | would need scheduling |
+
+**Use `payments_accounting_report` as the primary source.** 88 columns, and critically column 53 is
+**`Store`**, carrying clean `prod-{n}` values — 44 distinct tenants on 2026-08-15 — which joins
+straight onto `tenantLink.tenantRef` with no inference. It is daily, needs no CA configuration, and
+history is already on disk at Adyen.
+
+**Cross-check against `settlement_detail_report`** for a settled-money basis. It has no `Store`
+column, but its **`Merchant Reference` encodes the tenant as `{n}-prod`** (the reverse of the store
+format), so it can be attributed by parsing. Batch 300 held 1,925 `Settled` rows summing to
+$74,410.98 gross.
+
+**⚠️ Staging traffic is in the live data.** One settlement reference was **`4-stagev2`**, not
+`{n}-prod`. The ingest must accept only the `prod` pattern and report anything else, or staging
+volume gets attributed to a real client.
+
+**⚠️ Restaurants pre-auth, so naive row counting is badly wrong.** One day's accounting report held
+14,015 rows but only ~3,468 distinct payments, spread across record types
+(`Received`, `AuthorisedPending`, `Authorised`, `SentForSettle`, `ReceivedIncrementalAuth` 253,
+`Refused` 65, `Chargeback` 1, …). Restaurants run pre-auth → incremental auth → tip adjust, so a row
+count would multiply the transaction count several-fold and divide average ticket by the same
+factor. **Dedupe on `Psp Reference` and pick exactly one record type** (`SentForSettle` for a
+will-settle basis, `Authorised` for an auth basis) — then be consistent, because the choice moves
+every average-ticket number in the product. Note the HubSpot catalog's "AIO Pre Auth" product
+confirms pre-auth is standard in this flow, not an edge case.
+
+**⚠️ `Commission (SC)` is zero on all 14,015 rows** — Adyen's fee is not in that column for this
+account. The economics live in **`Split Payment Data`** instead.
+
+#### `Split Payment Data` — AIO's commission, per payment (verified 2026-08-18)
+
+The field is JSON with flattened keys, one entry per split item:
+
+```
+{"split.item1.reference":"BA32B6Q22322C25PLCVN7CTR7","split.item1.amount":"2594",
+ "split.item1.type":"BalanceAccount","split.item2.amount":"77",
+ "split.item2.type":"Commission","split.item2.description":"Commission split",
+ "split.nrOfItems":"2","split.currencyCode":"USD", …}
+```
+
+Amounts are **minor units**. Items with `type: "Commission"` are AIO's cut; `type: "BalanceAccount"`
+is the restaurant's. Richer split configurations also appear, with `PaymentFee`, `Fixed Fee` and
+`Remainder` descriptions — the parser must sum all `Commission`-typed items rather than assuming
+`item2`.
+
+**This is the whole processing half of Phase I, and it needs no additional credential.** Verified
+against 2026-08-15, deduped on `Psp Reference` at `SentForSettle`:
+
+| store | txns | volume | commission | take % |
+| --- | --- | --- | --- | --- |
+| prod-562 | 145 | $24,770.23 | $594.47 | 2.40% |
+| prod-596 | 104 | $7,563.16 | $204.27 | 2.70% |
+| prod-46 | 73 | $5,770.86 | $161.60 | 2.80% |
+| prod-1934 | 198 | $5,368.26 | $154.10 | 2.87% |
+| prod-4 | 256 | $3,732.28 | $152.44 | 4.08% |
+| **44 stores** | **2,815** | **$101,587.65** | **$3,071.21** | **3.02%** |
+
+Coverage was **2,815/2,815** — zero parse failures, zero empty split fields. Average ticket falls
+straight out (blended $36.09, ranging from $14.58 at prod-4 to $170.83 at prod-562).
+
+**The take-rate spread is itself the product.** Realized margin ranges **2.40% → 4.08%** across
+clients. That's the number to compare against `proposal.proposedRates` for the quoted-vs-actual
+view, and the low end is where margin is quietly leaking.
+
+*(Caveat: this is one day. Restaurants swing hard by weekday, so do not annualise a single file —
+the ingest should build months from daily files before anyone quotes a figure.)*
+
+Rejected alternatives, and why:
 
 - *Transfers API per balance account* — amounts arriving in a merchant's balance account are
   **post-split (net of AIO's commission)**, so any average ticket derived from them is understated.
-  Wrong basis for a customer-facing "your actual volume" number.
-- *Transaction-level Settlement Details Report* — correct but heavy; the aggregate report already
-  carries count and sum.
-- *Aggregating `AUTHORISATION` webhooks ourselves* — means rebuilding refund/chargeback handling
-  that settled reporting already accounts for. Settled data is also the honest basis for comparing
-  against the merchant's own statement.
+- *Aggregating `AUTHORISATION` webhooks ourselves* — rebuilds refund/chargeback handling that
+  settled reporting already accounts for.
+- *Waiting on the aggregate report* — it would be lighter to parse, but it does not exist yet and
+  the daily accounting report already carries store, amount, and count. Schedule it later as an
+  optimisation, not a prerequisite.
 
-**Second source: the Balance Platform Accounting Report**, where splits appear as `platformPayment`
-lines per balance account — that's AIO's own commission per client, i.e. the processing half of
-"what they are paying us". (The HubSpot half comes from Phase E's sync.)
+~~Second source: the Balance Platform Accounting Report.~~ **Superseded** — AIO's commission is
+already in `Split Payment Data` on the merchant-scoped accounting report (above), so no second
+report, credential, or pipeline is needed for the processing half. (The HubSpot half still comes
+from Phase E's sync.)
 
-**Retrieval.** Schedule the reports in the Adyen Customer Area; Adyen then sends a
-`REPORT_AVAILABLE` webhook whose `pspReference` is the filename and whose `reason` is the download
-URL. Fetch it with a **Report Service user** credential (Merchant Report Download role — created
-under Developers → API credentials, user type "Report user"), basic auth or API key, sending
-`Accept-Encoding: gzip`. Reports are CSV.
+**Retrieval — automated, with exactly one manual setup step.** Four moving parts:
+
+1. ~~**Schedule (manual, once).**~~ **Not needed** — the reports we want are already being
+   generated (see above). Scheduling only matters if we later want the pre-aggregated variant.
+   Report *filenames* are predictable (`payments_accounting_report_{yyyy_MM_dd}.csv`,
+   `settlement_detail_report_batch_{n}.csv`), so a cron can construct URLs directly and does not
+   strictly need the webhook at all.
+2. **Notify.** Adyen fires a webhook when each report is generated: `REPORT_AVAILABLE` on the
+   classic notification surface, or `balancePlatform.report.created` on the Balance Platform one.
+   The payload carries the filename and the download URL (on the classic event, `pspReference` and
+   `reason` respectively).
+3. **Download.** HTTPS GET against that URL using a **Report User credential** — created in the CA
+   under Developers → API credentials as a report-user type, with the report-download role. This is
+   a *separate credential* from the LEM and Management keys already in `.env.local`; the existing
+   ones will not authenticate a report download. Send `Accept-Encoding: gzip`; the payload is CSV.
+4. **Parse and upsert** into `merchant_monthly_actuals`, aggregating at ingest. Never store the raw
+   CSV or per-transaction rows.
+
+**✅ Verified live 2026-08-18.** Report service user created (`report_733223@Company.AIOAppInc`,
+**Merchant Report Download role only** — "Export Payments" deliberately not granted), API-key auth,
+key in `ADYEN_REPORT_API_KEY`. Probed against `ca-live`:
+
+| Request | Result | Meaning |
+| --- | --- | --- |
+| `MerchantAccount/AIOAppIncPOS/<nonexistent>.csv` + real key | **404** | auth accepted, merchant account correct |
+| same URL + garbage key | 401 | control — confirms the 404 is not a false pass |
+| same URL, no key | 401 | control |
+| `MerchantAccount/AIOAppInc/…` | 403 | `AIOAppInc` is the company, not a merchant account |
+| `Company/AIOAppInc/…` | 403 | credential is merchant-scoped, no company-level access |
+
+So the working shape is
+`https://ca-live.adyen.com/reports/download/MerchantAccount/AIOAppIncPOS/{filename}` with an
+`X-API-Key` header — API-key auth works, basic auth is not needed. **21 reports are already
+downloadable with it** (see "Reports that already exist"), so there is no gating manual step left.
+
+**⚠️ Those 403s mean the commission half needs a second credential.** This report user reaches the
+shared POS merchant account only, so it covers the Aggregate Settlement Details Report (volume,
+transaction count, average ticket) but **not** the company/balance-platform-scoped Balance Platform
+Accounting Report that carries AIO's `platformPayment` split lines. Expect a second report
+credential from the **Platforms** tab, on its own host/path, for the revenue side of Phase I.
+Confirm in the CA rather than assuming the same path works.
+
+**⚠️ The report host must not be derived from `ADYEN_ENVIRONMENT`.** That var is `test` while
+`ADYEN_REPORT_API_KEY` is a **live** credential — the rest of the Adyen integration is still on test
+keys. A report client that resolves its host the way `adyen.ts` does would hit `ca-test` with a live
+key and 401, looking exactly like a bad key. Resolve the report host separately.
+
+**⚠️ The two webhook surfaces sign differently, and the app only implements one.**
+`src/app/api/adyen/webhook/route.ts` uses `verifyBalancePlatformHmac`, which HMACs the **raw JSON
+body** — correct for Balance Platform events. Classic notifications (`REPORT_AVAILABLE`) instead
+sign a **concatenation of specific fields** (pspReference, originalReference, merchantAccountCode,
+merchantReference, value, currency, eventCode, success). Pointing the classic report notification
+at the existing route would fail signature verification and look like a config problem. Either
+prefer the Balance Platform report event and reuse the existing verifier, or add a second verifier
+and a separate route. Confirm which surface AIO's reports actually publish on before building.
+
+**Use the webhook as the trigger and a nightly cron as the backstop.** A missed or duplicated
+webhook shouldn't mean a permanently missing month. The cron route (the same one Phase E adds for
+HubSpot) re-checks for expected-but-absent report days and fetches them. Adyen retries unacked
+webhooks, so the route must ack fast (2xx within ~10s) and do the download out of band rather than
+inline — the existing route's fast-ack shape is the right precedent.
+
+**Idempotency is mandatory, not defensive.** Webhooks duplicate and reports get reprocessed, so
+the upsert must key on (tenant number, month) and recompute rather than increment. Track processed
+filenames so a re-delivered report is a no-op.
+
+**Roll up on day of sale, not settlement date.** The aggregate report is summarized by day of sale
+while batches settle later; keying months off the batch date smears transactions across month
+boundaries and makes every monthly comparison subtly wrong.
 
 **⚠️ Join on the store reference, not the stored store ID.** `applyTenantNumber` degrades to
 handoff mode when the POS env config is absent, and accounts predating business-line capture have
@@ -435,7 +669,11 @@ lie.
 volume, transaction count, and AIO commission — aggregated at ingest rather than storing
 transaction rows. Keep the upsert idempotent on that key so reprocessing a report is safe.
 
-New env: `ADYEN_REPORT_USER` / `ADYEN_REPORT_PASSWORD` (or a report API key).
+New env: **`ADYEN_REPORT_API_KEY`** — the report service user supports either an API key or basic
+auth, and the API key wins: one secret instead of two, rotatable without touching the username, and
+it matches the `X-API-Key` header shape `ADYEN_LEM_API_KEY` / `ADYEN_CONFIG_API_KEY` already use.
+Basic auth (`report_…@Company.AIOAppInc` + password) stays as the fallback if a download 401s.
+Either way the value goes through the same `\$`-escaping rule as every other Adyen key.
 
 - **Processing revenue** = the commission column above, cross-checked against actual volume ×
   contracted margin (`proposal.proposedRates`, already stored) — a divergence there is itself a
@@ -451,6 +689,241 @@ This view only works if the frozen-vs-synced split from Phase E holds: `quoteLin
 are what we quoted and must never be overwritten by the sync, while the billing snapshot is what
 they pay now. Comparing the two is the whole feature.
 
+### Phase H — Ordering points (quoted vs. deployed)
+
+An **ordering point** is any place an order can be placed: POS terminal, kiosk, MPOS handheld,
+tableside device, website/online ordering. Requested for both proposal generation and the admin
+overview.
+
+This is not a new reporting nicety bolted onto the side — it is **already the pricing dimension
+AIO bills on**, and the app currently ignores it:
+
+| Product | Price | Effective monthly |
+| --- | --- | --- |
+| AIO Platform (**1 to 5 Order Points**) | $99/week | ~$429 |
+| AIO Platform (**6 + Order Points**) | $199/week | ~$862 |
+
+So the order-point count selects the biggest recurring line on every quote — a $433/mo swing.
+That makes Phase H a dependency of Phase C's configurator, and it makes the quoted-vs-actual
+comparison a **billing-leakage report**, not just an interesting statistic: a client quoted at the
+1–5 tier who has since deployed eight order points is under-billed by $100/week ($5,200/yr).
+
+#### Two halves, two different sources
+
+Order points split cleanly by lifecycle, and conflating them is the main trap here:
+
+- **Quoted (pre-go-live).** At quote time the customer has no deployed hardware, so inventory has
+  nothing to say. The quoted count is derived from **the quote itself** — the order-point-bearing
+  hardware lines the rep configured — plus any **non-hardware channels** declared on the deal
+  (website / online ordering, QR, third-party delivery, phone-AI). Store it on the application
+  next to `quoteConfig`, because it's part of what we quoted and must be frozen at publish like
+  everything else in that bucket.
+- **Actual (post-go-live).** What's physically deployed at that customer today, from
+  `aioinventory`. This is the Phase G-style actuals half and belongs in the admin comparison view.
+
+**Non-hardware order points exist only in the quote.** A website is an ordering point and will
+never appear in an inventory system, so "actual order points" is always *deployed hardware +
+declared channels*. Don't build the admin view as if inventory were the complete truth — it isn't,
+and a client whose sixth order point is their website would silently read as tier-1 compliant.
+
+#### The inventory API — what's there and what isn't
+
+`aioinventory` (`/Volumes/Shaheer T7/Projects - AIO/aioinventory`) is a Firebase/Firestore SPA with
+Cloud Functions in `functions/`. The existing endpoint is a **genuine head start but not a drop-in**:
+
+- ✅ `exports.metrics` (`functions/index.js`) — HTTP, authenticated by an `X-Metrics-Key` header
+  against a Secret Manager secret (`METRICS_KEY`), fails closed if unset. The auth pattern, deploy
+  path, and secret wiring all exist and can be copied verbatim.
+- ✅ `functions/inventoryStats.js` — already computes `computeDeployedByCustomer(movements,
+  serialCosts)`, correctly excluding RMA/total-loss (`!mv.isRmaTl`) and serials re-received into
+  stock. Deployment state is live and self-correcting.
+- ✅ `data.hubspotCompanyMap` — a **customer-name → HubSpot Company ID** map, maintained through an
+  admin panel in the inventory app and already used by `hubspotNightlySync`. This is the join key.
+- ❌ The metrics payload is **org-wide aggregate only** — `deployed: { units, value, customers }`.
+  There is no per-customer breakdown and no per-category breakdown, so it cannot answer "how many
+  order points does *this* client have."
+
+**What to add (small, in `aioinventory`):** extend `computeDeployedByCustomer` to also group by
+`mv.category`, and add a `deployedByCompany` endpoint — same `X-Metrics-Key` auth — returning per
+customer: HubSpot company ID (from `hubspotCompanyMap`), customer name, and unit counts per
+category. Roughly 60 lines plus an EasyOB-side client. Note the standing warning at the top of
+`inventoryStats.js`: it is a hand-maintained server-side copy of the rules in `js/inventory.js`
+and nothing enforces the two staying in sync.
+
+**Which categories count** — resolved 2026-08-18:
+
+| Counts as an ordering point | Does not |
+| --- | --- |
+| `POS Terminal`, `Kiosk` (**one point each**, not one per lane), `MPOS`, `Tableside AI Device` | `Payment Terminal`, `Card Reader`, `Customer-Facing Display`, `Kitchen Display System`, printers, `Menu Board`, mounts/stands, all network gear (`Gateway/Router`, `Wi-Fi Access Point`, `PoE Switch`, `LTE Failover`), `Cash Drawer` |
+| **Website / online ordering — counts.** Confirmed, and treated as important | |
+| `Tablet` — **conditional**: sometimes deployed as a D3 POS replacement (counts), sometimes not | |
+
+Keep this mapping **in EasyOB, not in the inventory endpoint** — it's a pricing rule, and it will
+change when the tier definition does. The endpoint stays generic and returns raw category counts.
+Any category the mapping doesn't recognise should surface as unclassified rather than defaulting
+to zero, so a new product category can't quietly shrink someone's tier.
+
+**⚠️ The tablet case cannot be resolved from inventory data.** A Galaxy Tab A9 deployed as a D3 POS
+replacement and one deployed as a display are the same product in the same category — nothing in
+the movement record distinguishes them. So any purely automatic count will be wrong for tablets.
+Three ways out, in preference order:
+
+1. **A per-account override in EasyOB** (recommended) — the derived count is a default, and an
+   admin can set "of 4 tablets, 2 are order points" on the account, with the reason recorded.
+   Keeps a pricing judgement in the pricing tool and leaves the inventory stock-out flow alone.
+2. A flag captured at stock-out time in `aioinventory` — more accurate at source, but it puts a
+   billing-relevant field into an operational workflow where it will get skipped.
+3. Count all tablets and let the admin subtract — simplest, but it over-bills by default, which is
+   the worse direction to be wrong in.
+
+Until one exists, **tablets should be surfaced as "needs review" rather than silently counted or
+silently ignored**, for the same reason unmapped customers must be: a wrong tier is $433/mo.
+
+**Website counting has an immediate consequence worth pricing out.** With the website counting and
+a kiosk counting as one, five terminals plus online ordering already reaches the 6+ tier. Once the
+pipeline exists, the **first thing to run is a one-time audit of the existing book**: how many live
+accounts are on the 1–5 tier but would classify as 6+ today. That is a concrete revenue number,
+it needs no new UI, and it's the fastest way to show Steve the pipeline is worth having.
+
+#### The join, and why it's already solid
+
+**HubSpot Company ID is the spine that connects all four systems**, which is worth stating plainly
+because it means no new identifier has to be invented:
+
+```
+EasyOB application  --tenantLink.hubspotCompanyId-->  HubSpot Company
+aioinventory        --hubspotCompanyMap[customer]-->  HubSpot Company
+Adyen store         --tenantLink.tenantRef ("prod-{n}" == HubSpot tenant_id)
+```
+
+Phase G already joins Adyen actuals on `prod-{tenantNumber}`; Phase H joins inventory actuals on
+`hubspotCompanyId`. Same admin row, same `tenantLink` record, no new plumbing.
+
+**The weak link is the inventory side of that map.** `mv.customer` is free text and the mapping to
+a company is maintained by hand; `hubspotNightlySync` pushes unmapped customers into a
+`{ skipped: 'unmapped' }` result that goes to a log nobody reads. EasyOB must **surface unmapped
+inventory customers in the admin view** — same rule already written down for unmatched Adyen
+stores. An account showing zero deployed order points because nobody mapped it looks identical to
+one that genuinely has none, and the two have opposite billing implications.
+
+Second-order caveat: `mv.category` is captured on the movement and can be blank. Fall back to a
+product→category lookup from `data.productRecords`, and report blanks rather than dropping them.
+
+#### The zero-build fallback
+
+`hubspotNightlySync` already writes **`aio_device_count`** and **`aio_total_deployed_value`** onto
+each mapped HubSpot Company, nightly at 02:00 America/Chicago. EasyOB can read those two
+properties today through the existing `tenantLink` company read — no inventory API work at all.
+It's a *total device* count, not an order-point count, so it can't drive tiering; but it's enough
+to prove the join end to end and to put a "hardware deployed" figure on the admin row while the
+proper endpoint is built. Worth doing first for that reason.
+
+#### Work items
+
+1. **Type + storage:** `orderPoints: { hardware: Record<string, number>; channels: string[];
+   total: number } | null` on `MerchantApplication`, frozen at publish alongside `quoteConfig` /
+   `quoteLines`.
+2. **Rep configurator (Phase C):** derive the hardware half from the quote's order-point-bearing
+   lines, add a small checklist for non-hardware channels, show a running count, and
+   **auto-select the platform tier product** from it — with the boundary visible ("6 order points
+   → 6+ tier, $199/wk"), since crossing it is a $433/mo decision a rep should see, not discover.
+3. **Customer quote view (Phase A):** show the order-point count as the stated basis for the
+   platform fee. It's the most legible justification for that line on the whole quote.
+4. **Inventory endpoint:** `deployedByCompany` in `aioinventory/functions/`, plus
+   `ADYEN`-style env wiring in EasyOB (`INVENTORY_METRICS_URL`, `INVENTORY_METRICS_KEY`).
+5. **Admin view (Phase B/G):** quoted order points vs. deployed, tier implied by each, and an
+   explicit **tier mismatch** flag. Refresh nightly on the existing cron, cached on the
+   application like `checkIds.onboardStatus` — this is org-wide data, so never fetch per page view.
+
+Verify: a client with 3 POS terminals + 2 kiosks + a website reads 6 order points and prices at the
+6+ tier; the admin row for a live account shows quoted vs. deployed with the mismatch flagged.
+
+### Phase I — The account P&L ("how much are we making off this restaurant")
+
+Steve's ask, stated directly: at a glance, every meaningful way AIO makes money off a given
+restaurant, across inventory, Adyen transactions, and billing. This is the **destination the other
+phases feed** rather than a separate pipeline — G supplies Adyen, E supplies billing, H supplies
+inventory. What it adds is the thing none of them currently carry: **cost**, and therefore profit
+rather than revenue.
+
+#### The four revenue streams
+
+| Stream | Source | Shape |
+| --- | --- | --- |
+| **Processing margin** | Adyen — `platformPayment` split lines, Balance Platform Accounting Report (Phase G) | Recurring, volume-driven, the variable one |
+| **Platform subscription** | HubSpot — subscription `hs_mrr` (Phase E) | Recurring, weekly, tier-driven (Phase H) |
+| **Add-on software** | HubSpot — Marketing Platform $49/wk, Review Manager $39/mo, Payroll $2/person/wk | Recurring, easy to miss because it's several small lines |
+| **Hardware + services** | HubSpot — paid invoices | One-time, lumpy, front-loaded |
+
+Note these have genuinely different characters: processing scales with the restaurant's success,
+subscription is fixed until the tier moves, hardware is a one-off at signing. A single blended
+"revenue" number hides exactly the differences Steve is asking to see, so the view should break
+them out and only then total them.
+
+#### The cost side — this is what inventory uniquely provides
+
+Adyen and HubSpot between them can only ever produce a revenue figure. **Inventory is the only
+system that knows what a restaurant cost AIO**, and it already tracks it per serial:
+
+- **Hardware at cost.** `computeDeployedByCustomer` already returns `value` per customer, summed
+  from `serialCosts[serial]` — capital currently deployed at that restaurant, at cost. This comes
+  free with the Phase H `deployedByCompany` endpoint; it is the same function call.
+- **RMA and total loss.** Movements carry `isRmaTl` and a customer, so replacement hardware burned
+  on an account is attributable. A restaurant on its third replacement terminal is materially less
+  profitable than one on its first, and nothing today surfaces that.
+- **Adyen's own processing cost.** `calcAdyenCost` / `adyenRateOnVolume` in `pricing.ts` already
+  model this correctly and are used internally — reuse them, subject to the open question below
+  about whether split commission arrives gross or net.
+
+**⚠️ The cost figures are only as good as `serialCosts` coverage.** `computeMetrics` already
+computes a `costCoverage` ratio precisely because uncosted serials contribute **0** and silently
+understate the total. For an org-wide dashboard that's a rounding error; for a per-restaurant P&L
+it's a lie with a specific victim — an account whose devices are half uncosted looks twice as
+profitable as it is. The `deployedByCompany` endpoint must therefore return **costed vs. total unit
+counts per customer**, and the view must show "cost basis covers 8 of 11 devices" rather than
+printing a confident number. Same discipline as unmapped customers and unclassified tablets: make
+the gap visible instead of letting it silently flatter the figure.
+
+#### What the view should actually show
+
+Revenue alone answers "how much do they pay us." Steve asked how much we're **making**, which needs
+the pairing:
+
+- **Monthly gross profit** — recurring revenue (processing + subscription + add-ons) minus
+  recurring cost. The steady-state number.
+- **Hardware payback** — deployed hardware at cost ÷ monthly gross profit, in months. This is the
+  metric that makes a restaurant legible at a glance, and it's the one that only exists once
+  inventory is joined in. POS deals routinely subsidise hardware to win the processing, so an
+  account can show negative hardware margin and still be excellent — payback is what tells them
+  apart, and nothing in AIO's current stack can compute it.
+- **Lifetime to date** — cumulative revenue minus cumulative cost since go-live, i.e. whether this
+  restaurant has paid back yet at all.
+- **Revenue mix** — the four streams broken out, so a processing-heavy account and a
+  subscription-heavy account of equal size don't look identical. They carry very different risk:
+  processing revenue disappears if the restaurant's volume drops, subscription revenue doesn't.
+
+Sort the admin list on one headline metric (see open decisions) and let the row expand into the
+breakdown. Reuse the Phase B admin portal shell.
+
+#### Sequencing
+
+Phase I is mostly **composition**, not new plumbing — which means its real cost is the three feeds,
+not the view. The cheapest honest ordering:
+
+1. **HubSpot billing** (Phase E sync) — already specified, and covers two of four revenue streams.
+2. **Inventory `deployedByCompany`** (Phase H) — small, and unlocks the entire cost side plus
+   order points in one endpoint.
+3. **Adyen actuals** (Phase G) — the largest single revenue line, but gated on reports being
+   scheduled and a report user existing in the Customer Area, so start that request now.
+4. The composed view.
+
+Each step is independently useful: after 1 the admin sees billed revenue, after 2 it sees deployed
+capital and payback on the subscription half, after 3 the picture is complete. Don't hold the view
+back for step 3.
+
+Verify: a live account shows four revenue streams broken out, deployed hardware at cost with its
+coverage ratio, monthly gross profit, and a payback figure in months.
+
 ## Open decisions needed before the relevant phase
 
 | Decision | Blocks |
@@ -465,3 +938,10 @@ they pay now. Comparing the two is the whole feature.
 | Schedule the Aggregate Settlement Details + Balance Platform Accounting reports in the Adyen CA, and create a Report Service user | Phase G — nothing can be ingested until these exist |
 | How to attribute stores created manually by the OB team (no `storeId` in EasyOB) — confirm `prod-{tenant}` is always the reference used | Phase G |
 | HubSpot token provisioning + scopes (line items, deals, quotes write; subs/invoices read) | Phases E, F, G |
+| ~~Which devices count as an ordering point~~ | **Resolved 2026-08-18:** kiosk = 1 point, website counts, tablet is conditional |
+| How the conditional `Tablet` case gets resolved (per-account override vs. capture at stock-out) | Phase H — tablets are otherwise uncountable |
+| Is the tier re-evaluated as a client grows (and who acts on a mismatch), or fixed at signing? | Phase H admin view — determines whether the mismatch flag is a task queue or just a report |
+| Confirm `aioinventory`'s customer→HubSpot-company map is complete enough to rely on, and who maintains it | Phase H — unmapped customers read as zero deployed hardware, and zero cost in the Phase I P&L |
+| Does the Adyen split commission arrive gross or net of scheme/interchange cost? Decides whether processing gross profit needs `calcAdyenCost` subtracted or not | Phase I — the largest revenue line's margin |
+| Is hardware COGS the right cost basis for Steve's view, or should landed/shipping cost be included? | Phase I |
+| Which single number is the headline for "how much we make off this restaurant" — monthly gross profit, hardware payback, or lifetime-to-date | Phase I — determines what the dashboard sorts on |
