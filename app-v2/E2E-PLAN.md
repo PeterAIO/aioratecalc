@@ -60,9 +60,11 @@ Both fail silently, and both are off by enough to embarrass someone in front of 
 
 ### Sequencing advice
 
-**Spike the HubSpot quote publish before building Phase E around it** — create a draft quote against
-a throwaway deal, publish it, read back `hs_quote_link`. It is the only external mechanism in this
-plan still resting on documentation rather than observation. Everything else has been run.
+**Spike the HubSpot quote publish before building Phase E around it** — **done, 2026-08-18,
+verdict YES.** Ran against the live portal: created a draft quote against a throwaway deal,
+published it, read back `hs_quote_link`. It worked end to end, with three publish-time gates and
+a couple of corrections to this plan's earlier assumptions — folded into Phase E below. No longer
+an outstanding prerequisite.
 
 Otherwise: Phase B first (pure UI, no external dependencies, and Phase I's admin views hang off it),
 then the Adyen ingest (every input verified, and it's what was actually asked for), then the quote
@@ -122,6 +124,10 @@ already holds deals read/write (quotes require them), so point `pushToHubSpot`/`
 `billingHeaders()` and leave the general app as companies-read-only. Two tokens able to write deals
 would be redundant scope surface.
 
+**Spike update (2026-08-18):** the live quote-publish run exercised every billing-token write
+scope end to end — contacts, deals, line_items, and quotes write, plus v4 associations — with zero
+403s anywhere. Scopes are not a blocker for Phase E.
+
 ### Env vars — paste-able now
 
 ```
@@ -159,6 +165,10 @@ onboarding code — ignore unless that work resumes.
   "AIO Pre Auth"; trim trailing whitespace. Delegable.
 - **Which webhook surface** Adyen report notifications arrive on (classic vs Balance Platform) —
   decides which HMAC verifier the route needs.
+- **`hs_payment_type` reads back as `BYO_STRIPE`** at the portal level, not native HubSpot
+  payments — worth confirming with whoever runs billing, since the plan's text above assumes
+  "HubSpot payments." Doesn't block Phase E (the quote/checkout mechanism is the same either way),
+  but changes who to loop in on payment-processing questions.
 
 ### Buildable now — zero further input
 
@@ -435,28 +445,63 @@ details; it hands the customer to HubSpot's hosted quote page and reads the resu
 
 1. On quote acceptance, EasyOB creates a **deal**, then **line items** from `quoteLines`
    (each carrying the product's own `hs_recurring_billing_period`/frequency — weekly for platform
-   fees, one-time for hardware and installation, which can live on the same quote).
+   fees, one-time for hardware and installation, which can live on the same quote). Spiked: a
+   weekly `recurringbillingfrequency` line item needs `hs_recurring_billing_period` in weekly
+   form — **`P7D`**, not `P12M` (a `P12M` period 400s with
+   `BILLING_PERIOD_TO_FREQUENCY_FORM_MISMATCH`). HubSpot then derives
+   `hs_recurring_billing_number_of_payments: 1` / `FIXED` on that line item — worth a Steve
+   question on whether a 1-payment fixed term is actually intended for the platform fee (added to
+   the open-decisions table below).
 2. Creates a **quote** (`hs_template_type: CPQ_QUOTE`) with
    `hs_billing_enabled: true` (this is what makes HubSpot create the subscription),
    `hs_payment_enabled: true`, `hs_store_payment_method_at_checkout: true`, ACH among the allowed
-   methods, and `hs_collection_process` matching today's `automatic_payments`. Associate line
-   items, contact, and deal, then publish by setting `hs_status` to `APPROVAL_NOT_NEEDED`.
+   methods, and `hs_collection_process: "AUTO_PAYMENTS"` (enum `AUTO_PAYMENTS|MANUAL_PAYMENTS` —
+   this is the quote's own property; it is *not* the subscription's `automatic_payments` value,
+   which 400s if reused here). Associate line items, contact, and deal, then publish by setting
+   `hs_status` to `APPROVAL_NOT_NEEDED`.
+
+   **Publish-time gates (spiked 2026-08-18, three 400s hit in order):** `hs_sender_email` is
+   required at publish, not at create — set it before the publish call. `hs_payment_enabled: true`
+   is incompatible with the default `hs_acceptance_method: print_and_sign`; set
+   `hs_acceptance_method: "esignature"` (or `"clickwrap"`) instead, and never write
+   `hs_esign_enabled` directly — it's derived and silently ignores writes. An esign-enabled quote
+   also can't publish without a **contact signer association (typeId 702)**, in addition to
+   contact 69 / deal 64 / line items 67. (HubSpot auto-adds association 1393, "Deal with Primary
+   Quote," on publish — don't create it yourself.)
 3. **Port out:** read `hs_quote_link` and send the customer there — the checklist module's CTA is
    a redirect to that URL, exactly like the Adyen and Check "continue" routes. The customer enters
-   their bank details on HubSpot's page.
+   their bank details on HubSpot's page. `hs_quote_link` is `https://{hs_domain}/{hs_slug}` — the
+   slug exists at create (the URL is predictable), but the link itself only populates at publish,
+   ~3s later. One read-after-write with a single retry is enough; no poll loop needed.
 4. HubSpot creates the **subscription** (with the ACH method stored, so it auto-debits) and issues
    its invoices on its own cycle. EasyOB creates neither.
 5. Status is derived by **reading back**: `hs_payment_status`/`hs_payment_date` on the quote, and
    once it exists, the subscription's `hs_status` (`scheduled` → authorized, awaiting first cycle;
    `active` → billing). Cache the snapshot on the application, mirroring `checkIds.onboardStatus`,
-   so list views don't fan out one API call per account.
+   so list views don't fan out one API call per account. Spiked: `hs_payment_status` reads
+   `PENDING` immediately post-publish — a calculated, read-only enum
+   `PENDING|PROCESSING|PAID|PAYMENT_NOT_ENABLED` — confirming this read-back design works.
 6. Store `hubspotIds: { dealId, quoteId, quoteLink, subscriptionId, status, statusAt }` alongside
    `adyenIds` / `checkIds`. Treat `hs_quote_link` as re-readable rather than permanently
    stored-and-reserved — re-fetch it if a stored one stops working, the same caution Adyen and
    Check links needed.
 
-Note the quote link is a public URL — check `hs_quote_auth_method` so the setting matches how AIO
-shares quotes today.
+> **Publish is irreversible via API.** Spiked 2026-08-18: a published quote cannot be edited (400
+> `LOCKED`), cannot be deleted (400 `PUBLISHED_QUOTE_CANNOT_BE_DELETED`), and cannot even be voided
+> via the API — setting `hs_status: VOID` is itself an edit, so it hits the same `LOCKED` 400.
+> Voiding is UI-only. Phase E therefore needs an explicit confirmation gate before the publish
+> call, and must never offer "unpublish" or "edit published quote" as UI affordances.
+
+**Two deal-side effects to expect, not reconcile.** Publishing rolls the line-item total into the
+deal's `amount` and `hs_mrr` (HubSpot itself computes weekly × 4.33 for the MRR figure), and
+HubSpot **clones the line items into a deal-side copy** — the deal ends up with its own line-item
+ids, separate from the quote's. Treat that as expected duplication, not a sync bug to fix.
+Separately, a portal workflow renames deals to `{company} / Deal-{n}` on its own schedule, so
+EasyOB must never treat `dealname` as a field it owns or can predict.
+
+The quote link is a public URL. Spiked: the portal default `hs_quote_auth_method: public_access`
+already matches how AIO shares quotes today — no change needed, which resolves the open question
+below.
 
 #### Who owns the quote, and keeping EasyOB in step
 
@@ -1007,7 +1052,8 @@ coverage ratio, monthly gross profit, and a payback figure in months.
 | Which products a rep may quote, and whether prices are ever overridable per deal | Phase C |
 | Foodbuy scope (form + handoff vs. something deeper) | Phase E (Foodbuy module) |
 | Whether EasyOB-created quotes should reuse AIO's existing quote template, and which quote owner/sender they carry | Phase E |
-| Buyer authentication on the shared quote link (`hs_quote_auth_method`) — match however AIO shares quotes today | Phase E |
+| ~~Buyer authentication on the shared quote link (`hs_quote_auth_method`)~~ | **Resolved 2026-08-18:** portal default `public_access` already matches how AIO shares quotes today — no change needed |
+| Is a 1-payment `FIXED` term intended for the weekly platform-fee line item (HubSpot derives this from `hs_recurring_billing_period: P7D`) — a Steve question | Phase E |
 | Interchange/CP-split assumptions for statement-less quotes (PRICING-QUESTIONS follow-up) | Phase A pricing path |
 | Resend sending domain | Phase D |
 | Schedule the Aggregate Settlement Details + Balance Platform Accounting reports in the Adyen CA, and create a Report Service user | Phase G — nothing can be ingested until these exist |
