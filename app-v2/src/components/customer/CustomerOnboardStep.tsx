@@ -50,6 +50,19 @@ export default function CustomerOnboardStep({ app }: Props) {
       setErr("Both checkboxes are required to submit.");
       return;
     }
+    // Adyen rejects the legal entity without a complete registered address, so
+    // require it here instead of failing silently server-side.
+    const missing = ([
+      [biz.legalName, "Legal Business Name"],
+      [biz.address, "Street Address"],
+      [biz.city, "City"],
+      [biz.state, "State"],
+      [biz.zip, "ZIP"],
+    ] as const).filter(([v]) => !(v || "").trim()).map(([, label]) => label);
+    if (missing.length) {
+      setErr(`Please fill in: ${missing.join(", ")}`);
+      return;
+    }
     setSaving(true);
     setErr(null);
     try {
