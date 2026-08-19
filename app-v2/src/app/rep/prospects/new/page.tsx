@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { createProspectAction, getHubspotCompanyForProspectAction } from "@/lib/actions/prospects";
 import { searchTenantCompaniesAction } from "@/lib/actions/applications";
@@ -8,8 +8,17 @@ import ProductConfigurator, {
   type ConfiguredQuote,
   type ProductPick,
 } from "@/components/quoting/ProductConfigurator";
+import {
+  isFromHubspot,
+  mergeProspectPrefill,
+  prefillCarryoverLabels,
+  NO_PREFILL_APPLIED,
+  type AppliedProspectPrefill,
+} from "@/lib/prefillMerge";
+import { ORDER_POINT_CHANNELS } from "@/lib/quoting";
 import { fmtPct2 } from "@/lib/utils";
 import type { PricingModel, StatementAnalysis } from "@/types/merchant";
+import type { ProspectPrefill } from "@/lib/hubspotPrefill";
 import type { TenantCompany } from "@/lib/adapters/hubspot";
 import styles from "./prospects-new.module.css";
 
@@ -34,12 +43,49 @@ function NewProspectFlow() {
   const [saving, setSaving]             = useState(false);
   const [error, setError]               = useState<string | null>(null);
 
+  // Product configurator. The picks and channels are owned here; the lines,
+  // ordering-point count and platform tier they imply come back derived.
+  // Declared above the HubSpot block because the prefill seeds `channels`.
+  const [picks, setPicks]       = useState<ProductPick[]>([]);
+  const [channels, setChannels] = useState<string[]>([]);
+  const [quote, setQuote]       = useState<ConfiguredQuote | null>(null);
+
   // Phase F — deep link from the HubSpot Company record. Fetched server-side
   // via the server action; failure here must never block the form, only show
   // a non-blocking notice, so it's kept separate from `error` (which blocks
   // submit).
   const [hubspotCompany, setHubspotCompany]   = useState<TenantCompany | null>(null);
   const [hubspotNotice, setHubspotNotice]     = useState<string | null>(null);
+  const [prefill, setPrefill]                 = useState<ProspectPrefill | null>(null);
+  const [applied, setApplied]                 = useState<AppliedProspectPrefill>(NO_PREFILL_APPLIED);
+  const [prefillLoading, setPrefillLoading]   = useState(false);
+
+  // Latest form values, so applying a prefill from an async callback merges
+  // against what's on screen now rather than whatever was there when the fetch
+  // started. Same ref-mirror trick ProductConfigurator uses for its emit.
+  const formRef    = useRef({ merchantName, contactEmail, channels });
+  const appliedRef = useRef(applied);
+  useEffect(() => {
+    formRef.current = { merchantName, contactEmail, channels };
+    appliedRef.current = applied;
+  });
+
+  // THE RULE (see prefillMerge.ts): HubSpot owns a field until the rep types in
+  // it. Switching companies therefore REPLACES the previous company's values —
+  // they were recorded as HubSpot's — while anything the rep typed survives.
+  // Passing null (company cleared / unreadable) withdraws what HubSpot filled.
+  const applyPrefill = useCallback((next: ProspectPrefill | null) => {
+    const merged = mergeProspectPrefill(formRef.current, appliedRef.current, next);
+    setMerchantName(merged.merchantName);
+    setContactEmail(merged.contactEmail);
+    setChannels(merged.channels);
+    setApplied(merged.applied);
+    setPrefill(next);
+    // Kept in step immediately so two prefills in a row can't merge against a
+    // pre-render snapshot.
+    formRef.current = { merchantName: merged.merchantName, contactEmail: merged.contactEmail, channels: merged.channels };
+    appliedRef.current = merged.applied;
+  }, []);
 
   useEffect(() => {
     if (!hubspotCompanyId) return;
@@ -49,14 +95,13 @@ function NewProspectFlow() {
         if (cancelled) return;
         if (res.company) {
           setHubspotCompany(res.company);
-          setMerchantName(prev => prev || res.company!.name);
-          if (res.company.email) setContactEmail(prev => prev || res.company!.email!);
+          applyPrefill(res.prefill);
         }
         if (res.error) setHubspotNotice(res.error);
       })
       .catch(e => { if (!cancelled) setHubspotNotice(e instanceof Error ? e.message : "Could not reach HubSpot"); });
     return () => { cancelled = true; };
-  }, [hubspotCompanyId]);
+  }, [hubspotCompanyId, applyPrefill]);
 
   // HubSpot deprecated classic CRM cards, so there's no "start from HubSpot"
   // button anymore — the flow inverts: start here, find the company. This is
@@ -81,17 +126,41 @@ function NewProspectFlow() {
     return () => { cancelled = true; clearTimeout(t); };
   }, [hubspotQuery]);
 
+  // The search result is only a TenantCompany — the prefill needs the full
+  // profile plus the owner contact, so the picker takes the same server round
+  // trip the deep link does. The badge appears immediately from the search row;
+  // the prefill lands when the read returns.
+  // Two picks in quick succession: the loser's response must not land on top of
+  // the winner's prefill.
+  const prefillRequestRef = useRef<string | null>(null);
+
   const selectHubspotCompany = (company: TenantCompany) => {
     setHubspotCompany(company);
-    setMerchantName(prev => prev || company.name);
-    if (company.email) setContactEmail(prev => prev || company.email!);
+    setHubspotNotice(null);
     setHubspotQuery("");
     setHubspotResults([]);
+    setPrefillLoading(true);
+    prefillRequestRef.current = company.id;
+    getHubspotCompanyForProspectAction(company.id)
+      .then(res => {
+        if (prefillRequestRef.current !== company.id) return;
+        applyPrefill(res.prefill);
+        if (res.error) setHubspotNotice(res.error);
+      })
+      .catch(e => {
+        if (prefillRequestRef.current === company.id) {
+          setHubspotNotice(e instanceof Error ? e.message : "Could not reach HubSpot");
+        }
+      })
+      .finally(() => { if (prefillRequestRef.current === company.id) setPrefillLoading(false); });
   };
 
   const clearHubspotCompany = () => {
     setHubspotCompany(null);
     setHubspotNotice(null);
+    prefillRequestRef.current = null;
+    setPrefillLoading(false);
+    applyPrefill(null);
   };
 
   // Optional statement upload — the rep path through the same /api/analyze
@@ -102,12 +171,6 @@ function NewProspectFlow() {
   const [analyzing, setAnalyzing]   = useState(false);
   const [dragOver, setDragOver]     = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-
-  // Product configurator. The picks and channels are owned here; the lines,
-  // ordering-point count and platform tier they imply come back derived.
-  const [picks, setPicks]       = useState<ProductPick[]>([]);
-  const [channels, setChannels] = useState<string[]>([]);
-  const [quote, setQuote]       = useState<ConfiguredQuote | null>(null);
 
   // A tier is owed but the catalog didn't yield it: the biggest recurring line
   // on the quote would go missing. Blocks the save rather than quietly
@@ -183,6 +246,7 @@ function NewProspectFlow() {
     setPicks([]); setChannels([]); setQuote(null);
     setLinkUrl(null); setLinkWarning(null); setCopied(false); setError(null);
     setHubspotCompany(null); setHubspotNotice(null);
+    setPrefill(null); setApplied(NO_PREFILL_APPLIED); appliedRef.current = NO_PREFILL_APPLIED;
     setHubspotQuery(""); setHubspotResults([]); setHubspotSearchError(null);
   };
 
@@ -190,6 +254,14 @@ function NewProspectFlow() {
   // volume is not a quote, so don't promise the customer one.
   const hasQuote =
     (analysis?.totalVolume ?? 0) > 0 || (parseFloat(avgTicket) > 0 && parseFloat(monthlyVolume) > 0);
+
+  // The prefill covers more than this form shows — createProspectAction stamps
+  // the rest onto the application server-side — so name what's riding along
+  // rather than letting the rep assume only the two visible fields carried.
+  const carriedOver = prefillCarryoverLabels(prefill?.fromHubspot ?? []);
+  const prefilledChannels = applied.channels.map(
+    id => ORDER_POINT_CHANNELS.find(c => c.id === id)?.label ?? id
+  );
 
   if (linkUrl) {
     return (
@@ -244,19 +316,43 @@ function NewProspectFlow() {
           </button>
         </p>
       )}
-      {!hubspotCompany && hubspotNotice && (
+      {hubspotNotice && (
         <div className={styles.error}>
-          Couldn&apos;t load the linked HubSpot company ({hubspotNotice}) — continuing unlinked.
+          {hubspotCompany
+            ? `Couldn't read this company's details from HubSpot (${hubspotNotice}) — the link is saved, but nothing was prefilled.`
+            : `Couldn't load the linked HubSpot company (${hubspotNotice}) — continuing unlinked.`}
         </div>
+      )}
+      {prefillLoading && <p className={styles.prefillNote}>Loading details from HubSpot…</p>}
+      {carriedOver.length > 0 && (
+        <p className={styles.prefillNote}>
+          Also carried onto their application from HubSpot: {carriedOver.join(", ")}. Anything you
+          change here wins.
+        </p>
+      )}
+      {prefilledChannels.length > 0 && (
+        <p className={styles.prefillNote}>
+          Ordering channels ticked below from HubSpot: {prefilledChannels.join(", ")}.
+        </p>
       )}
 
       <div className={styles.panel}>
         <div className={styles.field}>
-          <label className={styles.label}>Business Name</label>
+          <label className={styles.label}>
+            Business Name
+            {isFromHubspot(applied, "merchantName", merchantName) && (
+              <span className={styles.fromHubspot}>from HubSpot</span>
+            )}
+          </label>
           <input value={merchantName} onChange={e => setMerchantName(e.target.value)} placeholder="Joe's Pizza" className={styles.input} />
         </div>
         <div className={styles.field}>
-          <label className={styles.label}>Customer Contact Email</label>
+          <label className={styles.label}>
+            Customer Contact Email
+            {isFromHubspot(applied, "contactEmail", contactEmail) && (
+              <span className={styles.fromHubspot}>from HubSpot</span>
+            )}
+          </label>
           <input type="email" value={contactEmail} onChange={e => setContactEmail(e.target.value)} placeholder="owner@business.com" className={styles.input} />
         </div>
 

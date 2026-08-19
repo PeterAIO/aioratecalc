@@ -81,6 +81,29 @@
   margin-bottom: var(--space-2xs);
 }
 
+/* "We filled this in — check it." Quiet on purpose: it appears on most fields
+   at once, so anything louder would read as an error state. Disappears as soon
+   as the customer edits the value. */
+.prefilled {
+  margin-left: var(--space-2xs);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--ink-3);
+  opacity: 0.85;
+}
+
+.prefilled::before {
+  content: "· ";
+}
+
+.prefillNote {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  margin: calc(-1 * var(--space-md)) 0 var(--space-xl);
+}
+
 .input {
   width: 100%;
   padding: var(--space-xs) var(--space-sm);
