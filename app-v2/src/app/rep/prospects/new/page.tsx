@@ -1,34 +1,19 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { createProspectAction, getHubspotCompanyForProspectAction } from "@/lib/actions/prospects";
 import { searchTenantCompaniesAction } from "@/lib/actions/applications";
-import { listQuotableProductsAction } from "@/lib/actions/catalog";
-import {
-  FOOD_TRUCK_PLATFORM_NAME,
-  ORDER_POINT_CHANNELS,
-  PLATFORM_TIER_BOUNDARY,
-  deriveOrderPoints,
-  groupProducts,
-  quoteTotals,
-  resolvePlatformTier,
-  toQuoteLine,
-} from "@/lib/quoting";
-import { fmt$, fmtFrequency, fmtPct2, monthlyEquivalent } from "@/lib/utils";
-import type { CatalogProduct, PricingModel, QuoteLine, StatementAnalysis } from "@/types/merchant";
+import ProductConfigurator, {
+  type ConfiguredQuote,
+  type ProductPick,
+} from "@/components/quoting/ProductConfigurator";
+import { fmtPct2 } from "@/lib/utils";
+import type { PricingModel, StatementAnalysis } from "@/types/merchant";
 import type { TenantCompany } from "@/lib/adapters/hubspot";
 import styles from "./prospects-new.module.css";
 
 const MODELS: PricingModel[] = ["flat-rate", "2-tier", "interchange-plus"];
-
-// A recurring line always shows BOTH figures: the charge as it actually bills
-// and the monthly equivalent. AIO's platform fees bill weekly, so "$99/mo" is
-// wrong by 4.33x and "$99" alone is ambiguous.
-function priceLabel(unitPrice: number, frequency: QuoteLine["billingFrequency"]) {
-  if (frequency === "one_time") return `${fmt$(unitPrice)} one-time`;
-  return `${fmt$(unitPrice)}/${fmtFrequency(frequency)} (~${fmt$(monthlyEquivalent(unitPrice, frequency))}/mo)`;
-}
 
 function NewProspectFlow() {
   const searchParams = useSearchParams();
@@ -40,6 +25,9 @@ function NewProspectFlow() {
   const [monthlyVolume, setMonthlyVolume] = useState("");
   const [targetMargin, setTargetMargin] = useState(0.008);
   const [pricingModel, setPricingModel] = useState<PricingModel>("2-tier");
+  // Shoulder-surfing guard: the margin target is AIO-internal, so it stays shut
+  // until the rep opens it. The default above still applies while collapsed.
+  const [internalOpen, setInternalOpen] = useState(false);
   const [linkUrl, setLinkUrl]           = useState<string | null>(null);
   const [linkWarning, setLinkWarning]   = useState<string | null>(null);
   const [copied, setCopied]             = useState(false);
@@ -115,53 +103,16 @@ function NewProspectFlow() {
   const [dragOver, setDragOver]     = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Product configurator. The catalog is read from HubSpot server-side and
-  // cached there, so this is one call per mount, not one per keystroke.
-  const [catalog, setCatalog]         = useState<CatalogProduct[]>([]);
-  const [fullCatalog, setFullCatalog] = useState<CatalogProduct[]>([]);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
-  const [catalogLoading, setCatalogLoading] = useState(true);
-  const [qty, setQty]                 = useState<Record<string, number>>({});
-  const [channels, setChannels]       = useState<string[]>([]);
+  // Product configurator. The picks and channels are owned here; the lines,
+  // ordering-point count and platform tier they imply come back derived.
+  const [picks, setPicks]       = useState<ProductPick[]>([]);
+  const [channels, setChannels] = useState<string[]>([]);
+  const [quote, setQuote]       = useState<ConfiguredQuote | null>(null);
 
-  useEffect(() => {
-    listQuotableProductsAction()
-      .then(res => { setCatalog(res.products); setFullCatalog(res.all); setCatalogError(res.error); })
-      .catch(e => setCatalogError(e instanceof Error ? e.message : "Could not load the product catalog"))
-      .finally(() => setCatalogLoading(false));
-  }, []);
-
-  const groups = useMemo(() => groupProducts(catalog), [catalog]);
-
-  // Everything downstream of the picker is derived, never separately stored:
-  // the order-point count comes from the lines, and the platform tier comes
-  // from the count. The rep changes quantities; the tier follows.
-  //
-  // This is a PREVIEW. The same derivation runs again server-side inside
-  // createProspectAction, against the live catalog, and that result is what
-  // gets persisted — the browser only ever sends the picks.
-  const pickedLines = useMemo(
-    () => catalog.filter(p => (qty[p.hubspotProductId] ?? 0) > 0).map(p => toQuoteLine(p, qty[p.hubspotProductId])),
-    [catalog, qty]
-  );
-  const breakdown = useMemo(() => deriveOrderPoints(pickedLines, channels), [pickedLines, channels]);
-  const tier      = useMemo(
-    () => resolvePlatformTier(breakdown.orderPoints.total, fullCatalog, pickedLines),
-    [breakdown.orderPoints.total, fullCatalog, pickedLines]
-  );
-  const tierLine   = tier.line;
-  const quoteLines = useMemo(() => (tierLine ? [tierLine, ...pickedLines] : pickedLines), [tierLine, pickedLines]);
-  const totals     = useMemo(() => quoteTotals(quoteLines), [quoteLines]);
   // A tier is owed but the catalog didn't yield it: the biggest recurring line
   // on the quote would go missing. Blocks the save rather than quietly
   // shipping a tier-less quote — the server refuses it too.
-  const tierUnresolved = tier.status === "unresolved";
-
-  const setQtyFor = (id: string, next: number) =>
-    setQty(prev => ({ ...prev, [id]: Math.max(0, next) }));
-
-  const toggleChannel = (id: string) =>
-    setChannels(prev => (prev.includes(id) ? prev.filter(c => c !== id) : [...prev, id]));
+  const tierUnresolved = quote?.tier.status === "unresolved";
 
   const handleFile = (f: File) => {
     setFile(f);
@@ -200,7 +151,8 @@ function NewProspectFlow() {
       setError("Enter both average ticket and monthly volume, or neither.");
       return;
     }
-    if (tier.status === "unresolved") {
+    const tier = quote?.tier;
+    if (tier && tier.status === "unresolved") {
       setError(`This quote needs the "${tier.tierName}" platform product, which isn't in the HubSpot catalog. Fix the catalog before sending it.`);
       return;
     }
@@ -213,7 +165,7 @@ function NewProspectFlow() {
         analysis,
         // Only the picks cross the wire — prices and the tier are re-derived
         // server-side against the live catalog.
-        picks: pickedLines.map(l => ({ hubspotProductId: l.hubspotProductId, qty: l.qty })),
+        picks,
         channels,
         hubspotCompanyId: hubspotCompany?.id ?? null,
       });
@@ -228,7 +180,7 @@ function NewProspectFlow() {
   const reset = () => {
     setMerchantName(""); setContactEmail(""); setTargetMargin(0.008); setPricingModel("2-tier");
     setAvgTicket(""); setMonthlyVolume(""); setFile(null); setAnalysis(null);
-    setQty({}); setChannels([]);
+    setPicks([]); setChannels([]); setQuote(null);
     setLinkUrl(null); setLinkWarning(null); setCopied(false); setError(null);
     setHubspotCompany(null); setHubspotNotice(null);
     setHubspotQuery(""); setHubspotResults([]); setHubspotSearchError(null);
@@ -405,149 +357,13 @@ function NewProspectFlow() {
         </div>
       </div>
 
-      <div className={styles.panel}>
-        <div className={styles.sectionHead}>
-          <h2 className={styles.sectionTitle}>Products &amp; Hardware</h2>
-          <p className={styles.sectionNote}>
-            Priced from the live AIO catalog and snapshotted onto the quote, so a later catalog
-            change never moves what this customer was quoted. The platform fee isn&apos;t in the
-            list — it follows the ordering-point count below.
-          </p>
-        </div>
-
-        {catalogLoading && <p className={styles.sectionNote}>Loading catalog…</p>}
-        {catalogError && (
-          <div className={styles.error}>
-            Product catalog unavailable ({catalogError}). You can still send the rate quote — add
-            hardware later.
-          </div>
-        )}
-
-        {groups.map(group => (
-          <div key={group.type} className={styles.group}>
-            <div className={styles.groupTitle}>{group.label}</div>
-            {group.products.map(p => {
-              const n = qty[p.hubspotProductId] ?? 0;
-              return (
-                <div key={p.hubspotProductId} className={styles.productRow} data-picked={n > 0}>
-                  <div className={styles.productMain}>
-                    <div className={styles.productName}>{p.name}</div>
-                    <div className={styles.productPrice}>{priceLabel(p.price, p.billingFrequency)}</div>
-                  </div>
-                  <div className={styles.stepper}>
-                    <button
-                      type="button" className={styles.stepBtn} disabled={n === 0}
-                      onClick={() => setQtyFor(p.hubspotProductId, n - 1)}
-                      aria-label={`Remove one ${p.name}`}
-                    >−</button>
-                    <span className={styles.stepQty}>{n}</span>
-                    <button
-                      type="button" className={styles.stepBtn}
-                      onClick={() => setQtyFor(p.hubspotProductId, n + 1)}
-                      aria-label={`Add one ${p.name}`}
-                    >+</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ))}
-      </div>
-
-      <div className={styles.panel}>
-        <div className={styles.sectionHead}>
-          <h2 className={styles.sectionTitle}>Ordering Points</h2>
-          <p className={styles.sectionNote}>
-            Every place an order can be placed. Hardware is counted from the lines above; these
-            channels never appear on a hardware list, so they have to be declared here.
-          </p>
-        </div>
-
-        <div className={styles.channelGrid}>
-          {ORDER_POINT_CHANNELS.map(c => (
-            <label key={c.id} className={styles.channel} data-on={channels.includes(c.id)}>
-              <input
-                type="checkbox" checked={channels.includes(c.id)}
-                onChange={() => toggleChannel(c.id)} className={styles.channelBox}
-              />
-              <span className={styles.channelLabel}>{c.label}</span>
-              {c.note && <span className={styles.channelNote}>{c.note}</span>}
-            </label>
-          ))}
-        </div>
-
-        <div className={styles.countRow}>
-          <span className={styles.countLabel}>Ordering points</span>
-          <span className={styles.countValue}>{breakdown.orderPoints.total}</span>
-        </div>
-
-        {tierLine ? (
-          <div className={styles.tierBox} data-tier={breakdown.orderPoints.total > PLATFORM_TIER_BOUNDARY ? "large" : "small"}>
-            <div className={styles.tierName}>{tierLine.name}</div>
-            <div className={styles.tierPrice}>{priceLabel(tierLine.unitPrice, tierLine.billingFrequency)}</div>
-            <div className={styles.tierNote}>
-              {breakdown.orderPoints.total} ordering point{breakdown.orderPoints.total === 1 ? "" : "s"} →{" "}
-              {breakdown.orderPoints.total > PLATFORM_TIER_BOUNDARY
-                ? `6+ tier. One point fewer would price at the 1–${PLATFORM_TIER_BOUNDARY} tier.`
-                : `1–${PLATFORM_TIER_BOUNDARY} tier. One more point moves this to the 6+ tier.`}
-            </div>
-          </div>
-        ) : tier.status === "none_needed" ? (
-          <p className={styles.sectionNote}>
-            No platform fee yet — add hardware or a channel and the tier is selected automatically.
-          </p>
-        ) : tier.status === "food_truck" ? (
-          <p className={styles.sectionNote}>
-            {FOOD_TRUCK_PLATFORM_NAME} quoted, so the order-point tier isn&apos;t applied.
-          </p>
-        ) : (
-          <div className={styles.error}>
-            <strong>Platform fee missing.</strong> {breakdown.orderPoints.total} ordering points
-            require &ldquo;{tier.tierName}&rdquo;, which isn&apos;t in the HubSpot catalog (renamed,
-            archived, or the catalog didn&apos;t load). This quote can&apos;t be sent until that&apos;s
-            fixed — sending it would quote no platform fee at all.
-          </div>
-        )}
-
-        {breakdown.needsReview.map(r => (
-          <div key={r.name} className={styles.reviewNote}>
-            <strong>Needs review:</strong> {r.name} ×{r.qty} — {r.reason} Counted as 0 for now.
-          </div>
-        ))}
-        {breakdown.unclassified.length > 0 && (
-          <div className={styles.reviewNote}>
-            <strong>Unclassified hardware:</strong>{" "}
-            {breakdown.unclassified.map(u => `${u.name} ×${u.qty}`).join(", ")} — not in the
-            ordering-point rules, counted as 0. Check before sending.
-          </div>
-        )}
-      </div>
-
-      {quoteLines.length > 0 && (
-        <div className={styles.panel}>
-          <div className={styles.sectionHead}>
-            <h2 className={styles.sectionTitle}>Quote Totals</h2>
-            <p className={styles.sectionNote}>
-              Kept apart on purpose — one-time and recurring charges are different units and are
-              never added together.
-            </p>
-          </div>
-          <div className={styles.totalRow}>
-            <span className={styles.totalLabel}>Due once (hardware &amp; setup)</span>
-            <span className={styles.totalValue}>{fmt$(totals.oneTime)}</span>
-          </div>
-          {totals.recurring.map(r => (
-            <div key={r.frequency} className={styles.totalRow}>
-              <span className={styles.totalLabel}>Recurring, per {fmtFrequency(r.frequency)}</span>
-              <span className={styles.totalValue}>{fmt$(r.amount)}/{fmtFrequency(r.frequency)}</span>
-            </div>
-          ))}
-          <div className={styles.totalRow} data-emphasis="true">
-            <span className={styles.totalLabel}>All recurring, monthly equivalent</span>
-            <span className={styles.totalValue}>{fmt$(totals.monthlyEquivalent)}/mo</span>
-          </div>
-        </div>
-      )}
+      <ProductConfigurator
+        picks={picks}
+        channels={channels}
+        onPicksChange={setPicks}
+        onChannelsChange={setChannels}
+        onDerivedChange={setQuote}
+      />
 
       <div className={styles.panel}>
         <label className={styles.label}>Pricing Model</label>
@@ -558,15 +374,31 @@ function NewProspectFlow() {
             </button>
           ))}
         </div>
-        <div className={styles.marginRow}>
-          <span className={styles.marginLabel}>Margin Target</span>
-          <span className={styles.marginValue}>{fmtPct2(targetMargin)}</span>
-        </div>
-        <input
-          type="range" min="0.001" max="0.04" step="0.0005"
-          value={targetMargin}
-          onChange={e => setTargetMargin(parseFloat(e.target.value))}
-        />
+        {/* Rep-only. Collapsed by default and showing no figure in the header:
+            the rep often has the laptop turned toward the merchant. */}
+        <button
+          type="button"
+          className={styles.disclosureBtn}
+          aria-expanded={internalOpen}
+          aria-controls="prospect-internal"
+          onClick={() => setInternalOpen(o => !o)}
+        >
+          AIO Internal
+          <span className={styles.disclosureChevron} aria-hidden="true">▾</span>
+        </button>
+        {internalOpen && (
+          <div id="prospect-internal" className={styles.disclosureBody}>
+            <div className={styles.marginRow}>
+              <span className={styles.marginLabel}>Margin Target</span>
+              <span className={styles.marginValue}>{fmtPct2(targetMargin)}</span>
+            </div>
+            <input
+              type="range" min="0.001" max="0.04" step="0.0005"
+              value={targetMargin}
+              onChange={e => setTargetMargin(parseFloat(e.target.value))}
+            />
+          </div>
+        )}
       </div>
 
       {error && (

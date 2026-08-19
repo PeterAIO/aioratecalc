@@ -45,6 +45,10 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [pricing, setPricing]     = useState<RoleScopedPricing | null>(null);
+  // Shoulder-surfing guard: everything that reveals AIO's margin, revenue, cost
+  // basis or floor sits behind this and starts shut. The defaults above still
+  // apply while it's collapsed, so a rep who never opens it still gets a quote.
+  const [internalOpen, setInternalOpen] = useState(false);
 
   const vol = analysis.totalVolume || 1;
 
@@ -205,67 +209,82 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
 
         {/* Right: Controls */}
         <div className={styles.layoutSide}>
-          {/* Margin target */}
+          {/* Margin target — AIO-internal, so it stays collapsed until the rep
+              opens it, and the header carries no figure of its own. The rep
+              often has the laptop turned toward the merchant. */}
           <div className={styles.panel}>
-            <h2 className={styles.panelTitle}>AIO Margin Target</h2>
-            <div>
-              <div className={styles.sliderHeader}>
-                <span className={styles.sliderLabel}>Target</span>
-                <span className={styles.sliderValue}>{targetMargin == null ? "—" : fmtPct2(targetMargin)}</span>
-              </div>
-              <input
-                type="range" min="0.001" max="0.04" step="0.0005"
-                value={sliderVal}
-                disabled={targetMargin == null}
-                onChange={e => { setTarget(parseFloat(e.target.value)); setManual(""); }}
-              />
-              <div className={styles.sliderTicks}>
-                <span>0.10%</span><span>4.00%</span>
-              </div>
-            </div>
-            <div className={styles.fieldGroup}>
-              <label className={styles.fieldLabel}>Manual input (%)</label>
-              <input
-                type="number" min="0.01" max="4" step="0.01" placeholder="e.g. 0.80"
-                value={manualTarget}
-                onChange={e => { setManual(e.target.value); const v = parseFloat(e.target.value); if (!isNaN(v)) setTarget(v / 100); }}
-                className={styles.input}
-              />
-            </div>
-            {pricing && (
-              <>
-                <div className={styles.miniRow}>
-                  <span className={styles.miniRowLabel}>AIO Revenue</span>
-                  <span className={`${styles.miniRowValue} ${styles["value--accent"]}`}>{fmt$(pricing.aioRevenue)}/mo</span>
+            <button
+              type="button"
+              className={styles.disclosureBtn}
+              aria-expanded={internalOpen}
+              aria-controls="pricing-internal"
+              onClick={() => setInternalOpen(o => !o)}
+            >
+              AIO Internal
+              <span className={styles.disclosureChevron} aria-hidden="true">▾</span>
+            </button>
+            {internalOpen && (
+              <div id="pricing-internal" className={styles.disclosureBody}>
+              <div>
+                <div className={styles.sliderHeader}>
+                  <span className={styles.sliderLabel}>Target</span>
+                  <span className={styles.sliderValue}>{targetMargin == null ? "—" : fmtPct2(targetMargin)}</span>
                 </div>
-                {pricing.adyenCostRate != null && (
-                  <>
-                    <div className={styles.miniRow}>
-                      <span className={styles.miniRowLabel}>− {activeProcessor?.name || "Processor"} Cost</span>
-                      <span className={`${styles.miniRowValue} ${styles["value--warning"]}`}>{fmtPct2(pricing.adyenCostRate)}</span>
+                <input
+                  type="range" min="0.001" max="0.04" step="0.0005"
+                  value={sliderVal}
+                  disabled={targetMargin == null}
+                  onChange={e => { setTarget(parseFloat(e.target.value)); setManual(""); }}
+                />
+                <div className={styles.sliderTicks}>
+                  <span>0.10%</span><span>4.00%</span>
+                </div>
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Manual input (%)</label>
+                <input
+                  type="number" min="0.01" max="4" step="0.01" placeholder="e.g. 0.80"
+                  value={manualTarget}
+                  onChange={e => { setManual(e.target.value); const v = parseFloat(e.target.value); if (!isNaN(v)) setTarget(v / 100); }}
+                  className={styles.input}
+                />
+              </div>
+              {pricing && (
+                <>
+                  <div className={styles.miniRow}>
+                    <span className={styles.miniRowLabel}>AIO Revenue</span>
+                    <span className={`${styles.miniRowValue} ${styles["value--accent"]}`}>{fmt$(pricing.aioRevenue)}/mo</span>
+                  </div>
+                  {pricing.adyenCostRate != null && (
+                    <>
+                      <div className={styles.miniRow}>
+                        <span className={styles.miniRowLabel}>− {activeProcessor?.name || "Processor"} Cost</span>
+                        <span className={`${styles.miniRowValue} ${styles["value--warning"]}`}>{fmtPct2(pricing.adyenCostRate)}</span>
+                      </div>
+                      <div className={styles.miniRow}>
+                        <span className={styles.miniRowLabel}>= Net Margin to AIO</span>
+                        <span className={`${styles.miniRowValue} ${belowFloor ? styles["value--danger"] : styles["value--success"]}`}>{targetMargin == null ? "—" : fmtPct2(targetMargin - pricing.adyenCostRate)}</span>
+                      </div>
+                    </>
+                  )}
+                  {belowFloor && (
+                    <div className={styles.alertDanger}>
+                      <strong>Below Cost Floor.</strong> This margin would lose AIO money on this deal — raise your target.
                     </div>
-                    <div className={styles.miniRow}>
-                      <span className={styles.miniRowLabel}>= Net Margin to AIO</span>
-                      <span className={`${styles.miniRowValue} ${belowFloor ? styles["value--danger"] : styles["value--success"]}`}>{targetMargin == null ? "—" : fmtPct2(targetMargin - pricing.adyenCostRate)}</span>
+                  )}
+                  {belowMin && (
+                    <div className={styles.alertDanger}>
+                      <strong>Below margin floor.</strong> Raise your target — this is under AIO&rsquo;s minimum for {fmt$(pricing.marginFloor)}/mo of margin at this volume.
                     </div>
-                  </>
-                )}
-                {belowFloor && (
-                  <div className={styles.alertDanger}>
-                    <strong>Below Cost Floor.</strong> This margin would lose AIO money on this deal — raise your target.
-                  </div>
-                )}
-                {belowMin && (
-                  <div className={styles.alertDanger}>
-                    <strong>Below margin floor.</strong> Raise your target — this is under AIO&rsquo;s minimum for {fmt$(pricing.marginFloor)}/mo of margin at this volume.
-                  </div>
-                )}
-                {aboveMax && (
-                  <div className={styles.alertWarning}>
-                    Above the target ceiling of {fmtPct2(pricing.maxMargin)} for this volume tier — allowed, but the merchant may be overpaying.
-                  </div>
-                )}
-              </>
+                  )}
+                  {aboveMax && (
+                    <div className={styles.alertWarning}>
+                      Above the target ceiling of {fmtPct2(pricing.maxMargin)} for this volume tier — allowed, but the merchant may be overpaying.
+                    </div>
+                  )}
+                </>
+              )}
+              </div>
             )}
           </div>
 
@@ -325,7 +344,7 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
           disabled={loading || blocked || !pricing || targetMargin == null}
           onClick={generate}
         >
-          {loading ? "Generating Proposal…" : belowFloor ? "Below Cost Floor" : belowMin ? "Below Margin Floor" : "Generate Proposal →"}
+          {loading ? "Generating Proposal…" : blocked ? "Adjust Pricing to Continue" : "Generate Proposal →"}
         </button>
       </div>
     </div>
