@@ -246,12 +246,68 @@
   color: var(--ink);
 }
 
+/* Onboarding link row — same presentation as the prospect quote link. */
+.linkRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  text-align: left;
+}
+
+.linkCode {
+  flex: 1;
+  font-size: 0.85rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btnCopy {
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: var(--space-xs) var(--space-md);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: opacity 150ms var(--ease-out);
+}
+
+.btnCopy[data-copied="true"] { background: var(--success); }
+.btnCopy:hover { opacity: 0.92; }
+.btnCopy:active { transform: scale(0.97); }
+.btnCopy:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.linkNote {
+  margin: var(--space-sm) 0 0;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+.successActions {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--space-lg);
+}
+
 /* ---------- Reduced motion ---------- */
 
 @media (prefers-reduced-motion: reduce) {
   .input,
   .btnPrimary,
-  .btnSecondary {
+  .btnSecondary,
+  .btnCopy {
     transition-duration: 1ms;
   }
 }

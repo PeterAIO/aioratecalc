@@ -63,7 +63,10 @@ export async function listSubmissionsAction(): Promise<CustomerSubmission[]> {
 // bookkeeping only (mirrors how the lead_upload purpose uses these same
 // fields); the actual short-lived auth mechanism is the customerLoginTokens
 // row below, reusing the existing /api/customer/verify route unmodified.
-export async function sendMerchantOnboardingLinkAction(id: string): Promise<{ app: MerchantApplication; result: SendMagicLinkResult }> {
+// `url` is returned alongside `result` so the caller can always show the rep
+// the link itself — SendMagicLinkResult.devUrl is only populated when Resend
+// isn't configured, which would otherwise leave the rep with nothing to share.
+export async function sendMerchantOnboardingLinkAction(id: string): Promise<{ app: MerchantApplication; result: SendMagicLinkResult; url: string }> {
   const scope = await requireScope();
   const app = await postgresStorage.getApplication(scope, id);
   if (!app) throw new Error("Application not found");
@@ -87,9 +90,10 @@ export async function sendMerchantOnboardingLinkAction(id: string): Promise<{ ap
   await db.insert(customerLoginTokens).values({ email, token: loginToken, applicationId: id, expiresAt: loginExpiresAt });
 
   const base = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
-  const result = await sendMagicLinkEmail(email, `${base}/api/customer/verify?token=${loginToken}`);
+  const url = `${base}/api/customer/verify?token=${loginToken}`;
+  const result = await sendMagicLinkEmail(email, url);
 
-  return { app: updated, result };
+  return { app: updated, result, url };
 }
 
 // Admin-only: lets the admin dashboard show which rep owns each application

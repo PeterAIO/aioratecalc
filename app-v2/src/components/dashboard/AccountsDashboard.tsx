@@ -95,6 +95,10 @@ function AccountsDashboardInner({
   const [busyId, setBusyId]     = useState<string | null>(null);
   const [search, setSearch]     = useState("");
   const [tenantDraft, setTenantDraft] = useState("");
+  // The onboarding link just minted for one account, kept per-account so it
+  // can't leak onto the next row the rep opens.
+  const [sentLink, setSentLink] = useState<{ appId: string; url: string; sent: boolean } | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   // Tenant-linking (HubSpot Company picker for the selected account)
   const [tenantQuery, setTenantQuery]       = useState("");
@@ -150,8 +154,10 @@ function AccountsDashboardInner({
   const handleSendLink = async (app: MerchantApplication) => {
     setBusyId(app.id);
     try {
-      const { app: updated } = await sendMerchantOnboardingLinkAction(app.id);
+      const { app: updated, result, url } = await sendMerchantOnboardingLinkAction(app.id);
       updateOne(updated);
+      setSentLink({ appId: app.id, url, sent: result.sent });
+      setLinkCopied(false);
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to send onboarding link");
     }
@@ -452,6 +458,31 @@ function AccountsDashboardInner({
                       <button onClick={() => { setSelected(null); setSearch(""); }} className={styles.btnGhost}>Close</button>
                     </div>
                   </div>
+
+                  {/* The onboarding link the rep just minted. Shown in full with a
+                      copy affordance because email delivery (Resend) is optional —
+                      without this the "Send Onboarding Link" click surfaces nothing. */}
+                  {sentLink?.appId === selected.id && (
+                    <div>
+                      <div className={styles.detailFieldLabel} style={{ marginBottom: 8 }}>Merchant Onboarding Link</div>
+                      <div className={styles.linkRow}>
+                        <code className={styles.linkCode}>{sentLink.url}</code>
+                        <button
+                          className={styles.btnCopy}
+                          data-copied={linkCopied}
+                          onClick={() => { navigator.clipboard.writeText(sentLink.url); setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2000); }}
+                        >
+                          {linkCopied ? "Copied!" : "Copy"}
+                        </button>
+                      </div>
+                      <div className={styles.detailMeta} style={{ marginTop: 6 }}>
+                        {sentLink.sent
+                          ? `Emailed to ${selected.ownerContact?.email}. Expires in 30 minutes.`
+                          : "Email delivery isn't configured yet — send this link to the merchant yourself. It expires in 30 minutes."}
+                      </div>
+                    </div>
+                  )}
+
                   <div className={styles.detailGrid}>
                     {(isAdmin
                       ? [

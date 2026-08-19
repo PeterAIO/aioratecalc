@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { sendMerchantOnboardingLinkAction } from "@/lib/actions/applications";
 import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
 import styles from "./ApplyStep.module.css";
 
@@ -30,6 +31,9 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
   const [saving, setSaving] = useState(false);
   const [saved, setSaved]   = useState(false);
   const [err, setErr]       = useState<string | null>(null);
+  const [link, setLink]     = useState<{ url: string; sent: boolean } | null>(null);
+  const [linking, setLinking] = useState(false);
+  const [copied, setCopied]   = useState(false);
 
   const b = <T extends Record<string, unknown>>(setter: (fn: (prev: T) => T) => void) =>
     (k: keyof T) =>
@@ -66,6 +70,21 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
     setSaving(false);
   };
 
+  // The application is already persisted by the time this runs (handleSave
+  // awaits onSaved), so the same action the dashboard uses works here — this
+  // is just the earlier, in-flow moment to hand the rep the link.
+  const handleSendLink = async () => {
+    setLinking(true);
+    setErr(null);
+    try {
+      const { result, url } = await sendMerchantOnboardingLinkAction(app.id);
+      setLink({ url, sent: result.sent });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not create the onboarding link");
+    }
+    setLinking(false);
+  };
+
   const input = (label: string, val: string, onChange: (e: React.ChangeEvent<HTMLInputElement>) => void, placeholder = "", type = "text") => (
     <div className={styles.field}>
       <label className={styles.label}>{label}</label>
@@ -80,11 +99,39 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
         <h1 className={styles.successTitle}>Application Saved</h1>
         <p className={styles.successBody}>
           The merchant application for <strong>{biz.dba || biz.legalName}</strong> has been saved.
-          Phase 2 will send a magic link to the merchant to complete KYC via Adyen&apos;s hosted onboarding.
+          Send them their onboarding link — it signs them in to complete KYC on Adyen&apos;s hosted forms.
         </p>
-        <button onClick={onNewProposal} className={styles.btnPrimary}>
-          Start New Proposal
-        </button>
+        {err && <div className={styles.errorBanner}>{err}</div>}
+        {link ? (
+          <>
+            <div className={styles.linkRow}>
+              <code className={styles.linkCode}>{link.url}</code>
+              <button
+                onClick={() => { navigator.clipboard.writeText(link.url); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+                className={styles.btnCopy}
+                data-copied={copied}
+              >
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            </div>
+            <p className={styles.linkNote}>
+              {link.sent
+                ? `Emailed to ${owner.email}. The link expires in 30 minutes.`
+                : "Email delivery isn't configured yet — send this link to the merchant yourself. It expires in 30 minutes."}
+            </p>
+          </>
+        ) : (
+          <div className={styles.successActions}>
+            <button onClick={handleSendLink} disabled={linking} className={styles.btnPrimary}>
+              {linking ? "Creating link…" : "Send Onboarding Link"}
+            </button>
+          </div>
+        )}
+        <div className={styles.successActions}>
+          <button onClick={onNewProposal} className={styles.btnSecondary}>
+            Start New Proposal
+          </button>
+        </div>
       </div>
     );
   }
