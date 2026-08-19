@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getMyApplicationWithPayrollSyncAction } from "@/lib/actions/customer";
+import { getMyApplicationWithPayrollSyncAction, getMyQuoteAction } from "@/lib/actions/customer";
 import { getOnboardingModules } from "@/lib/onboardingModules";
 import ApplicationTabs from "@/components/customer/ApplicationTabs";
 import styles from "../../customer.module.css";
@@ -23,6 +23,9 @@ export default async function CustomerApplicationPage({ params }: { params: Prom
   }
 
   const modules = getOnboardingModules(app);
+  // Built here, server-side: leadQuote.ts pulls in pricing.ts, so only the
+  // finished CustomerSafeQuote may cross into the client tabs.
+  const quote = await getMyQuoteAction(id);
 
   return (
     <div className={styles.shell}>
@@ -36,7 +39,7 @@ export default async function CustomerApplicationPage({ params }: { params: Prom
         <p className={styles.subtitle}>
           Here&apos;s what&apos;s left to finish setting up your account.
         </p>
-        <ApplicationTabs app={app} modules={modules} />
+        <ApplicationTabs app={app} modules={modules} quote={quote} />
       </div>
     </div>
   );

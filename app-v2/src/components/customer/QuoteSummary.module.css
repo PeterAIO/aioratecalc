@@ -1,0 +1,174 @@
+/* Hallmark · genre: modern-minimal · design-system: design.md · designed-as-app
+ * The quote itself — headline stat, ticker, priced lines. Moved here verbatim
+ * from LeadQuoteView.module.css when the authenticated "Your Quote" tab started
+ * sharing the same render.
+ */
+
+/* ---------- Quote result (Stat-Led — headline number sits directly on the page) ---------- */
+
+.statWrap {
+  text-align: center;
+  margin-bottom: var(--space-xl);
+  animation: fadeUp 500ms var(--ease-out) both;
+}
+
+.statCaption {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 var(--space-xs);
+}
+
+.statHero {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--success);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-size: clamp(2.75rem, 6vw + 1rem, 4rem);
+  margin-bottom: var(--space-lg);
+}
+
+/* A quoted rate isn't a saving — don't dress it in the savings green. */
+.statHero[data-tone="rate"] { color: var(--ink); }
+
+.statTicker {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: var(--space-xl);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--rule);
+}
+
+.statTickerItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3xs);
+}
+
+.statTickerValue {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.statTickerLabel {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+.basisNote {
+  font-size: 0.82rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+  text-align: center;
+  margin: 0 0 var(--space-xl);
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- Quote lines (hardware, platform, services) ---------- */
+
+.lines { margin-bottom: var(--space-xl); }
+
+.lineGroup {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-whisper);
+  padding: var(--space-lg) var(--space-xl);
+  margin-bottom: var(--space-md);
+}
+
+.lineGroupTitle {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 var(--space-sm);
+}
+
+.lineRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-xs) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.lineName {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.lineNote {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  line-height: 1.5;
+  margin-top: var(--space-3xs);
+}
+
+.linePrice { text-align: right; flex-shrink: 0; }
+
+.linePriceMain {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.linePriceAlt {
+  font-size: 0.72rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lineTotalRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.lineTotalRow[data-emphasis="true"] { color: var(--ink); font-weight: 700; }
+
+.lineTotalValue {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lineTotalRow[data-emphasis="true"] .lineTotalValue { color: var(--accent-text); }
+
+.lineFootnote {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  line-height: 1.6;
+  margin: 0;
+  padding: 0 var(--space-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statWrap {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

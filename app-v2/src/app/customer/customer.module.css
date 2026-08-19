@@ -132,12 +132,23 @@
   transition: transform 250ms var(--ease-out);
 }
 
+/* The sliding pill is sized as a fraction of the strip, so the tabs have to be
+   equal width for it to land on them — hence flex: 1 on .tab below. */
+.tabs[data-count="3"]::before {
+  width: calc(33.3333% - var(--space-3xs));
+}
+
 .tabs[data-active="data"]::before {
   transform: translateX(100%);
 }
 
+.tabs[data-active="quote"]::before {
+  transform: translateX(200%);
+}
+
 .tab {
   position: relative;
+  flex: 1 1 0;
   z-index: 1;
   border: none;
   background: transparent;

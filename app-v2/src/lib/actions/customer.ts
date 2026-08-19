@@ -18,8 +18,11 @@ import {
   type PayrollSigner,
 } from "@/lib/adapters/check";
 import { pushToHubSpot } from "@/lib/adapters/hubspot";
+import { buildCustomerSafeQuote } from "@/lib/leadQuote";
 import { usStateCode } from "@/lib/utils";
-import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
+import type {
+  MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo, CustomerSafeQuote,
+} from "@/types/merchant";
 
 const LOGIN_TOKEN_TTL_MINUTES = 30;
 
@@ -88,6 +91,27 @@ export async function listMyApplicationsAction(): Promise<MerchantApplication[]>
 export async function getMyApplicationAction(id: string): Promise<MerchantApplication | null> {
   const { userId } = await requireCustomer();
   return postgresStorage.getApplicationForCustomer(userId, id);
+}
+
+// The quote the customer accepted, re-projected for their signed-in dashboard.
+// Loads through getApplicationForCustomer, which scopes on customerUserId, so
+// an id belonging to someone else simply doesn't resolve — same gate as
+// getMyApplicationAction. Returns the CustomerSafeQuote and nothing else: the
+// application row it was built from never crosses to the client.
+// Null means "no quote to show" — either the id isn't theirs, or the row has no
+// statement and no rep-entered configs to price from (hasQuoteBasis).
+export async function getMyQuoteAction(id: string): Promise<CustomerSafeQuote | null> {
+  const { userId } = await requireCustomer();
+  const app = await postgresStorage.getApplicationForCustomer(userId, id);
+  if (!app) return null;
+  return buildCustomerSafeQuote({
+    analysis: app.analysis,
+    quoteConfig: app.quoteConfig,
+    targetMargin: app.targetMargin,
+    pricingModel: app.pricingModel,
+    quoteLines: app.quoteLines,
+    orderPoints: app.orderPoints,
+  });
 }
 
 // Saves the customer's self-serve business/owner/processing/agreement

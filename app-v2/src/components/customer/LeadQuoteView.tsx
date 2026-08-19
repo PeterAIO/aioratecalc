@@ -1,9 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { CHANNEL_LABELS, isPlatformTierProduct } from "@/lib/quoting";
-import { fmt$, fmt$0, fmtFrequency, fmtPct2, monthlyEquivalent } from "@/lib/utils";
-import type { CustomerSafeQuote, QuoteLine } from "@/types/merchant";
+import type { CustomerSafeQuote } from "@/types/merchant";
+import QuoteSummary from "./QuoteSummary";
 import styles from "./LeadQuoteView.module.css";
 
 // The customer's view of a quote. Reached two ways — a quote the rep prepared
@@ -12,9 +11,9 @@ import styles from "./LeadQuoteView.module.css";
 // looks the same either way. It only ever receives a CustomerSafeQuote: no
 // margin, no cost, no floor, nothing derived from them.
 //
-// Quote lines and the ordering-point count ARE customer-safe — they're what's
-// printed on the paper quote. Totals arrive pre-computed from the server so
-// the "never sum across billing frequencies" rule has a single owner.
+// The quote itself renders through QuoteSummary, shared with the authenticated
+// "Your Quote" tab; this component owns the public page chrome and the accept
+// flow, which only exist on the lead link.
 
 type Props = {
   token: string;
@@ -64,15 +63,6 @@ export default function LeadQuoteView({
     setAccepting(false);
   };
 
-  const showSavings = quote.annualSavings !== null && quote.annualSavings > 0;
-
-  const oneTimeLines  = quote.lines.filter(l => l.billingFrequency === "one_time");
-  const recurringLines = quote.lines.filter(l => l.billingFrequency !== "one_time");
-  const points = quote.orderPoints;
-
-  const lineTotal = (l: QuoteLine) => l.unitPrice * l.qty;
-  const isPlatformLine = (l: QuoteLine) => isPlatformTierProduct(l.name);
-
   return (
     <div className={styles.page}>
       <div className={styles.container}>
@@ -81,132 +71,17 @@ export default function LeadQuoteView({
           <h1 className={styles.quoteBusiness}>{businessName || "Your Business"}</h1>
         </div>
 
-        <div className={styles.statWrap}>
-          {showSavings ? (
-            <>
-              <div className={styles.statCaption}>Estimated Annual Savings</div>
-              <div className={styles.statHero}>{fmt$(quote.annualSavings)}</div>
-              <div className={styles.statTicker}>
-                <div className={styles.statTickerItem}>
-                  <div className={styles.statTickerValue}>{fmt$(quote.monthlySavings)}</div>
-                  <div className={styles.statTickerLabel}>Monthly Savings</div>
-                </div>
-                <div className={styles.statTickerItem}>
-                  <div className={styles.statTickerValue}>{fmtPct2(quote.effectiveRate)}</div>
-                  <div className={styles.statTickerLabel}>New Effective Rate</div>
-                </div>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className={styles.statCaption}>Your AIO Effective Rate</div>
-              <div className={styles.statHero} data-tone="rate">{fmtPct2(quote.effectiveRate)}</div>
-              <div className={styles.statTicker}>
-                <div className={styles.statTickerItem}>
-                  <div className={styles.statTickerValue}>{fmt$(quote.projectedMonthlyCost)}</div>
-                  <div className={styles.statTickerLabel}>Estimated Monthly Cost</div>
-                </div>
-                <div className={styles.statTickerItem}>
-                  <div className={styles.statTickerValue}>{fmt$0(quote.monthlyVolume)}</div>
-                  <div className={styles.statTickerLabel}>Monthly Volume</div>
-                </div>
-                <div className={styles.statTickerItem}>
-                  <div className={styles.statTickerValue}>{fmt$(quote.averageTicket)}</div>
-                  <div className={styles.statTickerLabel}>Average Ticket</div>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-
-        {quote.basis === "config" && (
-          <p className={styles.basisNote}>
-            Priced on the volume and average ticket your AIO representative entered. Send us a recent
-            processing statement and we&apos;ll show you exactly what you&apos;d save against it.
-            {/* Never once accepted — the accepted quote's basis is frozen, and
-                the server refuses to replace it, so offering the upload would
-                be an affordance that leads nowhere. */}
-            {onUploadStatement && !accepted && (
-              <>
-                {" "}
-                <button type="button" onClick={onUploadStatement} className={styles.linkBtn}>
-                  Upload a statement instead
-                </button>
-              </>
-            )}
-          </p>
-        )}
-
-        {quote.lines.length > 0 && quote.lineTotals && (
-          <div className={styles.lines}>
-            {recurringLines.length > 0 && (
-              <section className={styles.lineGroup}>
-                <h2 className={styles.lineGroupTitle}>Ongoing</h2>
-                {recurringLines.map(l => (
-                  <div key={l.hubspotProductId} className={styles.lineRow}>
-                    <div>
-                      <div className={styles.lineName}>
-                        {l.name}{l.qty > 1 ? ` ×${l.qty}` : ""}
-                      </div>
-                      {isPlatformLine(l) && points && (
-                        <div className={styles.lineNote}>
-                          Based on {points.total} ordering point{points.total === 1 ? "" : "s"}
-                          {points.channels.length > 0 && (
-                            <> — including {points.channels.map(c => CHANNEL_LABELS[c] ?? c).join(", ").toLowerCase()}</>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    <div className={styles.linePrice}>
-                      <div className={styles.linePriceMain}>
-                        {fmt$(lineTotal(l))}/{fmtFrequency(l.billingFrequency)}
-                      </div>
-                      <div className={styles.linePriceAlt}>
-                        ~{fmt$(monthlyEquivalent(lineTotal(l), l.billingFrequency))}/mo
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {quote.lineTotals.recurring.map(r => (
-                  <div key={r.frequency} className={styles.lineTotalRow}>
-                    <span>Total per {fmtFrequency(r.frequency)}</span>
-                    <span className={styles.lineTotalValue}>{fmt$(r.amount)}/{fmtFrequency(r.frequency)}</span>
-                  </div>
-                ))}
-                <div className={styles.lineTotalRow} data-emphasis="true">
-                  <span>Monthly equivalent</span>
-                  <span className={styles.lineTotalValue}>{fmt$(quote.lineTotals.monthlyEquivalent)}/mo</span>
-                </div>
-              </section>
-            )}
-
-            {oneTimeLines.length > 0 && (
-              <section className={styles.lineGroup}>
-                <h2 className={styles.lineGroupTitle}>One-Time</h2>
-                {oneTimeLines.map(l => (
-                  <div key={l.hubspotProductId} className={styles.lineRow}>
-                    <div className={styles.lineName}>
-                      {l.name}{l.qty > 1 ? ` ×${l.qty}` : ""}
-                    </div>
-                    <div className={styles.linePrice}>
-                      <div className={styles.linePriceMain}>{fmt$(lineTotal(l))}</div>
-                    </div>
-                  </div>
-                ))}
-                <div className={styles.lineTotalRow} data-emphasis="true">
-                  <span>Total due once</span>
-                  <span className={styles.lineTotalValue}>{fmt$(quote.lineTotals.oneTime)}</span>
-                </div>
-              </section>
-            )}
-
-            <p className={styles.lineFootnote}>
-              Ongoing and one-time charges are listed separately because they bill on different
-              schedules — they aren&apos;t a single number. Processing fees are quoted above at your
-              effective rate.
-            </p>
-          </div>
-        )}
+        <QuoteSummary
+          quote={quote}
+          // Never once accepted — the accepted quote's basis is frozen, and
+          // the server refuses to replace it, so offering the upload would
+          // be an affordance that leads nowhere.
+          basisAction={onUploadStatement && !accepted ? (
+            <button type="button" onClick={onUploadStatement} className={styles.linkBtn}>
+              Upload a statement instead
+            </button>
+          ) : undefined}
+        />
 
         <div className={styles.panel}>
           {accepted ? (
