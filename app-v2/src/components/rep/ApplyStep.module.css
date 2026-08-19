@@ -113,34 +113,6 @@
   width: auto;
 }
 
-/* ---------- Agreement / checkboxes ---------- */
-
-.checkboxGroup {
-  margin-top: var(--space-lg);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.checkboxRow {
-  display: flex;
-  gap: var(--space-sm);
-  align-items: flex-start;
-  cursor: pointer;
-}
-
-.checkbox {
-  margin-top: 2px;
-  accent-color: var(--accent);
-  flex-shrink: 0;
-}
-
-.checkboxText {
-  font-size: 0.8125rem;
-  color: var(--ink-2);
-  line-height: 1.6;
-}
-
 /* ---------- Error / actions ---------- */
 
 .errorBanner {

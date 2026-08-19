@@ -216,6 +216,10 @@ function NewProposalFlow() {
         business: updated.business,
         ownerContact: updated.ownerContact,
         processing: updated.processing,
+        // Pass-through, never an origin: the Details step captures no consent,
+        // so this is whatever the record already held. Sending it back rather
+        // than null is what stops a rep reopening the deal from erasing consent
+        // the merchant has since given. See lib/consent.ts.
         agreement: updated.agreement,
       });
       setApp(saved);

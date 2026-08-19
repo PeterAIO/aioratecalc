@@ -1,14 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
+import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo } from "@/types/merchant";
 import styles from "./ApplyStep.module.css";
 
 // OPTIONAL step. The customer fills this same form for themselves on
 // /customer/applications/[id] (CustomerOnboardStep), which prefills from
-// app.business / ownerContact / processing / agreement — so everything the rep
-// types here is work the customer no longer has to do. Nothing here is
-// required to send the quote link; the rep can skip straight past it.
+// app.business / ownerContact / processing — so everything the rep types here
+// is work the customer no longer has to do. Nothing here is required to send
+// the quote link; the rep can skip straight past it.
+//
+// There is deliberately NO agreement section: consent is an act only the
+// merchant can perform, so this step cannot capture it and never writes it.
+// See lib/consent.ts.
 type Props = {
   app: MerchantApplication;
   onSaved: (app: MerchantApplication) => void | Promise<void>;
@@ -31,7 +35,6 @@ export default function ApplyStep({ app, onSaved, onBack, onSkip }: Props) {
     mcc: "", businessDescription: "", previouslyTerminated: "no", bankruptcy: "no",
     currentProcessor: initial?.currentProcessorName || "",
   });
-  const [agree, setAgree] = useState<Partial<AgreementInfo>>(app.agreement || { sigName: "", sigDate: "", termsAccepted: false, electronicConsentAccepted: false });
   const [saving, setSaving] = useState(false);
   const [err, setErr]       = useState<string | null>(null);
 
@@ -43,16 +46,15 @@ export default function ApplyStep({ app, onSaved, onBack, onSkip }: Props) {
   const setBizF  = b<Partial<BusinessInfo>>(setBiz as Parameters<typeof b>[0]);
   const setOwnerF = b<Partial<OwnerContact>>(setOwner as Parameters<typeof b>[0]);
   const setProcF = b<Partial<ProcessingInfo>>(setProc as Parameters<typeof b>[0]);
-  const setAgreeF = b<Partial<AgreementInfo>>(setAgree as Parameters<typeof b>[0]);
 
   const handleSave = async () => {
     setSaving(true);
     setErr(null);
     try {
-      // Nothing was authorized unless the rep actually signed/ticked, so an
-      // untouched agreement stays null rather than reaching the customer's
-      // form as a phantom pre-signed one.
-      const signed = !!(agree.sigName || agree.termsAccepted || agree.electronicConsentAccepted);
+      // `agreement` is absent on purpose — the spread carries whatever is
+      // already on the record (normally nothing, or the merchant's own consent
+      // if they've since given it) straight back out. This step can neither
+      // create consent nor destroy it.
       const updated: MerchantApplication = {
         ...app,
         stage: "proposal_sent",
@@ -60,7 +62,6 @@ export default function ApplyStep({ app, onSaved, onBack, onSkip }: Props) {
         business: biz as BusinessInfo,
         ownerContact: owner as OwnerContact,
         processing: proc as ProcessingInfo,
-        agreement: signed ? (agree as AgreementInfo) : null,
       };
       await onSaved(updated);
     } catch (e) {
@@ -82,7 +83,8 @@ export default function ApplyStep({ app, onSaved, onBack, onSkip }: Props) {
       <p className={styles.pageSubtitle}>
         Anything you fill in here is pre-filled on the merchant&apos;s own onboarding form, so all they
         have to do is confirm it. Skip it and they&apos;ll simply fill it in themselves. SSN, bank account,
-        and EIN are collected by Adyen directly — AIO never touches that data.
+        and EIN are collected by Adyen directly — AIO never touches that data. Accepting the terms is
+        the merchant&apos;s to do on their own form, so it isn&apos;t here.
       </p>
 
       {/* Business Info */}
@@ -167,30 +169,6 @@ export default function ApplyStep({ app, onSaved, onBack, onSkip }: Props) {
               <option value="yes">Yes</option>
             </select>
           </div>
-        </div>
-      </div>
-
-      {/* Agreement */}
-      <div className={styles.panel}>
-        <h2 className={styles.sectionTitle}>Authorization & Agreement</h2>
-        <p className={styles.hint}>
-          Only if the merchant is signing with you now. Left blank, they sign it themselves on their
-          own onboarding form.
-        </p>
-        {input("Authorized Signatory Name", agree.sigName || "", setAgreeF("sigName") as (e: React.ChangeEvent<HTMLInputElement>) => void, "Jane Doe")}
-        <div className={styles.checkboxGroup}>
-          <label className={styles.checkboxRow}>
-            <input type="checkbox" checked={agree.termsAccepted || false} onChange={setAgreeF("termsAccepted") as (e: React.ChangeEvent<HTMLInputElement>) => void} className={styles.checkbox} />
-            <span className={styles.checkboxText}>
-              I certify that the information provided is accurate. I authorize AIO to process payments for this merchant and to initiate onboarding with our processing partner.
-            </span>
-          </label>
-          <label className={styles.checkboxRow}>
-            <input type="checkbox" checked={agree.electronicConsentAccepted || false} onChange={setAgreeF("electronicConsentAccepted") as (e: React.ChangeEvent<HTMLInputElement>) => void} className={styles.checkbox} />
-            <span className={styles.checkboxText}>
-              I consent to electronic communications and agree that electronic records are legally binding. I understand that KYC verification will be completed by the merchant directly via secure Adyen-hosted forms.
-            </span>
-          </label>
         </div>
       </div>
 

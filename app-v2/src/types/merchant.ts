@@ -207,6 +207,13 @@ export type AgreementInfo = {
   sigDate: string;
   termsAccepted: boolean;
   electronicConsentAccepted: boolean;
+  // WHO performed this legal act. "customer" is the only value there is, because
+  // the merchant is the only party who may consent on their own behalf — a rep
+  // preparing the form has nothing it could write here. OPTIONAL because this is
+  // a stored JSON column: rows written before the field existed carry no actor,
+  // and an agreement whose origin can't be established is not the customer's.
+  // See lib/consent.ts — the rule, and why absence must read as "not consent".
+  actor?: "customer";
 };
 
 export type ProcessorTier = {
