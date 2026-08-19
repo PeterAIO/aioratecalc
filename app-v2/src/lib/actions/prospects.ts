@@ -3,12 +3,17 @@
 import { randomUUID } from "crypto";
 import { getEffectiveRole } from "@/lib/auth/getEffectiveRole";
 import { postgresStorage } from "@/lib/storage/postgresAdapter";
-import { getTenantCompany, type TenantCompany } from "@/lib/adapters/hubspot";
+import {
+  getCompanyOwnerContact, getCompanyProfile,
+  type HubspotCompanyProfile, type TenantCompany,
+} from "@/lib/adapters/hubspot";
+import { buildProspectPrefill, type ProspectPrefill } from "@/lib/hubspotPrefill";
 import { listQuotableProductsAction } from "@/lib/actions/catalog";
 import { hasQuoteBasis } from "@/lib/leadQuote";
 import { deriveOrderPoints, resolvePlatformTier, toQuoteLine } from "@/lib/quoting";
 import type {
-  MerchantApplication, OrderPoints, PricingModel, QuoteConfig, QuoteLine, StatementAnalysis, TenantLink,
+  MerchantApplication, OrderPoints, PricingModel, ProcessingInfo, QuoteConfig, QuoteLine,
+  StatementAnalysis, TenantLink,
 } from "@/types/merchant";
 
 const LINK_TTL_DAYS = 14;
@@ -19,21 +24,36 @@ const LINK_TTL_DAYS = 14;
 // stamp tenantLink onto the new application from day one, instead of the
 // manual/late attach flow in applications.ts. Read-only — never writes HubSpot.
 
-export type ProspectPrefillResult = { company: TenantCompany | null; error: string | null };
+// `company` stays a TenantCompany as far as callers are concerned (the profile
+// is a superset), so the tenant-link badge and the picker path are unaffected;
+// `prefill` is the new, mapped form data.
+export type ProspectPrefillResult = {
+  company: HubspotCompanyProfile | null;
+  prefill: ProspectPrefill | null;
+  error: string | null;
+};
 
 /**
+ * Everything the deep link can prefill, in one call: the Company profile, its
+ * owner Contact, and the mapping of both onto the app's own shapes.
+ *
  * Returns an error string instead of throwing so a bad id or missing token
- * degrades to an un-prefilled, un-linked form rather than a broken page.
+ * degrades to an un-prefilled, un-linked form rather than a broken page. The
+ * contact read is best-effort inside the adapter (it spans a second token and
+ * can 403), so a company with no readable contact still prefills the business
+ * half rather than failing the whole call.
  */
 export async function getHubspotCompanyForProspectAction(companyId: string): Promise<ProspectPrefillResult> {
   const effective = await getEffectiveRole();
   if (!effective) throw new Error("Not authenticated");
 
   try {
-    const company = await getTenantCompany(companyId);
-    return { company, error: company ? null : "HubSpot company not found" };
+    const company = await getCompanyProfile(companyId);
+    if (!company) return { company: null, prefill: null, error: "HubSpot company not found" };
+    const contact = await getCompanyOwnerContact(companyId);
+    return { company, prefill: buildProspectPrefill(company, contact), error: null };
   } catch (err) {
-    return { company: null, error: err instanceof Error ? err.message : "Could not reach HubSpot" };
+    return { company: null, prefill: null, error: err instanceof Error ? err.message : "Could not reach HubSpot" };
   }
 }
 
@@ -130,14 +150,21 @@ export async function createProspectAction(input: {
   const expiresAt = new Date(now.getTime() + LINK_TTL_DAYS * 24 * 60 * 60 * 1000);
 
   let tenantLink: TenantLink | null = null;
+  // The same HubSpot read also prefills business/owner details onto the new
+  // application, so whatever the CRM already knows reaches the customer's
+  // onboarding form instead of being asked for again. Derived here rather than
+  // accepted from the browser, for the same reason quote lines are.
+  let prefill: ProspectPrefill | null = null;
   // Surfaced on the success screen: the rep is told the prospect was created,
   // so they also have to be told the linkage they asked for wasn't.
   let warning: string | null = null;
   if (input.hubspotCompanyId) {
     try {
-      const company = await getTenantCompany(input.hubspotCompanyId);
-      if (company) tenantLink = tenantLinkFromCompany(company, effective.userId);
-      else warning = `HubSpot company ${input.hubspotCompanyId} wasn't found, so the prospect isn't linked — attach it manually.`;
+      const company = await getCompanyProfile(input.hubspotCompanyId);
+      if (company) {
+        tenantLink = tenantLinkFromCompany(company, effective.userId);
+        prefill = buildProspectPrefill(company, await getCompanyOwnerContact(input.hubspotCompanyId));
+      } else warning = `HubSpot company ${input.hubspotCompanyId} wasn't found, so the prospect isn't linked — attach it manually.`;
     } catch (err) {
       // HubSpot unreachable at submit time — create the prospect unlinked
       // rather than blocking prospect creation on a read-only enrichment call,
@@ -157,6 +184,17 @@ export async function createProspectAction(input: {
   const hasQuote = hasQuoteBasis({ analysis, quoteConfig, targetMargin: null, pricingModel: null });
 
   const { quoteLines, orderPoints } = await deriveQuoteLines(input.picks ?? [], input.channels ?? []);
+
+  // Only materialize a ProcessingInfo when HubSpot actually gave us something —
+  // an all-blank record would read as "the rep answered these" downstream.
+  const prefilledProcessing: ProcessingInfo | null =
+    prefill && Object.keys(prefill.processing).length
+      ? {
+          monthlyVolume: "", avgTicket: "", cardPresentPct: "", mcc: "",
+          businessDescription: "", previouslyTerminated: "no", bankruptcy: "no", currentProcessor: "",
+          ...prefill.processing,
+        }
+      : null;
 
   const app: MerchantApplication = {
     id: `prospect_${now.getTime()}`,
@@ -188,13 +226,20 @@ export async function createProspectAction(input: {
     customerLinkExpiresAt: expiresAt.toISOString(),
     analysis,
     proposal: null,
+    // HubSpot fills the blanks; what the rep actually typed always wins.
     business: {
-      legalName: input.merchantName, dba: input.merchantName, bizType: "llc",
+      bizType: "llc",
       address: "", city: "", state: "", zip: "", phone: "", website: "",
       yearsInBusiness: "", annualRevenue: "",
+      ...prefill?.business,
+      legalName: input.merchantName, dba: input.merchantName,
     },
-    ownerContact: { firstName: "", lastName: "", title: "", email: input.contactEmail, phone: "" },
-    processing: null,
+    ownerContact: {
+      firstName: "", lastName: "", title: "", phone: "",
+      ...prefill?.ownerContact,
+      email: input.contactEmail || prefill?.ownerContact.email || "",
+    },
+    processing: prefilledProcessing,
     agreement: null,
   };
 

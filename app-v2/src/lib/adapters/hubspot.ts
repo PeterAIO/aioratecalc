@@ -96,12 +96,13 @@ export type TenantCompany = {
 // on an associated Contact, which this companies-read-only token can't read).
 const TENANT_COMPANY_PROPS = ["name", "tenant_id", "adyen_account_holder_id", "mid", "phone", "location_email"];
 
+function clean(v: string | null | undefined): string | null {
+  const t = (v ?? "").trim();
+  return t === "" ? null : t;
+}
+
 function toTenantCompany(obj: { id: string; properties: Record<string, string | null> }): TenantCompany {
   const p = obj.properties;
-  const clean = (v: string | null | undefined) => {
-    const t = (v ?? "").trim();
-    return t === "" ? null : t;
-  };
   return {
     id: obj.id,
     name: clean(p.name) || "(unnamed company)",
@@ -148,6 +149,193 @@ export async function getTenantCompany(companyId: string): Promise<TenantCompany
   if (!res.ok) throw hubspotErr("HubSpot company fetch failed", res.status, await res.text());
   const data = await res.json() as { id: string; properties: Record<string, string | null> };
   return toTenantCompany(data);
+}
+
+// ── Phase F: prospect prefill from the Company record ───────────────────────
+// A rep arriving from the HubSpot deep link should get an application filled in
+// with everything the Company already knows. That's a WIDER read than the
+// tenant-link lookup above, so it's a sibling call rather than a widening of
+// TENANT_COMPANY_PROPS: `searchTenantCompanies` is a type-ahead picker that
+// doesn't want fourteen extra properties per hit, and the tenant-link snapshot
+// must keep reading exactly what it reads today.
+//
+// Property choice is driven by measured portal-wide fill rates (n=100), not by
+// what the schema offers. Deliberately NOT read, because they're empty portal
+// wide: legal_trading_name_as_registered_with_government, legal_*_address_*,
+// full_name, processing_volume, monthly_card_volume, of_locations, the FEIN
+// property, annualrevenue, founded_year. Note `moduels` — the typo is the real
+// internal name.
+export type HubspotCompanyProfile = TenantCompany & {
+  domain: string | null;
+  website: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;   // free text: "CA", "Ca", "California"
+  zip: string | null;
+  country: string | null; // free text: "USA", "United States", "US"
+  description: string | null;
+  industryType: string | null;  // "industrytype", labelled "Restaurant Type": hospitality | Food Truck | TSR | FD | …
+  cuisineType: string | null;   // Pizza | Mexican | Thai | …
+  ownershipType: string | null; // Inderpendant | Franchisee | Franchisor | Enterprise (sic — HubSpot's own spelling)
+  currentPos: string | null;    // Brink | Clover | Square | Toast | …
+  modules: string | null;       // "moduels", a checkbox enum: "POS;MPOS;Kiosk"
+};
+
+const COMPANY_PROFILE_PROPS = [
+  ...TENANT_COMPANY_PROPS,
+  "domain", "website", "address", "city", "state", "zip", "country", "description",
+  "industrytype", "cuisine_type", "ownership_type", "current_pos", "moduels",
+];
+
+function toCompanyProfile(obj: { id: string; properties: Record<string, string | null> }): HubspotCompanyProfile {
+  const p = obj.properties;
+  return {
+    ...toTenantCompany(obj),
+    domain: clean(p.domain),
+    website: clean(p.website),
+    address: clean(p.address),
+    city: clean(p.city),
+    state: clean(p.state),
+    zip: clean(p.zip),
+    country: clean(p.country),
+    description: clean(p.description),
+    industryType: clean(p.industrytype),
+    cuisineType: clean(p.cuisine_type),
+    ownershipType: clean(p.ownership_type),
+    currentPos: clean(p.current_pos),
+    modules: clean(p.moduels),
+  };
+}
+
+/** The wide read behind the prospect prefill. A superset of getTenantCompany. */
+export async function getCompanyProfile(companyId: string): Promise<HubspotCompanyProfile | null> {
+  const res = await fetch(
+    `${BASE}/crm/v3/objects/companies/${companyId}?properties=${COMPANY_PROFILE_PROPS.join(",")}`,
+    { headers: headers() }
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw hubspotErr("HubSpot company fetch failed", res.status, await res.text());
+  const data = await res.json() as { id: string; properties: Record<string, string | null> };
+  return toCompanyProfile(data);
+}
+
+// ── Owner contact (associated Contact) ──────────────────────────────────────
+// There is no contact-person property on a HubSpot Company; the owner lives on
+// an associated Contact. Two quirks drive the shape below:
+//   1. TOKEN SPLIT. /crm/v4 associations read fine on the general app's token,
+//      but reading contact PROPERTIES 403s on it and needs the billing app's
+//      token (verified live 2026-08-19). So this is two calls on two tokens.
+//   2. A company can have several contacts with different association labels.
+//      This portal defines "Business Owner" and "Location Liason" as
+//      USER_DEFINED labels alongside HubSpot's "Billing Contact" and "Contact
+//      with Primary Company" — pick the right one rather than the first.
+
+export type HubspotContact = {
+  id: string;
+  firstName: string | null;
+  lastName: string | null;
+  jobTitle: string | null;
+  email: string | null;
+  phone: string | null;
+  /** Which association label this contact was chosen on. Null when unlabelled. */
+  associationLabel: string | null;
+};
+
+// Best first. Anything not listed still qualifies (it's a real association),
+// it just sorts last — an unrecognised custom label beats no contact at all.
+const CONTACT_LABEL_PRIORITY = [
+  "Business Owner",
+  "Billing Contact",
+  "Contact with Primary Company",
+  "Location Liason", // sic — the portal's own spelling
+];
+
+export type CompanyAssociation = {
+  toObjectId: number | string;
+  associationTypes?: Array<{ label?: string | null }>;
+};
+
+/**
+ * Pure: which associated contact to prefill from. Kept separate from the fetch
+ * so the preference order is unit-testable without HubSpot.
+ */
+export function pickOwnerAssociation(
+  results: CompanyAssociation[]
+): { contactId: string; label: string | null } | null {
+  let best: { contactId: string; label: string | null; rank: number } | null = null;
+
+  for (const result of results) {
+    if (result?.toObjectId === undefined || result.toObjectId === null) continue;
+    const labels = (result.associationTypes ?? []).map(t => clean(t?.label)).filter((l): l is string => !!l);
+    // Rank on the contact's BEST label, so a contact that is both "Business
+    // Owner" and "Contact with Primary Company" is ranked as the owner.
+    let rank = CONTACT_LABEL_PRIORITY.length;
+    let label: string | null = labels[0] ?? null;
+    for (const l of labels) {
+      const i = CONTACT_LABEL_PRIORITY.indexOf(l);
+      if (i !== -1 && i < rank) { rank = i; label = l; }
+    }
+    if (!best || rank < best.rank) best = { contactId: String(result.toObjectId), label, rank };
+  }
+
+  return best ? { contactId: best.contactId, label: best.label } : null;
+}
+
+const CONTACT_PROPS = ["firstname", "lastname", "jobtitle", "email", "phone", "mobilephone"];
+
+/**
+ * Best-effort owner contact for a company. NEVER throws: this is enrichment on
+ * a page that must still render without it, and both calls have their own
+ * failure modes (missing billing token, 403, no contacts at all). A contact
+ * whose properties can't be read is still returned with its id and label —
+ * partial data beats none.
+ */
+export async function getCompanyOwnerContact(companyId: string): Promise<HubspotContact | null> {
+  let picked: { contactId: string; label: string | null } | null = null;
+  try {
+    const res = await fetch(`${BASE}/crm/v4/objects/companies/${companyId}/associations/contacts`, {
+      headers: headers(),
+    });
+    if (!res.ok) {
+      console.warn("getCompanyOwnerContact: association read failed", companyId, res.status);
+      return null;
+    }
+    const data = await res.json() as { results?: CompanyAssociation[] };
+    picked = pickOwnerAssociation(data.results ?? []);
+  } catch (err) {
+    console.warn("getCompanyOwnerContact: association read errored", companyId, err);
+    return null;
+  }
+  if (!picked) return null;
+
+  const empty: HubspotContact = {
+    id: picked.contactId, firstName: null, lastName: null, jobTitle: null,
+    email: null, phone: null, associationLabel: picked.label,
+  };
+
+  try {
+    const res = await fetch(
+      `${BASE}/crm/v3/objects/contacts/${picked.contactId}?properties=${CONTACT_PROPS.join(",")}`,
+      { headers: billingHeaders() }
+    );
+    if (!res.ok) {
+      console.warn("getCompanyOwnerContact: contact read failed", picked.contactId, res.status);
+      return empty;
+    }
+    const data = await res.json() as { properties: Record<string, string | null> };
+    const p = data.properties;
+    return {
+      ...empty,
+      firstName: clean(p.firstname),
+      lastName: clean(p.lastname),
+      jobTitle: clean(p.jobtitle),
+      email: clean(p.email),
+      phone: clean(p.phone) ?? clean(p.mobilephone),
+    };
+  } catch (err) {
+    console.warn("getCompanyOwnerContact: contact read errored", picked.contactId, err);
+    return empty;
+  }
 }
 
 // ── Product catalog ─────────────────────────────────────────────────────────
