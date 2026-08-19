@@ -10,6 +10,7 @@
 
 import type { ProspectPrefill } from "@/lib/hubspotPrefill";
 import type { AgreementInfo, BusinessInfo, MerchantApplication, OwnerContact, ProcessingInfo } from "@/types/merchant";
+import { asCustomerConsent, isCustomerConsent } from "@/lib/consent";
 
 /** Empty strings are how the app persists "nobody answered this" — never a value. */
 function blank(v: string | null | undefined): boolean {
@@ -240,7 +241,10 @@ export type RecordedConsent = {
  * agreement is not consent, and falls back to the fresh, unticked form.
  */
 export function recordedConsent(agreement: AgreementInfo | null | undefined): RecordedConsent | null {
-  if (!agreement?.termsAccepted || !agreement.electronicConsentAccepted) return null;
+  // Only the merchant can consent, and only both-ticked consent counts. An
+  // agreement with no recorded actor — every row written before `actor`
+  // existed, including any a rep ticked — is NOT replayable: see lib/consent.ts.
+  if (!isCustomerConsent(agreement)) return null;
   return { agreement, dateLabel: consentDateLabel(agreement.sigDate) };
 }
 
@@ -280,7 +284,10 @@ export function agreementToSubmit(
   today: string = consentDateNow()
 ): AgreementInfo {
   if (recorded && !consentTouched) return recorded.agreement;
-  return { ...form, sigDate: today };
+  // Consent given here, now, by the merchant themselves — the only party who
+  // may. The replay branch above needs no stamp: recordedConsent only returns
+  // agreements that already carry one.
+  return asCustomerConsent({ ...form, sigDate: today });
 }
 
 /** Drops blank fields so a persisted record can't overwrite a real value with "". */

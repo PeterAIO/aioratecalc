@@ -271,7 +271,7 @@ describe("customerOnboardInitial", () => {
 
 const SIGNED: AgreementInfo = {
   sigName: "Jane Doe", sigDate: "2026-08-19",
-  termsAccepted: true, electronicConsentAccepted: true,
+  termsAccepted: true, electronicConsentAccepted: true, actor: "customer",
 };
 
 describe("recordedConsent", () => {
@@ -308,6 +308,20 @@ describe("recordedConsent", () => {
       expect(r?.dateLabel).toBeNull();
     }
   });
+
+  it("refuses to replay a legacy row with no recorded actor, even both-ticked", () => {
+    // Every agreement written before `actor` existed, including any a rep
+    // ticked pre-0bf5b66, looks exactly like this.
+    const { actor, ...legacy } = SIGNED;
+    expect(recordedConsent(legacy as AgreementInfo)).toBeNull();
+  });
+
+  it("refuses to replay an agreement with an unexpected actor value, even both-ticked", () => {
+    // `actor` has exactly one legal value, so this simulates data from before
+    // the type existed — the cast is the point, not a workaround.
+    const tampered = { ...SIGNED, actor: "rep" } as unknown as AgreementInfo;
+    expect(recordedConsent(tampered)).toBeNull();
+  });
 });
 
 describe("agreementToSubmit", () => {
@@ -317,7 +331,9 @@ describe("agreementToSubmit", () => {
   };
 
   it("dates a first consent today", () => {
-    expect(agreementToSubmit(null, FORM, false, "2026-09-01")).toEqual({ ...FORM, sigDate: "2026-09-01" });
+    expect(agreementToSubmit(null, FORM, false, "2026-09-01")).toEqual({
+      ...FORM, sigDate: "2026-09-01", actor: "customer",
+    });
   });
 
   it("leaves untouched recorded consent exactly as it was", () => {
@@ -336,7 +352,7 @@ describe("agreementToSubmit", () => {
     const reconsented = agreementToSubmit(r, { ...FORM, sigName: "Jane A. Doe" }, true, "2026-09-01");
     expect(reconsented).toEqual({
       sigName: "Jane A. Doe", sigDate: "2026-09-01",
-      termsAccepted: true, electronicConsentAccepted: true,
+      termsAccepted: true, electronicConsentAccepted: true, actor: "customer",
     });
   });
 
@@ -346,6 +362,17 @@ describe("agreementToSubmit", () => {
     const r = recordedConsent(SIGNED)!;
     const withdrawn = agreementToSubmit(r, { ...FORM, termsAccepted: false }, true, "2026-09-01");
     expect(withdrawn.termsAccepted).toBe(false);
+  });
+
+  it("stamps fresh consent as the customer's own act", () => {
+    expect(agreementToSubmit(null, FORM, false, "2026-09-01").actor).toBe("customer");
+  });
+
+  it("returns replayed consent by identity, without re-stamping it", () => {
+    const r = recordedConsent(SIGNED)!;
+    const replayed = agreementToSubmit(r, FORM, false, "2026-09-01");
+    expect(replayed).toBe(SIGNED);
+    expect(replayed.actor).toBe("customer"); // already there on the record — not applied here
   });
 });
 
