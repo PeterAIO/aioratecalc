@@ -1,6 +1,7 @@
 import { parseJSON } from "./utils";
 import type { StatementAnalysis, ProposalOutput, PricingModel, ProposedRates } from "@/types/merchant";
 import { derivePricing, blendedInterchangeEstimate, type FeeOverrides } from "./pricing";
+import type { DebugTrace } from "./debugTrace";
 
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-sonnet-4-6";
@@ -13,9 +14,20 @@ function apiKey(): string {
 
 export async function analyzeStatement(
   fileData: string,
-  mediaType: string
+  mediaType: string,
+  trace?: DebugTrace
 ): Promise<StatementAnalysis> {
   const isImage = mediaType.startsWith("image/");
+
+  // Rough decoded byte size of the base64 payload (4 base64 chars ≈ 3 bytes).
+  const fileBytes = Math.round((fileData?.length || 0) * 0.75);
+  trace?.step("request → Claude", {
+    model: MODEL,
+    maxTokens: 1000,
+    mediaType,
+    sentAs: isImage ? "image" : "document (PDF)",
+    fileKB: Math.round(fileBytes / 1024),
+  });
 
   const res = await fetch(ANTHROPIC_API, {
     method: "POST",
@@ -119,28 +131,58 @@ Use 0 for unknown numerics. Never null.`,
 
   const data = await res.json();
   if (data.type === "error" || data.error) {
+    trace?.step("Claude API error", data.error || data);
     throw new Error(data.error?.message || JSON.stringify(data.error || data));
   }
 
   const rawText = (data.content as { text?: string }[])?.map(b => b.text || "").join("") || "";
+  trace?.step("raw Claude response", {
+    stopReason: data.stop_reason,
+    usage: data.usage,
+    text: rawText,
+  });
+
   const parsed = parseJSON(rawText) as Partial<StatementAnalysis> | null;
-  if (!parsed) throw new Error("Could not parse statement analysis");
+  if (!parsed) {
+    trace?.step("parse failed", "parseJSON() could not extract a JSON object from the raw response above");
+    throw new Error("Could not parse statement analysis");
+  }
+  // Snapshot of exactly what Claude extracted, BEFORE any local math touches it —
+  // this is the line that tells us whether a bad number came from the model or
+  // from our normalization/back-calc below.
+  trace?.step("parsed JSON (pre-normalization)", parsed);
 
   // Normalize rate fields: >0.5 is likely a percentage integer, convert to decimal
   const rateFields: (keyof StatementAnalysis)[] = [
     "effectiveRate", "interchangeRate", "processorMarkup", "statedMarkupRate",
     "cardPresentPct", "cardNotPresentPct", "rewardCardPct", "corporateCardPct",
   ];
+  const rescaled: Record<string, string> = {};
   rateFields.forEach(f => {
     const v = parsed[f] as number | undefined;
-    if (v != null && v > 0.5) (parsed as Record<string, number>)[f as string] = v / 100;
+    if (v != null && v > 0.5) {
+      (parsed as Record<string, number>)[f as string] = v / 100;
+      rescaled[f as string] = `${v} → ${v / 100} (looked like a percent integer, ÷100)`;
+    }
   });
+  if (Object.keys(rescaled).length) trace?.step("rate fields rescaled (>0.5 ÷100)", rescaled);
 
   const vol  = (parsed.totalVolume  || 0) as number;
   const txns = (parsed.totalTransactions || 0) as number;
 
   // IC+ where interchange is not itemized — recalculate from stated rates
   if (parsed.interchangeNotShown && vol > 0) {
+    trace?.step("RULE 1: IC+ interchange back-calc (interchangeNotShown=true)", {
+      inputs: {
+        totalFees: parsed.totalFees,
+        totalVolume: vol,
+        totalTransactions: txns,
+        statedMarkupRate: parsed.statedMarkupRate,
+        statedPerTxnFee: parsed.statedPerTxnFee,
+        processorMarkup: parsed.processorMarkup,
+        otherFees: parsed.otherFees,
+      },
+    });
     const markupRate = (parsed.statedMarkupRate || parsed.processorMarkup || 0) as number;
     const perTxnFee  = (parsed.statedPerTxnFee  || 0) as number;
     const calcMarkup = vol * markupRate + txns * perTxnFee;
@@ -150,6 +192,13 @@ Use 0 for unknown numerics. Never null.`,
     parsed.interchangeFees = Math.max(0, backCalcIC);
     parsed.interchangeRate = parsed.interchangeFees / vol;
     if ((parsed.totalFees || 0) > 0) parsed.effectiveRate = (parsed.totalFees as number) / vol;
+    trace?.step("RULE 1 result", {
+      "processorFees (markup $) = vol×rate + txns×perTxn": parsed.processorFees,
+      "interchangeFees = totalFees − markup − other": `${backCalcIC} → clamped ${parsed.interchangeFees}`,
+      interchangeRate: parsed.interchangeRate,
+      effectiveRate: parsed.effectiveRate,
+      warning: backCalcIC < 0 ? "back-calc went NEGATIVE — stated markup exceeds total fees; check the extracted totalFees / stated rate" : undefined,
+    });
   }
 
   // Normalize volume-derived pcts
@@ -183,9 +232,16 @@ Use 0 for unknown numerics. Never null.`,
     const cnpPct = (rawCp > 0 || rawCnp > 0) ? (rawCnp || 1 - rawCp) : 0.1;
     parsed.interchangeRate = blendedInterchangeEstimate(cpPct, cnpPct);
     parsed.icEstimated = true;
+    trace?.step("interchange ESTIMATED (flat/tiered, not itemized)", {
+      cpPct, cnpPct,
+      estimatedInterchangeRate: parsed.interchangeRate,
+      note: "Statement bundles interchange; used 2.10% CP / 2.50% CNP blended estimate",
+    });
   }
 
   parsed.currentMargin = ((parsed.effectiveRate || 0) as number) - ((parsed.interchangeRate || 0) as number);
+
+  trace?.step("final analysis (post-normalization)", parsed);
 
   return parsed as StatementAnalysis;
 }

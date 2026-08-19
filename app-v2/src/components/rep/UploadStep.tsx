@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useRef } from "react";
+import DebugLogPanel from "@/components/dev/DebugLogPanel";
+import type { DebugTraceData } from "@/lib/debugTrace";
 import styles from "./UploadStep.module.css";
 
 type Props = {
-  onAnalyzed: (analysis: Record<string, unknown>) => void;
+  onAnalyzed: (analysis: Record<string, unknown>, debug: DebugTraceData | null) => void;
 };
 
 export default function UploadStep({ onAnalyzed }: Props) {
@@ -13,6 +15,7 @@ export default function UploadStep({ onAnalyzed }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState<string | null>(null);
+  const [debug, setDebug]       = useState<DebugTraceData | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const readFile = (f: File, cb: (data: string) => void) => {
@@ -31,6 +34,7 @@ export default function UploadStep({ onAnalyzed }: Props) {
     if (!fileData || !file) return;
     setLoading(true);
     setError(null);
+    setDebug(null);
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
@@ -38,8 +42,12 @@ export default function UploadStep({ onAnalyzed }: Props) {
         body: JSON.stringify({ fileData, mediaType: file.type }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Analysis failed");
-      onAnalyzed(data.analysis);
+      // The API returns `debug` on success AND on failure — surface it either way.
+      if (!res.ok) {
+        setDebug(data.debug ?? null);
+        throw new Error(data.error || "Analysis failed");
+      }
+      onAnalyzed(data.analysis, data.debug ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed");
     }
@@ -107,6 +115,9 @@ export default function UploadStep({ onAnalyzed }: Props) {
           </>
         ) : "Analyze Statement →"}
       </button>
+
+      {/* When analysis fails we stay on this screen, so show the trace here. */}
+      {error && <DebugLogPanel trace={debug} />}
     </div>
   );
 }

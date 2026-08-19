@@ -8,7 +8,9 @@ import AnalysisStep  from "@/components/rep/AnalysisStep";
 import PricingStep   from "@/components/rep/PricingStep";
 import ProposalStep  from "@/components/rep/ProposalStep";
 import ApplyStep     from "@/components/rep/ApplyStep";
+import DebugLogPanel from "@/components/dev/DebugLogPanel";
 import type { MerchantApplication, StatementAnalysis, ProposalOutput, Processor, ProcessorTier, AppSettings } from "@/types/merchant";
+import type { DebugTraceData } from "@/lib/debugTrace";
 import styles from "./proposals-new.module.css";
 
 const STEPS = ["Upload", "Analysis", "Pricing", "Proposal", "Apply"] as const;
@@ -62,6 +64,9 @@ function NewProposalFlow() {
   const [app, setApp]             = useState<MerchantApplication>(newApp());
   const [settings, setSettings]   = useState<AppSettings | null>(null);
   const [loading, setLoading]     = useState<boolean>(!!resumeId);
+  // Debug trace from the last /api/analyze call. Session-only (not persisted to
+  // the DB), so it's present after a fresh analysis and absent on resume.
+  const [analyzeDebug, setAnalyzeDebug] = useState<DebugTraceData | null>(null);
 
   useEffect(() => {
     getSettingsAction().then(s => setSettings(s)).catch(() => {});
@@ -90,8 +95,9 @@ function NewProposalFlow() {
   const activeTier: ProcessorTier | null =
     activeProcessor?.tiers?.find(t => t.isDefault) ?? activeProcessor?.tiers?.[0] ?? null;
 
-  const handleAnalyzed = async (rawAnalysis: Record<string, unknown>) => {
+  const handleAnalyzed = async (rawAnalysis: Record<string, unknown>, debug: DebugTraceData | null) => {
     const analysis = rawAnalysis as StatementAnalysis;
+    setAnalyzeDebug(debug);
     const updated: MerchantApplication = { ...app, analysis, stage: "analysis", updatedAt: new Date().toISOString() };
     const saved = await saveApplicationAction(updated);
     setApp(saved);
@@ -112,6 +118,7 @@ function NewProposalFlow() {
 
   const reset = () => {
     setApp(newApp());
+    setAnalyzeDebug(null);
     setStep(0);
   };
 
@@ -149,13 +156,16 @@ function NewProposalFlow() {
       {/* Step content */}
       {step === 0 && <UploadStep onAnalyzed={handleAnalyzed} />}
       {step === 1 && app.analysis && (
-        <AnalysisStep
-          analysis={app.analysis}
-          activeProcessor={activeProcessor}
-          activeTier={activeTier}
-          onBack={() => setStep(0)}
-          onContinue={() => setStep(2)}
-        />
+        <>
+          <AnalysisStep
+            analysis={app.analysis}
+            activeProcessor={activeProcessor}
+            activeTier={activeTier}
+            onBack={() => setStep(0)}
+            onContinue={() => setStep(2)}
+          />
+          <DebugLogPanel trace={analyzeDebug} />
+        </>
       )}
       {step === 2 && app.analysis && (
         <PricingStep
