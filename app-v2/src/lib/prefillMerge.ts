@@ -9,7 +9,7 @@
 // Nothing here may import @/lib/pricing — these run in client components.
 
 import type { ProspectPrefill } from "@/lib/hubspotPrefill";
-import type { BusinessInfo, MerchantApplication, OwnerContact, ProcessingInfo } from "@/types/merchant";
+import type { AgreementInfo, BusinessInfo, MerchantApplication, OwnerContact, ProcessingInfo } from "@/types/merchant";
 
 /** Empty strings are how the app persists "nobody answered this" — never a value. */
 function blank(v: string | null | undefined): boolean {
@@ -177,8 +177,9 @@ export type CustomerOnboardInitial = Sections & {
  * Empty strings count as NOT filled: the app persists whole `business` records
  * with blank fields, and a blank that claims to be prefilled is a phantom.
  *
- * `agreement` is deliberately absent. Consent is never carried forward — see
- * CustomerOnboardStep.
+ * `agreement` is deliberately absent. Consent is never PREFILLED — see
+ * recordedConsent below for the separate, explicit handling of consent that
+ * was already given.
  */
 export function customerOnboardInitial(
   app: Pick<MerchantApplication, "analysis" | "business" | "ownerContact" | "processing">
@@ -209,6 +210,77 @@ export function customerOnboardInitial(
     .map(([path]) => path);
 
   return { business, ownerContact, processing, prefilled };
+}
+
+// ── Customer side: consent already on record ────────────────────────────────
+//
+// Two different things share the word "prefill" here, and only one of them is
+// ever allowed for consent:
+//
+//   PREFILLING consent — putting a tick in a box nobody ticked — is never OK.
+//   customerOnboardInitial has no `agreement` section for exactly that reason.
+//
+//   REPLAYING recorded consent — showing a customer who already consented that
+//   they did, on the edit they came back to make — is a statement of fact, and
+//   making them re-consent to fix a typo both adds work and misrepresents the
+//   record.
+
+export type RecordedConsent = {
+  /**
+   * The stored agreement, replayed verbatim. The submit gate still requires
+   * both booleans; this satisfies it from the record instead of weakening it.
+   */
+  agreement: AgreementInfo;
+  /** When consent was given, or null when the record carries no usable date. */
+  dateLabel: string | null;
+};
+
+/**
+ * Is there consent on record? Both booleans must be true — a half-ticked
+ * agreement is not consent, and falls back to the fresh, unticked form.
+ */
+export function recordedConsent(agreement: AgreementInfo | null | undefined): RecordedConsent | null {
+  if (!agreement?.termsAccepted || !agreement.electronicConsentAccepted) return null;
+  return { agreement, dateLabel: consentDateLabel(agreement.sigDate) };
+}
+
+/**
+ * "August 19, 2026", or null when the stored date is missing or unparseable —
+ * a date we can't read must degrade to "consent is on file" rather than become
+ * "Invalid Date" or a date nobody recorded. Locale and time zone are pinned so
+ * the server render and the client hydration produce the same string.
+ */
+function consentDateLabel(sigDate: string | null | undefined): string | null {
+  const raw = (sigDate ?? "").trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toLocaleDateString("en-US", {
+    year: "numeric", month: "long", day: "numeric", timeZone: "UTC",
+  });
+}
+
+/** Today, in the YYYY-MM-DD form consent dates are stored in. */
+function consentDateNow(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * THE RULE: the recorded consent date is a fact about when consent was given,
+ * so an edit must not silently rewrite it.
+ *
+ * Untouched recorded consent goes back exactly as it came. A fresh consent, or
+ * a recorded one the customer reopened and changed, is consent given now — and
+ * gets today's date.
+ */
+export function agreementToSubmit(
+  recorded: RecordedConsent | null,
+  form: AgreementInfo,
+  consentTouched: boolean,
+  today: string = consentDateNow()
+): AgreementInfo {
+  if (recorded && !consentTouched) return recorded.agreement;
+  return { ...form, sigDate: today };
 }
 
 /** Drops blank fields so a persisted record can't overwrite a real value with "". */

@@ -164,6 +164,54 @@
   line-height: 1.6;
 }
 
+/* ---------- Recorded consent ---------- */
+
+/* Consent already given, shown as the fact it is instead of two empty boxes
+   demanding it again. Quiet by design: it's a receipt, not a call to action. */
+.consentRecord {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xs);
+}
+
+.consentRecordText {
+  font-size: 0.8125rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.consentRecordMark {
+  color: var(--success);
+  font-weight: 700;
+  margin-right: var(--space-2xs);
+}
+
+.linkBtn {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: color 150ms var(--ease-out);
+}
+
+.linkBtn:hover {
+  color: var(--ink);
+}
+
+.linkBtn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 /* ---------- Error / actions ---------- */
 
 .errorBanner {
@@ -274,7 +322,8 @@
 @media (prefers-reduced-motion: reduce) {
   .input,
   .btnPrimary,
-  .btnSecondary {
+  .btnSecondary,
+  .linkBtn {
     transition-duration: 1ms;
   }
 }

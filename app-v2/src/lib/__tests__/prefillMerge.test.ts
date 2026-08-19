@@ -1,15 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  agreementToSubmit,
   customerOnboardInitial,
   flattenSections,
   isFromHubspot,
   mergeProspectPrefill,
   prefillCarryoverLabels,
+  recordedConsent,
   NO_PREFILL_APPLIED,
   type AppliedProspectPrefill,
 } from "@/lib/prefillMerge";
 import type { ProspectPrefill } from "@/lib/hubspotPrefill";
-import type { MerchantApplication, StatementAnalysis } from "@/types/merchant";
+import type { AgreementInfo, MerchantApplication, StatementAnalysis } from "@/types/merchant";
 
 function prefill(over: Partial<ProspectPrefill> = {}): ProspectPrefill {
   return {
@@ -251,10 +253,99 @@ describe("customerOnboardInitial", () => {
     expect(r.processing.mcc).toBe("5812");
   });
 
-  it("never carries an agreement forward — consent is given on the visit", () => {
-    const r = customerOnboardInitial(NO_SOURCE) as Record<string, unknown>;
+  // The invariant this guards is about the PREFILL mechanism, not about
+  // consent in general: nothing that flows through customerOnboardInitial may
+  // ever put a tick in a consent box or claim a consent field was "pre-filled".
+  // Consent already GIVEN is replayed through recordedConsent instead — a
+  // separate, explicit door, tested below.
+  it("never carries an agreement forward, even when one is on the record", () => {
+    const source = { ...NO_SOURCE, agreement: SIGNED } as OnboardSource;
+    const r = customerOnboardInitial(source) as Record<string, unknown>;
     expect(r.agreement).toBeUndefined();
-    expect(customerOnboardInitial(NO_SOURCE).prefilled.some(p => p.startsWith("agreement."))).toBe(false);
+    expect(customerOnboardInitial(source).prefilled.some(p => p.startsWith("agreement."))).toBe(false);
+    expect(Object.keys(flattenSections(customerOnboardInitial(source))).some(k => k.startsWith("agreement."))).toBe(false);
+  });
+});
+
+// ── Customer side: consent already on record ────────────────────────────────
+
+const SIGNED: AgreementInfo = {
+  sigName: "Jane Doe", sigDate: "2026-08-19",
+  termsAccepted: true, electronicConsentAccepted: true,
+};
+
+describe("recordedConsent", () => {
+  it("finds nothing to replay when there's no agreement", () => {
+    expect(recordedConsent(null)).toBeNull();
+    expect(recordedConsent(undefined)).toBeNull();
+  });
+
+  it("treats a half-ticked agreement as no consent at all", () => {
+    expect(recordedConsent({ ...SIGNED, electronicConsentAccepted: false })).toBeNull();
+    expect(recordedConsent({ ...SIGNED, termsAccepted: false })).toBeNull();
+  });
+
+  it("replays both-ticked consent verbatim, with its date", () => {
+    const r = recordedConsent(SIGNED);
+    expect(r?.agreement).toBe(SIGNED);
+    expect(r?.dateLabel).toBe("August 19, 2026");
+  });
+
+  it("reads a full ISO timestamp as the day it happened", () => {
+    expect(recordedConsent({ ...SIGNED, sigDate: "2026-08-19T22:15:00.000Z" })?.dateLabel).toBe("August 19, 2026");
+  });
+
+  it("says consent is on file without a date when the record has none", () => {
+    // Every agreement written before consent dates were stamped looks like this.
+    expect(recordedConsent({ ...SIGNED, sigDate: "" })?.dateLabel).toBeNull();
+    expect(recordedConsent({ ...SIGNED, sigDate: "   " })?.dateLabel).toBeNull();
+  });
+
+  it("never turns an unreadable date into 'Invalid Date' or a guess", () => {
+    for (const junk of ["not a date", "2026-13-45", "🙂"]) {
+      const r = recordedConsent({ ...SIGNED, sigDate: junk });
+      expect(r).not.toBeNull();
+      expect(r?.dateLabel).toBeNull();
+    }
+  });
+});
+
+describe("agreementToSubmit", () => {
+  const FORM: AgreementInfo = {
+    sigName: "Jane Doe", sigDate: "",
+    termsAccepted: true, electronicConsentAccepted: true,
+  };
+
+  it("dates a first consent today", () => {
+    expect(agreementToSubmit(null, FORM, false, "2026-09-01")).toEqual({ ...FORM, sigDate: "2026-09-01" });
+  });
+
+  it("leaves untouched recorded consent exactly as it was", () => {
+    const r = recordedConsent(SIGNED)!;
+    expect(agreementToSubmit(r, FORM, false, "2026-09-01")).toBe(SIGNED);
+  });
+
+  it("does not backfill a date onto recorded consent that never had one", () => {
+    const undated = { ...SIGNED, sigDate: "" };
+    const r = recordedConsent(undated)!;
+    expect(agreementToSubmit(r, FORM, false, "2026-09-01").sigDate).toBe("");
+  });
+
+  it("dates re-consent today once the customer changes it", () => {
+    const r = recordedConsent(SIGNED)!;
+    const reconsented = agreementToSubmit(r, { ...FORM, sigName: "Jane A. Doe" }, true, "2026-09-01");
+    expect(reconsented).toEqual({
+      sigName: "Jane A. Doe", sigDate: "2026-09-01",
+      termsAccepted: true, electronicConsentAccepted: true,
+    });
+  });
+
+  it("carries a withdrawal through rather than replaying the record", () => {
+    // The submit gate rejects this; what matters here is that the recorded
+    // "true" isn't silently substituted back in.
+    const r = recordedConsent(SIGNED)!;
+    const withdrawn = agreementToSubmit(r, { ...FORM, termsAccepted: false }, true, "2026-09-01");
+    expect(withdrawn.termsAccepted).toBe(false);
   });
 });
 

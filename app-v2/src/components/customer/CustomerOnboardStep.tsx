@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { saveMyApplicationOnboardingAction, updateMyApplicationDetailsAction } from "@/lib/actions/customer";
-import { customerOnboardInitial, flattenSections } from "@/lib/prefillMerge";
+import { agreementToSubmit, customerOnboardInitial, flattenSections, recordedConsent } from "@/lib/prefillMerge";
 import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
 import styles from "./CustomerOnboardStep.module.css";
 
@@ -27,10 +27,18 @@ export default function CustomerOnboardStep({ app }: Props) {
   const [biz, setBiz]     = useState<Partial<BusinessInfo>>(initial.business);
   const [owner, setOwner] = useState<Partial<OwnerContact>>(initial.ownerContact);
   const [proc, setProc]   = useState<Partial<ProcessingInfo>>(initial.processing);
-  // NEVER prefilled, not even from app.agreement: consent has to be given by
-  // the person submitting this form, on this visit. A pre-ticked box is not
-  // consent, and the rep ticking it in ApplyStep is not the customer's.
-  const [agree, setAgree] = useState<Partial<AgreementInfo>>({ sigName: "", sigDate: "", termsAccepted: false, electronicConsentAccepted: false });
+  // Consent is never PREFILLED — with nothing on record the boxes start empty,
+  // because a pre-ticked box is not consent. Consent already RECORDED is a
+  // different thing: it's shown back as the fact it is, so a customer editing
+  // their phone number isn't made to re-consent. See prefillMerge.ts.
+  const [recorded] = useState(() => recordedConsent(app.agreement));
+  const [reviewingConsent, setReviewingConsent] = useState(false);
+  // Any edit inside the consent panel makes this consent given now rather than
+  // a replay of the record — which is what stamps a fresh sigDate on submit.
+  const [consentTouched, setConsentTouched] = useState(false);
+  const [agree, setAgree] = useState<Partial<AgreementInfo>>(
+    recorded?.agreement ?? { sigName: "", sigDate: "", termsAccepted: false, electronicConsentAccepted: false }
+  );
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState<{ adyenReady: boolean; adyenUrl: string | null } | null>(null);
   const [savedEdit, setSavedEdit] = useState(false);
@@ -44,7 +52,14 @@ export default function CustomerOnboardStep({ app }: Props) {
   const setBizF  = b<Partial<BusinessInfo>>(setBiz as Parameters<typeof b>[0]);
   const setOwnerF = b<Partial<OwnerContact>>(setOwner as Parameters<typeof b>[0]);
   const setProcF = b<Partial<ProcessingInfo>>(setProc as Parameters<typeof b>[0]);
-  const setAgreeF = b<Partial<AgreementInfo>>(setAgree as Parameters<typeof b>[0]);
+  const setAgreeBase = b<Partial<AgreementInfo>>(setAgree as Parameters<typeof b>[0]);
+  const setAgreeF = (k: keyof AgreementInfo) => {
+    const base = setAgreeBase(k);
+    return (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+      setConsentTouched(true);
+      base(e);
+    };
+  };
 
   const handleSubmit = async () => {
     if (!agree.termsAccepted || !agree.electronicConsentAccepted) {
@@ -71,7 +86,9 @@ export default function CustomerOnboardStep({ app }: Props) {
         business: biz as BusinessInfo,
         ownerContact: owner as OwnerContact,
         processing: proc as ProcessingInfo,
-        agreement: agree as AgreementInfo,
+        // Untouched recorded consent goes back verbatim — its date is a fact
+        // about when consent was given, not something an edit gets to rewrite.
+        agreement: agreementToSubmit(recorded, agree as AgreementInfo, consentTouched),
       };
 
       if (isEditingAfterAdyen) {
@@ -249,22 +266,47 @@ export default function CustomerOnboardStep({ app }: Props) {
 
       <div className={styles.panel}>
         <h2 className={styles.sectionTitle}>Authorization &amp; Agreement</h2>
-        {/* Never pre-filled — the signatory and both consents are given here, on this visit. */}
-        {input("Authorized Signatory Name", "agreement.sigName", agree.sigName || "", setAgreeF("sigName") as (e: React.ChangeEvent<HTMLInputElement>) => void, "Jane Doe")}
-        <div className={styles.checkboxGroup}>
-          <label className={styles.checkboxRow}>
-            <input type="checkbox" checked={agree.termsAccepted || false} onChange={setAgreeF("termsAccepted") as (e: React.ChangeEvent<HTMLInputElement>) => void} className={styles.checkbox} />
-            <span className={styles.checkboxText}>
-              I certify that the information provided is accurate and authorize AIO to process payments for this business and to initiate onboarding with our processing partner.
-            </span>
-          </label>
-          <label className={styles.checkboxRow}>
-            <input type="checkbox" checked={agree.electronicConsentAccepted || false} onChange={setAgreeF("electronicConsentAccepted") as (e: React.ChangeEvent<HTMLInputElement>) => void} className={styles.checkbox} />
-            <span className={styles.checkboxText}>
-              I consent to electronic communications and agree that electronic records are legally binding. I understand that identity verification will be completed by me directly via secure Adyen-hosted forms.
-            </span>
-          </label>
-        </div>
+        {recorded && !reviewingConsent ? (
+          // Consent on record: stated as fact, not re-demanded. The affordance
+          // below keeps it amendable — consent must never be a one-way door.
+          <div className={styles.consentRecord}>
+            <p className={styles.consentRecordText}>
+              <span className={styles.consentRecordMark} aria-hidden="true">✓</span>
+              {recorded.dateLabel
+                ? `You accepted the terms and consented to electronic records on ${recorded.dateLabel}.`
+                : "You have already accepted the terms and consented to electronic records."}
+              {recorded.agreement.sigName.trim() && ` Signed by ${recorded.agreement.sigName.trim()}.`}
+            </p>
+            <button type="button" className={styles.linkBtn} onClick={() => setReviewingConsent(true)}>
+              Review or change this
+            </button>
+          </div>
+        ) : (
+          <>
+            {recorded && (
+              <p className={styles.hint}>
+                This is the consent already on file. Change anything here and it&apos;s re-recorded,
+                dated today; untick a box to withdraw it.
+              </p>
+            )}
+            {/* Not pre-filled — with no consent on record, the signatory and both consents are given here, on this visit. */}
+            {input("Authorized Signatory Name", "agreement.sigName", agree.sigName || "", setAgreeF("sigName") as (e: React.ChangeEvent<HTMLInputElement>) => void, "Jane Doe")}
+            <div className={styles.checkboxGroup}>
+              <label className={styles.checkboxRow}>
+                <input type="checkbox" checked={agree.termsAccepted || false} onChange={setAgreeF("termsAccepted") as (e: React.ChangeEvent<HTMLInputElement>) => void} className={styles.checkbox} />
+                <span className={styles.checkboxText}>
+                  I certify that the information provided is accurate and authorize AIO to process payments for this business and to initiate onboarding with our processing partner.
+                </span>
+              </label>
+              <label className={styles.checkboxRow}>
+                <input type="checkbox" checked={agree.electronicConsentAccepted || false} onChange={setAgreeF("electronicConsentAccepted") as (e: React.ChangeEvent<HTMLInputElement>) => void} className={styles.checkbox} />
+                <span className={styles.checkboxText}>
+                  I consent to electronic communications and agree that electronic records are legally binding. I understand that identity verification will be completed by me directly via secure Adyen-hosted forms.
+                </span>
+              </label>
+            </div>
+          </>
+        )}
       </div>
 
       {err && (
