@@ -196,8 +196,14 @@
 
 /* ---------- Table search bar (full-table view) ---------- */
 
+/* display/gap are set inline on this row in AccountsDashboard.tsx; only the wrap
+   is ours. The search input's default intrinsic min-width (~180px) plus the gap
+   plus a nowrap "Export CSV" needs 292px and the column is 272px at 320px, so
+   the button ran 19.5px past the panel edge. Wrapping drops it onto its own line
+   there and changes nothing from 375px up, where the row still fits. */
 .tableSearch {
   margin-bottom: var(--space-sm);
+  flex-wrap: wrap;
 }
 
 .tableSearchInput {

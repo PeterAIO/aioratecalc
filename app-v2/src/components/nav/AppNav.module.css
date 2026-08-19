@@ -73,6 +73,41 @@
   margin-left: 2px;
 }
 
+/* Between the phone and laptop breakpoints the bar is on one nowrap row but the
+ * viewport is too narrow to pay for both the wordmark subtitle and the centre
+ * links, so .navLeft gets squeezed below its intrinsic width and its tail is
+ * painted underneath the first nav pill. Measured: admin's ADMIN badge ran to
+ * 275.9 while "Dashboard" started at 203.5 (768px) — the badge was invisible —
+ * and the overlap only reached zero at ~841px. Rep had the same squeeze at the
+ * bottom of the band ("Rate Calculator" ended at 201.5 against an "Accounts"
+ * pill starting at 152.6 at 641px).
+ *
+ * The subtitle is decoration; the badge is the only thing telling you which
+ * console you are in. So the subtitle is what goes. 40rem is below the whole
+ * band, so 60rem is the only standard breakpoint that covers it — which costs
+ * the subtitle over 841-960px, where it would still have fit. Below 40rem the
+ * bar wraps and .navLeft gets its full intrinsic width back, so the subtitle
+ * comes back with it.
+ *
+ * This buys ~98px and clears admin from ~743px up (768: -25, 840: -97). Admin
+ * still overlaps at 641-743 — five action pills plus the badge want ~727px of a
+ * 609px bar at 641px, so no amount of subtitle wins it back; that band needs the
+ * action set itself to change and is out of scope here. Rep clears everywhere.
+ *
+ * Hidden visually, not removed: taken out of flow so it contributes no box and
+ * no flex gap, but left in the accessibility tree so the wordmark link still
+ * announces "AIO Admin Console" / "AIO Rate Calculator" at every width. */
+@media (min-width: 40rem) and (max-width: 60rem) {
+  .navSub {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
 /* ---------- Admin chrome ---------- */
 
 .navAdmin {

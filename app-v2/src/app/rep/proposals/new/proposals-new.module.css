@@ -277,6 +277,19 @@
 .btnGhost:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .btnGhost:active { transform: scale(0.97); }
 
+/* The longest ghost label in the flow — "Continue Without a Statement →" — is
+   ~230px of text, and with 2 * --space-xl of pill padding that made a 312px
+   button on a 272px column at 320px. Trading --space-xl for --space-md brings it
+   to ~264px and keeps it on one line; white-space + max-width are the backstop
+   so a longer label wraps inside the pill instead of running off the page. */
+@media (max-width: 40rem) {
+  .btnGhost {
+    max-width: 100%;
+    padding-inline: var(--space-md);
+    white-space: normal;
+  }
+}
+
 /* ---------- Terminus (customer link) ---------- */
 
 .successWrap {

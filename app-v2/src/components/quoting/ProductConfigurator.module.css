@@ -63,10 +63,15 @@
   color: var(--ink);
 }
 
+/* The stepper is flex-shrink: 0, so on a phone .productMain is down to ~78px and
+   a price like "$49.00/week (~$212.33/mo)" has no break opportunity inside its
+   87px parenthetical — it overflowed the row by 3-9px. `anywhere` (not
+   `break-word`) so the unbreakable run also stops inflating min-content. */
 .productPrice {
   font-size: 0.75rem;
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .stepper {

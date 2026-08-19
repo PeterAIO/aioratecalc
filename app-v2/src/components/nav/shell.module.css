@@ -44,6 +44,12 @@
   padding: var(--space-2xl) var(--space-lg) var(--space-3xl);
 }
 
+/* A --space-lg gutter is 15% of a 375px screen and 7.5% of a 640px one. Below
+   the phone breakpoint the container gives that width back to the content. */
+@media (max-width: 40rem) {
+  .page { padding-inline: var(--space-md); }
+}
+
 .pageForm { composes: page; --page-measure: var(--measure-form); }
 .pageDoc  { composes: page; --page-measure: var(--measure-doc); }
 .pageApp  { composes: page; --page-measure: var(--measure-app); }

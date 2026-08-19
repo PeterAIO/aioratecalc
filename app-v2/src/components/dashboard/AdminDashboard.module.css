@@ -206,6 +206,30 @@
   font-size: 0.9rem;
 }
 
+/* The three 7.5rem segments plus padding make a 366px strip, which does not fit
+   a phone: at 320px it painted to x=390 and "Leads" was half off-screen (the
+   app's overflow-x: clip hid the scroll rather than the element). Below the
+   phone breakpoint the strip stops being intrinsically sized and fills the row
+   instead, with each segment an equal third of it. Equal thirds are load-bearing
+   here, not cosmetic — the sliding thumb is one third wide and moves by
+   translateX(100%/200%), so segments sized to their own labels would desync it.
+   That rules out shrink-to-fit; a horizontally scrolling strip was the other
+   option but it hides an option behind a gesture, which is the wrong trade for
+   three top-level views. At 320px each segment is ~89px against a ~62px
+   "Accounts" label, so nothing clips. */
+@media (max-width: 40rem) {
+  .tabs {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .tab {
+    flex: 1;
+    min-width: 0;
+    padding-inline: var(--space-2xs);
+  }
+}
+
 @media (max-width: 60rem) {
   .tableHeader { display: none; }
 
