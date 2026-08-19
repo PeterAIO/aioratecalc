@@ -252,3 +252,73 @@ describe("hasQuoteBasis", () => {
     }
   });
 });
+
+// The two rep flows (/rep/proposals/new and /rep/prospects/new) write the same
+// merchant_applications row and now end at the same customer link, so the
+// customer quote must depend only on the stored columns and not on which flow
+// filled them in. These guard that merge.
+describe("buildCustomerSafeQuote — one projection for both rep flows", () => {
+  const LINES = [
+    {
+      hubspotProductId: "217526517443", name: "AIO Platform (1 to 5 Order Points)", qty: 1,
+      unitPrice: 99, billingFrequency: "weekly", productType: "Software",
+    },
+  ] as const;
+  const POINTS = { hardware: {}, channels: ["website"], total: 1 };
+
+  // What the wizard now persists (targetMargin/pricingModel/quoteLines/
+  // orderPoints) against what the prospect form has always persisted.
+  const wizardRow = {
+    analysis: null, quoteConfig: CONFIG, targetMargin: 0.011, pricingModel: "2-tier",
+    quoteLines: [...LINES], orderPoints: POINTS,
+  };
+  const prospectRow = { ...wizardRow };
+
+  it("gives the same quote for the same columns whichever flow wrote them", () => {
+    expect(buildCustomerSafeQuote(wizardRow)).toEqual(buildCustomerSafeQuote(prospectRow));
+  });
+
+  it("honours the rep's own margin instead of the volume tier default", () => {
+    // The wizard used to hard-code targetMargin to null, so a Flow A deal was
+    // silently quoted at the $100k tier's 0.38% desired margin.
+    const chosen   = buildCustomerSafeQuote(wizardRow)!;
+    const defaulted = buildCustomerSafeQuote({ ...wizardRow, targetMargin: null })!;
+    const expectedMonthly =
+      90_000 * (INTERCHANGE_ESTIMATE.cardPresent + 0.011) +
+      10_000 * (INTERCHANGE_ESTIMATE.cardNotPresent + 0.011);
+    expect(chosen.projectedMonthlyCost).toBeCloseTo(expectedMonthly, 6);
+    expect(chosen.projectedMonthlyCost).toBeGreaterThan(defaulted.projectedMonthlyCost);
+  });
+
+  it("renders a real quote — lines, totals and points all present", () => {
+    const quote = buildCustomerSafeQuote(wizardRow)!;
+    expect(quote.projectedMonthlyCost).toBeGreaterThan(0);
+    expect(quote.effectiveRate).toBeGreaterThan(0);
+    expect(quote.lines).toEqual([...LINES]);
+    expect(quote.lineTotals?.monthlyEquivalent).toBeCloseTo(99 * (52 / 12), 10);
+    expect(quote.orderPoints).toEqual(POINTS);
+  });
+
+  it("never fabricates a saving on the statement-less path", () => {
+    // analysisFromQuoteConfig leaves totalFees at 0, so a naive
+    // current − projected would print a large negative "saving".
+    const quote = buildCustomerSafeQuote(wizardRow)!;
+    expect(quote.basis).toBe("config");
+    expect(quote.monthlySavings).toBeNull();
+    expect(quote.annualSavings).toBeNull();
+  });
+
+  it("shows the saving as soon as a statement supplies the current cost", () => {
+    const withStatement = buildCustomerSafeQuote({
+      ...wizardRow,
+      analysis: { totalVolume: 100_000, totalTransactions: 2500, totalFees: 4_000, averageTicket: 40,
+        interchangeRate: 0.018, icEstimated: false, cardPresentPct: 0.9, cardNotPresentPct: 0.1,
+        cardPresentVolume: 90_000, cardNotPresentVolume: 10_000 } as StatementAnalysis,
+    })!;
+    expect(withStatement.basis).toBe("statement");
+    expect(withStatement.currentMonthlyCost).toBe(4_000);
+    expect(withStatement.monthlySavings).toBeGreaterThan(0);
+    // The hardware lines ride along either way.
+    expect(withStatement.lines).toEqual([...LINES]);
+  });
+});

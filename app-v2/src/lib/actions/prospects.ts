@@ -10,13 +10,28 @@ import {
 import { buildProspectPrefill, type ProspectPrefill } from "@/lib/hubspotPrefill";
 import { listQuotableProductsAction } from "@/lib/actions/catalog";
 import { hasQuoteBasis } from "@/lib/leadQuote";
+import { analysisFromQuoteConfig } from "@/lib/pricing";
 import { deriveOrderPoints, resolvePlatformTier, toQuoteLine } from "@/lib/quoting";
+import { shouldAdvance } from "@/lib/adapters/adyenWebhook";
 import type {
   MerchantApplication, OrderPoints, PricingModel, ProcessingInfo, QuoteConfig, QuoteLine,
   StatementAnalysis, TenantLink,
 } from "@/types/merchant";
 
 const LINK_TTL_DAYS = 14;
+
+// The customer-facing lead link, minted in one place. Both the prospect form
+// (link at row creation) and the proposal wizard (link at the end of the
+// wizard) issue the same thing: a `lead_upload` token on the 14-day TTL.
+function mintLeadLink(now: Date) {
+  const token = randomUUID();
+  return {
+    token,
+    sentAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + LINK_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+    url: `${process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"}/lead/${token}`,
+  };
+}
 
 // ── Phase F: "Push to EasyOB" deep link from the HubSpot Company record ─────
 // A CRM card on the Company links out to /rep/prospects/new?hubspotCompanyId={id}.
@@ -145,9 +160,8 @@ export async function createProspectAction(input: {
   const effective = await getEffectiveRole();
   if (!effective) throw new Error("Not authenticated");
 
-  const token = randomUUID();
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + LINK_TTL_DAYS * 24 * 60 * 60 * 1000);
+  const link = mintLeadLink(now);
 
   let tenantLink: TenantLink | null = null;
   // The same HubSpot read also prefills business/owner details onto the new
@@ -220,10 +234,10 @@ export async function createProspectAction(input: {
     quoteAcceptedAt: null,
     targetMargin: input.targetMargin,
     pricingModel: input.pricingModel,
-    customerLinkToken: token,
+    customerLinkToken: link.token,
     customerLinkPurpose: "lead_upload",
-    customerLinkSentAt: now.toISOString(),
-    customerLinkExpiresAt: expiresAt.toISOString(),
+    customerLinkSentAt: link.sentAt,
+    customerLinkExpiresAt: link.expiresAt,
     analysis,
     proposal: null,
     // HubSpot fills the blanks; what the rep actually typed always wins.
@@ -245,6 +259,151 @@ export async function createProspectAction(input: {
 
   await postgresStorage.saveApplication({ userId: effective.userId, role: effective.role }, app);
 
-  const base = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
-  return { app, linkUrl: `${base}/lead/${token}`, warning };
+  return { app, linkUrl: link.url, warning };
+}
+
+// ── The proposal wizard writes through the same derivation ──────────────────
+// /rep/proposals/new used to hard-code quoteConfig/quoteLines/orderPoints/
+// targetMargin/pricingModel to null and throw away everything the rep set in
+// the pricing step, so a wizard-built deal was quoted at the tier default
+// rather than the margin the rep actually chose. These two actions give the
+// wizard the same write path the prospect form has: picks in, money derived
+// server-side, and one link out at the end.
+
+/**
+ * Persist the quoting half of an application the wizard has already created.
+ *
+ * Deliberately NOT saveApplicationAction: that is a blind full-row upsert of
+ * whatever the browser is holding, so a stale tab could push back old prices.
+ * This reads the stored row, replaces only the quoting fields, and re-derives
+ * the lines from the picks against the live catalog (deriveQuoteLines, shared
+ * with createProspectAction) — the browser never sends a price.
+ */
+export async function saveQuoteConfigurationAction(input: {
+  applicationId: string;
+  picks: QuotePick[];
+  channels: string[];
+  targetMargin: number;
+  pricingModel: PricingModel;
+  quoteConfig?: QuoteConfig | null;
+}): Promise<MerchantApplication> {
+  const effective = await getEffectiveRole();
+  if (!effective) throw new Error("Not authenticated");
+  const scope = { userId: effective.userId, role: effective.role };
+
+  const app = await postgresStorage.getApplication(scope, input.applicationId);
+  if (!app) throw new Error("Application not found");
+
+  const { quoteLines, orderPoints } = await deriveQuoteLines(input.picks ?? [], input.channels ?? []);
+
+  const quoteConfig =
+    input.quoteConfig && input.quoteConfig.monthlyVolume > 0 && input.quoteConfig.avgTicket > 0
+      ? input.quoteConfig
+      : app.quoteConfig;
+
+  const updated: MerchantApplication = {
+    ...app,
+    quoteConfig,
+    quoteLines,
+    orderPoints,
+    targetMargin: input.targetMargin,
+    pricingModel: input.pricingModel,
+    updatedAt: new Date().toISOString(),
+  };
+  await postgresStorage.saveApplication(scope, updated);
+  return updated;
+}
+
+/**
+ * Persist the rep's pre-fill of the merchant's own details — the back half of
+ * the wizard's Details step. Targeted for the same reason as above: it is the
+ * last write before the customer link goes out, and routing it through the
+ * blind full-row upsert would round-trip the browser's copy of the quote lines
+ * on top of the ones the server just derived.
+ *
+ * Stage stays `proposal_sent`: it is the only stage that unlocks the
+ * dashboard's rep-driven "Send Onboarding Link" escape hatch, and existing
+ * deals sitting there depend on it.
+ */
+export async function saveApplicationDetailsAction(input: {
+  applicationId: string;
+  business: MerchantApplication["business"];
+  ownerContact: MerchantApplication["ownerContact"];
+  processing: MerchantApplication["processing"];
+  agreement: MerchantApplication["agreement"];
+}): Promise<MerchantApplication> {
+  const effective = await getEffectiveRole();
+  if (!effective) throw new Error("Not authenticated");
+  const scope = { userId: effective.userId, role: effective.role };
+
+  const app = await postgresStorage.getApplication(scope, input.applicationId);
+  if (!app) throw new Error("Application not found");
+
+  const updated: MerchantApplication = {
+    ...app,
+    stage: shouldAdvance(app.stage, "proposal_sent") ? "proposal_sent" : app.stage,
+    business: input.business,
+    ownerContact: input.ownerContact,
+    processing: input.processing,
+    agreement: input.agreement,
+    updatedAt: new Date().toISOString(),
+  };
+  await postgresStorage.saveApplication(scope, updated);
+  return updated;
+}
+
+/**
+ * Issue (or re-issue) the customer-facing quote link for an application that
+ * already exists — the wizard's terminus, and the same `lead_upload` token the
+ * prospect form mints at row creation.
+ *
+ * The stage move is forward-only (the webhook's rule), so re-issuing a link on
+ * a deal that has already moved into onboarding can't drag it backwards.
+ */
+export async function issueCustomerQuoteLinkAction(
+  applicationId: string
+): Promise<{ app: MerchantApplication; linkUrl: string }> {
+  const effective = await getEffectiveRole();
+  if (!effective) throw new Error("Not authenticated");
+  const scope = { userId: effective.userId, role: effective.role };
+
+  const app = await postgresStorage.getApplication(scope, applicationId);
+  if (!app) throw new Error("Application not found");
+
+  const now = new Date();
+  const link = mintLeadLink(now);
+
+  // Same gate the customer render uses: a link with nothing to show is still
+  // the "upload your statement" link, not a sent quote.
+  const nextStage = hasQuoteBasis(app) ? "quote_sent" : "lead_link_sent";
+
+  const updated: MerchantApplication = {
+    ...app,
+    stage: shouldAdvance(app.stage, nextStage) ? nextStage : app.stage,
+    customerLinkToken: link.token,
+    customerLinkPurpose: "lead_upload",
+    customerLinkSentAt: link.sentAt,
+    customerLinkExpiresAt: link.expiresAt,
+    updatedAt: now.toISOString(),
+  };
+  await postgresStorage.saveApplication(scope, updated);
+
+  return { app: updated, linkUrl: link.url };
+}
+
+/**
+ * The statement-less entry into the proposal wizard: turn the rep's average
+ * ticket + monthly volume into the same StatementAnalysis shape the Claude
+ * extraction produces, so Analysis/Pricing/Proposal need no special case.
+ *
+ * Lives server-side because analysisFromQuoteConfig is in pricing.ts, and
+ * pulling that into a client bundle would ship MARGIN_REQS to the browser.
+ */
+export async function analysisFromQuoteConfigAction(config: QuoteConfig): Promise<StatementAnalysis> {
+  const effective = await getEffectiveRole();
+  if (!effective) throw new Error("Not authenticated");
+  if (!(config.avgTicket > 0) || !(config.monthlyVolume > 0)) {
+    throw new Error("Enter both average ticket and monthly volume.");
+  }
+  return analysisFromQuoteConfig(config);
 }

@@ -9,11 +9,17 @@ type Props = {
   proposal: ProposalOutput;
   onBack: () => void;
   onApply: () => void;
+  onSendLink: () => void;
+  sendingLink?: boolean;
   onNewProposal: () => void;
 };
 
-export default function ProposalStep({ analysis, proposal, onBack, onApply, onNewProposal }: Props) {
+export default function ProposalStep({ analysis, proposal, onBack, onApply, onSendLink, sendingLink, onNewProposal }: Props) {
   const pVol = analysis.totalVolume || 1;
+  // A statement-less deal (analysisFromQuoteConfig) has totalFees 0, so there
+  // is no current cost to compare against and every "savings" figure below
+  // would be a fabricated negative. The proposal shows the AIO rate instead.
+  const hasCurrentCost  = (analysis.totalFees || 0) > 0;
   const currentEffRate  = (analysis.totalFees || 0) / pVol;
   const proposedEffRate = (proposal.projectedFees?.monthly || 0) / pVol;
   const savingsMonthly  = (analysis.totalFees || 0) - (proposal.projectedFees?.monthly || 0);
@@ -46,13 +52,48 @@ export default function ProposalStep({ analysis, proposal, onBack, onApply, onNe
 
     const vpItems = [
       "One platform for payments, POS, and operations—no more disconnected systems",
-      "Clear, predictable pricing with immediate annual savings of " + fmtD(savingsAnnual),
+      hasCurrentCost
+        ? "Clear, predictable pricing with immediate annual savings of " + fmtD(savingsAnnual)
+        : "Clear, predictable pricing at an effective rate of " + fmtP2(proposedEffRate),
       "Real-time visibility into sales, costs, and performance across your business",
       "Less manual work for your team through automation and AI-powered workflows",
     ];
     const kvHtml = vpItems.map((t, i) =>
       `<div class="vp"><span class="vp-num">${String(i + 1).padStart(2, "0")}</span><span>${t}</span></div>`
     ).join("");
+
+    // Without a statement there is no "current" column and no savings, so the
+    // hero and the comparison table are built from the AIO side alone rather
+    // than printing $0 current cost and a negative saving.
+    const heroHtml = hasCurrentCost
+      ? `<div class="savings-box"><div>`
+        + `<div class="savings-lbl">Annual Savings</div>`
+        + `<div class="savings-big">${fmtD(savingsAnnual)}</div>`
+        + `</div><div style="display:flex;gap:28px;align-items:center">`
+        + `<div class="stat"><div class="stat-val">${fmtD(savingsMonthly)}</div><div class="stat-lbl">Monthly Savings</div></div>`
+        + `<div class="stat"><div class="stat-val">${fmtP2(proposedEffRate)}</div><div class="stat-lbl">New Effective Rate</div></div>`
+        + `<div class="stat"><div class="stat-val">${fmtP2(currentEffRate)}</div><div class="stat-lbl">Current Rate</div></div>`
+        + `</div></div>`
+      : `<div class="savings-box"><div>`
+        + `<div class="savings-lbl">Your AIO Effective Rate</div>`
+        + `<div class="savings-big">${fmtP2(proposedEffRate)}</div>`
+        + `</div><div style="display:flex;gap:28px;align-items:center">`
+        + `<div class="stat"><div class="stat-val">${fmtD(proposal.projectedFees?.monthly || 0)}</div><div class="stat-lbl">Estimated Monthly Cost</div></div>`
+        + `<div class="stat"><div class="stat-val">${fmtD(analysis.totalVolume)}</div><div class="stat-lbl">Monthly Volume</div></div>`
+        + `</div></div>`;
+
+    const comparisonHtml = hasCurrentCost
+      ? `<div class="section"><h2>Fee Comparison</h2><table><thead><tr><th>Category</th><th>Current</th><th>Proposed</th><th>Savings</th></tr></thead><tbody>`
+        + `<tr><td>Monthly Fees</td><td class="red">${fmtD(analysis.totalFees)}</td><td class="blue">${fmtD(proposal.projectedFees?.monthly)}</td><td class="green">${fmtD(savingsMonthly)}</td></tr>`
+        + `<tr><td>Annual Fees</td><td class="red">${fmtD((analysis.totalFees || 0) * 12)}</td><td class="blue">${fmtD((proposal.projectedFees?.monthly || 0) * 12)}</td><td class="green">${fmtD(savingsAnnual)}</td></tr>`
+        + `<tr><td>Effective Rate</td><td class="red">${fmtP2(currentEffRate)}</td><td class="blue">${fmtP2(proposedEffRate)}</td><td class="green">${fmtP2(currentEffRate - proposedEffRate)}</td></tr>`
+        + `</tbody></table></div>`
+      : `<div class="section"><h2>Your AIO Costs</h2><table><thead><tr><th>Category</th><th>Proposed</th></tr></thead><tbody>`
+        + `<tr><td>Monthly Fees</td><td class="blue">${fmtD(proposal.projectedFees?.monthly)}</td></tr>`
+        + `<tr><td>Annual Fees</td><td class="blue">${fmtD((proposal.projectedFees?.monthly || 0) * 12)}</td></tr>`
+        + `<tr><td>Effective Rate</td><td class="blue">${fmtP2(proposedEffRate)}</td></tr>`
+        + `</tbody></table>`
+        + `<p style="font-size:12px;color:#888;margin-top:10px">Based on the volume and average ticket provided. Share a recent processing statement and we&rsquo;ll show the exact saving against it.</p></div>`;
 
     const exportScript = "<scr" + "ipt src=\"https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js\"><\/" + "scr" + "ipt>"
       + "<scr" + "ipt>"
@@ -101,20 +142,9 @@ export default function ProposalStep({ analysis, proposal, onBack, onApply, onNe
       + "<div class=\"proposal-badge\">MERCHANT PROPOSAL</div>"
       + "<div class=\"merchant-name\">" + analysis.merchantName + "</div>"
       + "<div class=\"summary\">" + (proposal.proposalSummary || "") + "</div>"
-      + "<div class=\"savings-box\"><div>"
-      + "<div class=\"savings-lbl\">Annual Savings</div>"
-      + "<div class=\"savings-big\">" + fmtD(savingsAnnual) + "</div>"
-      + "</div><div style=\"display:flex;gap:28px;align-items:center\">"
-      + "<div class=\"stat\"><div class=\"stat-val\">" + fmtD(savingsMonthly) + "</div><div class=\"stat-lbl\">Monthly Savings</div></div>"
-      + "<div class=\"stat\"><div class=\"stat-val\">" + fmtP2(proposedEffRate) + "</div><div class=\"stat-lbl\">New Effective Rate</div></div>"
-      + "<div class=\"stat\"><div class=\"stat-val\">" + fmtP2(currentEffRate) + "</div><div class=\"stat-lbl\">Current Rate</div></div>"
-      + "</div></div>"
+      + heroHtml
       + "<div class=\"section\"><h2>Proposed Pricing</h2><div class=\"rates-grid\">" + ratesHtml + "</div></div>"
-      + "<div class=\"section\"><h2>Fee Comparison</h2><table><thead><tr><th>Category</th><th>Current</th><th>Proposed</th><th>Savings</th></tr></thead><tbody>"
-      + "<tr><td>Monthly Fees</td><td class=\"red\">" + fmtD(analysis.totalFees) + "</td><td class=\"blue\">" + fmtD(proposal.projectedFees?.monthly) + "</td><td class=\"green\">" + fmtD(savingsMonthly) + "</td></tr>"
-      + "<tr><td>Annual Fees</td><td class=\"red\">" + fmtD((analysis.totalFees || 0) * 12) + "</td><td class=\"blue\">" + fmtD((proposal.projectedFees?.monthly || 0) * 12) + "</td><td class=\"green\">" + fmtD(savingsAnnual) + "</td></tr>"
-      + "<tr><td>Effective Rate</td><td class=\"red\">" + fmtP2(currentEffRate) + "</td><td class=\"blue\">" + fmtP2(proposedEffRate) + "</td><td class=\"green\">" + fmtP2(currentEffRate - proposedEffRate) + "</td></tr>"
-      + "</tbody></table></div>"
+      + comparisonHtml
       + "<div class=\"section\"><h2>Key Value Points</h2><div class=\"vp-grid\">" + kvHtml + "</div></div>"
       + "<div class=\"footer\"><span>AIO — AI for Restaurants</span><span>aioapp.com</span></div>"
       + "<div id=\"pdf-btn-wrap\" style=\"position:fixed;top:20px;right:20px;z-index:9999;\">"
@@ -142,16 +172,30 @@ export default function ProposalStep({ analysis, proposal, onBack, onApply, onNe
       {/* Savings hero (Stat-Led, no card shape) */}
       <div className={styles.savingsBlock}>
         <div>
-          <div className={styles.savingsLabel}>Annual Savings for Merchant</div>
-          <div className={styles.savingsHero}>{fmt$(savingsAnnual)}</div>
-          <div className={styles.savingsSub}>{fmtPct2(Math.abs(savingsPct))} reduction in costs</div>
+          <div className={styles.savingsLabel}>
+            {hasCurrentCost ? "Annual Savings for Merchant" : "Merchant’s AIO Effective Rate"}
+          </div>
+          <div className={styles.savingsHero}>
+            {hasCurrentCost ? fmt$(savingsAnnual) : fmtPct2(proposedEffRate)}
+          </div>
+          <div className={styles.savingsSub}>
+            {hasCurrentCost
+              ? `${fmtPct2(Math.abs(savingsPct))} reduction in costs`
+              : "No statement on file — savings can’t be computed"}
+          </div>
         </div>
         <div className={styles.statTicker}>
-          {[
-            { val: fmt$(savingsMonthly), lbl: "Monthly Savings" },
-            { val: fmtPct2(proposedEffRate), lbl: "New Effective Rate" },
-            { val: fmtPct2(currentEffRate), lbl: "Current Rate" },
-          ].map((s, i) => (
+          {(hasCurrentCost
+            ? [
+                { val: fmt$(savingsMonthly), lbl: "Monthly Savings" },
+                { val: fmtPct2(proposedEffRate), lbl: "New Effective Rate" },
+                { val: fmtPct2(currentEffRate), lbl: "Current Rate" },
+              ]
+            : [
+                { val: fmt$(proposal.projectedFees?.monthly || 0), lbl: "Monthly Cost" },
+                { val: fmt$(analysis.totalVolume), lbl: "Monthly Volume" },
+              ]
+          ).map((s, i) => (
             <div key={i} className={styles.statItem}>
               {i > 0 && <div className={styles.statDivider} />}
               <div>
@@ -191,12 +235,13 @@ export default function ProposalStep({ analysis, proposal, onBack, onApply, onNe
         </div>
       </div>
 
-      {/* Fee comparison */}
+      {/* Fee comparison — only a real comparison when a statement supplied the
+          "current" column; otherwise the AIO side stands on its own. */}
       <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>Fee Comparison</h2>
+        <h2 className={styles.sectionTitle}>{hasCurrentCost ? "Fee Comparison" : "AIO Costs"}</h2>
         <div className={styles.panelSurface}>
-          <div className={styles.tableHeader}>
-            {["Category", "Current", "Proposed", "Savings"].map(h => (
+          <div className={styles.tableHeader} data-cols={hasCurrentCost ? "4" : "2"}>
+            {(hasCurrentCost ? ["Category", "Current", "Proposed", "Savings"] : ["Category", "Proposed"]).map(h => (
               <div key={h} className={styles.tableHeaderCell}>{h}</div>
             ))}
           </div>
@@ -204,25 +249,35 @@ export default function ProposalStep({ analysis, proposal, onBack, onApply, onNe
             { cat: "Monthly Processing Fees", current: analysis.totalFees, proposed: proposal.projectedFees?.monthly, savings: savingsMonthly },
             { cat: "Annual Processing Fees", current: (analysis.totalFees || 0) * 12, proposed: (proposal.projectedFees?.monthly || 0) * 12, savings: savingsAnnual },
           ].map((r, i) => (
-            <div key={i} className={styles.tableRow}>
+            <div key={i} className={styles.tableRow} data-cols={hasCurrentCost ? "4" : "2"}>
               <div className={styles.tableCell}>{r.cat}</div>
-              <div className={`${styles.tableCell} ${styles["tableCell--danger"]}`}>{fmt$(r.current)}</div>
+              {hasCurrentCost && <div className={`${styles.tableCell} ${styles["tableCell--danger"]}`}>{fmt$(r.current)}</div>}
               <div className={`${styles.tableCell} ${styles["tableCell--info"]}`}>{fmt$(r.proposed)}</div>
-              <div className={`${styles.tableCell} ${styles["tableCell--success"]}`}>{fmt$(r.savings)}</div>
+              {hasCurrentCost && <div className={`${styles.tableCell} ${styles["tableCell--success"]}`}>{fmt$(r.savings)}</div>}
             </div>
           ))}
         </div>
       </div>
 
-      {/* Apply CTA */}
+      {/* Terminus CTA — the same place Flow B ends: a customer link. Filling in
+          the business details first is optional; whatever the rep enters there
+          becomes prefill on the customer's own onboarding form. */}
       <div className={styles.ctaPanel}>
         <div>
-          <div className={styles.ctaTitle}>Ready to move forward?</div>
-          <div className={styles.ctaSub}>Complete the processing application to get {analysis.merchantName || "this merchant"} onboarded with AIO.</div>
+          <div className={styles.ctaTitle}>Ready to send this to the merchant?</div>
+          <div className={styles.ctaSub}>
+            {analysis.merchantName || "The merchant"} opens the link to this quote, accepts, and onboards
+            themselves. Add their business details first and they&rsquo;ll only have to confirm them.
+          </div>
         </div>
-        <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={onApply}>
-          Apply for Processing →
-        </button>
+        <div className={styles.ctaActions}>
+          <button className={`${styles.btn} ${styles.btnGhost}`} onClick={onApply}>
+            Add Business Details
+          </button>
+          <button className={`${styles.btn} ${styles.btnSecondary}`} disabled={sendingLink} onClick={onSendLink}>
+            {sendingLink ? "Creating link…" : "Send Customer Link →"}
+          </button>
+        </div>
       </div>
 
       <div className={styles.actions}>

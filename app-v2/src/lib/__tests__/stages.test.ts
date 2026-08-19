@@ -7,11 +7,11 @@ import type { DealStage } from "@/types/merchant";
 const ALL_STAGES: DealStage[] = [
   "prospect_created",
   "lead_link_sent",
-  "quote_sent",
   "lead_analysis_pending",
   "analysis",
   "pricing",
   "proposal_ready",
+  "quote_sent",
   "proposal_sent",
   "quote_accepted",
   "merchant_link_sent",
@@ -33,8 +33,32 @@ describe("STAGE_RANK / STAGE_ORDER", () => {
 });
 
 describe("PROPOSAL_STAGES", () => {
-  it("matches the historical hand-copied bucket", () => {
-    expect(PROPOSAL_STAGES).toEqual(["quote_sent", "proposal_ready", "proposal_sent"]);
+  it("holds the same three stages the hand-copied bucket did", () => {
+    expect(PROPOSAL_STAGES).toEqual(["proposal_ready", "quote_sent", "proposal_sent"]);
+  });
+
+  // The bucket used to be a disjunction because the rep's wizard and the
+  // customer-link flow terminated at different, non-adjacent stages. Both now
+  // end at the same customer quote link, so it is a plain rank range — and a
+  // stage inserted inside that span is picked up automatically.
+  it("is a contiguous rank range, not a special case", () => {
+    const ranks = PROPOSAL_STAGES.map(s => STAGE_RANK[s]);
+    expect(ranks).toEqual([STAGE_RANK.proposal_ready, STAGE_RANK.proposal_ready + 1, STAGE_RANK.proposal_ready + 2]);
+    expect(ranks.at(-1)).toBe(STAGE_RANK.proposal_sent);
+  });
+
+  it("excludes the working stages nothing has been sent from", () => {
+    for (const s of ["lead_link_sent", "lead_analysis_pending", "analysis", "pricing"] as DealStage[]) {
+      expect(PROPOSAL_STAGES).not.toContain(s);
+    }
+  });
+
+  // The wizard's terminus. proposal_ready → quote_sent has to be a forward
+  // move, or issueCustomerQuoteLinkAction's shouldAdvance guard would silently
+  // refuse to mark the deal as sent.
+  it("ranks quote_sent above the wizard's proposal_ready", () => {
+    expect(STAGE_RANK.quote_sent).toBeGreaterThan(STAGE_RANK.proposal_ready);
+    expect(STAGE_RANK.quote_accepted).toBeGreaterThan(STAGE_RANK.quote_sent);
   });
 });
 

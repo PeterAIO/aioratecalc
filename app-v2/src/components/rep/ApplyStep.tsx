@@ -1,18 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import { sendMerchantOnboardingLinkAction } from "@/lib/actions/applications";
 import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
 import styles from "./ApplyStep.module.css";
 
+// OPTIONAL step. The customer fills this same form for themselves on
+// /customer/applications/[id] (CustomerOnboardStep), which prefills from
+// app.business / ownerContact / processing / agreement — so everything the rep
+// types here is work the customer no longer has to do. Nothing here is
+// required to send the quote link; the rep can skip straight past it.
 type Props = {
   app: MerchantApplication;
   onSaved: (app: MerchantApplication) => void | Promise<void>;
   onBack: () => void;
-  onNewProposal: () => void;
+  onSkip: () => void;
 };
 
-export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props) {
+export default function ApplyStep({ app, onSaved, onBack, onSkip }: Props) {
   const initial = app.analysis;
   const [biz, setBiz] = useState<Partial<BusinessInfo>>(app.business || {
     legalName: initial?.merchantName || "", dba: initial?.merchantName || "",
@@ -27,13 +31,9 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
     mcc: "", businessDescription: "", previouslyTerminated: "no", bankruptcy: "no",
     currentProcessor: initial?.currentProcessorName || "",
   });
-  const [agree, setAgree] = useState<Partial<AgreementInfo>>({ sigName: "", sigDate: "", termsAccepted: false, electronicConsentAccepted: false });
+  const [agree, setAgree] = useState<Partial<AgreementInfo>>(app.agreement || { sigName: "", sigDate: "", termsAccepted: false, electronicConsentAccepted: false });
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved]   = useState(false);
   const [err, setErr]       = useState<string | null>(null);
-  const [link, setLink]     = useState<{ url: string; sent: boolean } | null>(null);
-  const [linking, setLinking] = useState(false);
-  const [copied, setCopied]   = useState(false);
 
   const b = <T extends Record<string, unknown>>(setter: (fn: (prev: T) => T) => void) =>
     (k: keyof T) =>
@@ -46,13 +46,13 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
   const setAgreeF = b<Partial<AgreementInfo>>(setAgree as Parameters<typeof b>[0]);
 
   const handleSave = async () => {
-    if (!agree.termsAccepted || !agree.electronicConsentAccepted) {
-      setErr("Both checkboxes are required to submit the application.");
-      return;
-    }
     setSaving(true);
     setErr(null);
     try {
+      // Nothing was authorized unless the rep actually signed/ticked, so an
+      // untouched agreement stays null rather than reaching the customer's
+      // form as a phantom pre-signed one.
+      const signed = !!(agree.sigName || agree.termsAccepted || agree.electronicConsentAccepted);
       const updated: MerchantApplication = {
         ...app,
         stage: "proposal_sent",
@@ -60,29 +60,13 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
         business: biz as BusinessInfo,
         ownerContact: owner as OwnerContact,
         processing: proc as ProcessingInfo,
-        agreement: agree as AgreementInfo,
+        agreement: signed ? (agree as AgreementInfo) : null,
       };
       await onSaved(updated);
-      setSaved(true);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Save failed");
+      setSaving(false);
     }
-    setSaving(false);
-  };
-
-  // The application is already persisted by the time this runs (handleSave
-  // awaits onSaved), so the same action the dashboard uses works here — this
-  // is just the earlier, in-flow moment to hand the rep the link.
-  const handleSendLink = async () => {
-    setLinking(true);
-    setErr(null);
-    try {
-      const { result, url } = await sendMerchantOnboardingLinkAction(app.id);
-      setLink({ url, sent: result.sent });
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Could not create the onboarding link");
-    }
-    setLinking(false);
   };
 
   const input = (label: string, val: string, onChange: (e: React.ChangeEvent<HTMLInputElement>) => void, placeholder = "", type = "text") => (
@@ -92,55 +76,13 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
     </div>
   );
 
-  if (saved) {
-    return (
-      <div className={styles.successWrap}>
-        <div className={styles.successIcon}>✓</div>
-        <h1 className={styles.successTitle}>Application Saved</h1>
-        <p className={styles.successBody}>
-          The merchant application for <strong>{biz.dba || biz.legalName}</strong> has been saved.
-          Send them their onboarding link — it signs them in to complete KYC on Adyen&apos;s hosted forms.
-        </p>
-        {err && <div className={styles.errorBanner}>{err}</div>}
-        {link ? (
-          <>
-            <div className={styles.linkRow}>
-              <code className={styles.linkCode}>{link.url}</code>
-              <button
-                onClick={() => { navigator.clipboard.writeText(link.url); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-                className={styles.btnCopy}
-                data-copied={copied}
-              >
-                {copied ? "Copied!" : "Copy"}
-              </button>
-            </div>
-            <p className={styles.linkNote}>
-              {link.sent
-                ? `Emailed to ${owner.email}. The link expires in 30 minutes.`
-                : "Email delivery isn't configured yet — send this link to the merchant yourself. It expires in 30 minutes."}
-            </p>
-          </>
-        ) : (
-          <div className={styles.successActions}>
-            <button onClick={handleSendLink} disabled={linking} className={styles.btnPrimary}>
-              {linking ? "Creating link…" : "Send Onboarding Link"}
-            </button>
-          </div>
-        )}
-        <div className={styles.successActions}>
-          <button onClick={onNewProposal} className={styles.btnSecondary}>
-            Start New Proposal
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className={styles.page}>
-      <h1 className={styles.pageTitle}>Processing Application</h1>
+      <h1 className={styles.pageTitle}>Business Details (Optional)</h1>
       <p className={styles.pageSubtitle}>
-        Complete the non-sensitive business details below. SSN, bank account, and EIN are collected by Adyen directly — AIO never touches that data.
+        Anything you fill in here is pre-filled on the merchant&apos;s own onboarding form, so all they
+        have to do is confirm it. Skip it and they&apos;ll simply fill it in themselves. SSN, bank account,
+        and EIN are collected by Adyen directly — AIO never touches that data.
       </p>
 
       {/* Business Info */}
@@ -231,6 +173,10 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
       {/* Agreement */}
       <div className={styles.panel}>
         <h2 className={styles.sectionTitle}>Authorization & Agreement</h2>
+        <p className={styles.hint}>
+          Only if the merchant is signing with you now. Left blank, they sign it themselves on their
+          own onboarding form.
+        </p>
         {input("Authorized Signatory Name", agree.sigName || "", setAgreeF("sigName") as (e: React.ChangeEvent<HTMLInputElement>) => void, "Jane Doe")}
         <div className={styles.checkboxGroup}>
           <label className={styles.checkboxRow}>
@@ -256,12 +202,15 @@ export default function ApplyStep({ app, onSaved, onBack, onNewProposal }: Props
 
       <div className={styles.actions}>
         <button className={styles.btnSecondary} onClick={onBack}>← Back to Proposal</button>
+        <button className={styles.btnSecondary} disabled={saving} onClick={onSkip}>
+          Skip — Send Link Now
+        </button>
         <button
           className={styles.btnPrimary}
           disabled={saving}
           onClick={handleSave}
         >
-          {saving ? "Saving…" : "Save Application →"}
+          {saving ? "Saving…" : "Save & Send Customer Link →"}
         </button>
       </div>
     </div>

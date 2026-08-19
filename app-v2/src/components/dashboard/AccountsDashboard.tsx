@@ -26,8 +26,10 @@ import styles from "./AccountsDashboard.module.css";
 const FALLBACK_STAGE_COLOR = "#9ca3af";
 
 // Stages that are still mid-build in the proposal wizard and can be reopened.
-// The wizard hydrates from ?id= and jumps to the right step (Analysis / Proposal).
-const RESUMABLE_STAGES = ["analysis", "proposal_ready"];
+// The wizard hydrates from ?id= and jumps to the right step (Analysis /
+// Proposal). `pricing` is here for completeness — nothing sets it today, but a
+// deal parked there would otherwise be unreachable from the dashboard.
+const RESUMABLE_STAGES = ["analysis", "pricing", "proposal_ready"];
 
 // Grid column templates — admin adds a "Rep" column for commission attribution.
 const REP_COLS   = "1fr 140px 110px 100px 100px 90px";
@@ -442,7 +444,7 @@ function AccountsDashboardInner({
                           (but only reads other reps' accounts for oversight). */}
                       {selected.ownerUserId === userId && RESUMABLE_STAGES.includes(selected.stage) && (
                         <button onClick={() => router.push(`/rep/proposals/new?id=${selected.id}`)} className={styles.btnPrimary}>
-                          {selected.stage === "proposal_ready" ? "Resume Proposal" : "Continue Analysis"}
+                          {selected.stage === "analysis" ? "Continue Analysis" : "Resume Proposal"}
                         </button>
                       )}
                       {selected.ownerUserId === userId && selected.stage === "proposal_sent" && !selected.adyenOnboardingUrl && (

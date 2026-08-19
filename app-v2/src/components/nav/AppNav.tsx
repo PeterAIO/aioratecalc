@@ -60,11 +60,13 @@ export function AppNav({ role, userName }: { role: NavRole; userName?: string })
               open={openMenu === "create"}
               onToggle={() => setOpenMenu(m => (m === "create" ? null : "create"))}
             >
-              <MenuLink href="/rep/proposals/new" pathname={pathname} desc="Enter the merchant's statement yourself">
-                Upload a statement
+              {/* Two ways into one process — both end with a quote link the
+                  merchant opens, accepts, and self-onboards from. */}
+              <MenuLink href="/rep/proposals/new" pathname={pathname} desc="You have their statement or numbers">
+                Build the quote with them
               </MenuLink>
-              <MenuLink href="/rep/prospects/new" pathname={pathname} desc="Let the customer upload it themselves">
-                Send a customer link
+              <MenuLink href="/rep/prospects/new" pathname={pathname} desc="They fill in whatever you don't have">
+                Build the quote for them
               </MenuLink>
             </NavDropdown>
             <NavDropdown
@@ -99,11 +101,13 @@ export function AppNav({ role, userName }: { role: NavRole; userName?: string })
               open={openMenu === "create"}
               onToggle={() => setOpenMenu(m => (m === "create" ? null : "create"))}
             >
-              <MenuLink href="/rep/proposals/new" pathname={pathname} desc="Enter the merchant's statement yourself">
-                Upload a statement
+              {/* Two ways into one process — both end with a quote link the
+                  merchant opens, accepts, and self-onboards from. */}
+              <MenuLink href="/rep/proposals/new" pathname={pathname} desc="You have their statement or numbers">
+                Build the quote with them
               </MenuLink>
-              <MenuLink href="/rep/prospects/new" pathname={pathname} desc="Let the customer upload it themselves">
-                Send a customer link
+              <MenuLink href="/rep/prospects/new" pathname={pathname} desc="They fill in whatever you don't have">
+                Build the quote for them
               </MenuLink>
             </NavDropdown>
 

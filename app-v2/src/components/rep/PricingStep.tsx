@@ -3,19 +3,32 @@
 import { useState, useEffect, useMemo } from "react";
 import { getPricingPreviewAction } from "@/lib/actions/pricing";
 import { fmt$, fmtPct2 } from "@/lib/utils";
-import type { StatementAnalysis, ProposalOutput, Processor, ProcessorTier } from "@/types/merchant";
+import type { StatementAnalysis, ProposalOutput, Processor, ProcessorTier, PricingModel } from "@/types/merchant";
 import type { FeeOverrides, RoleScopedPricing } from "@/lib/pricing";
 import styles from "./PricingStep.module.css";
 
-type PricingModel = "flat-rate" | "2-tier" | "interchange-plus";
 type Tone = "info" | "warning" | "success";
+
+/**
+ * Everything the rep decided here, not just the generated prose. The wizard
+ * used to receive only the ProposalOutput, so the margin target and model the
+ * rep actually chose died with this component's state — and the customer's
+ * quote was then priced at the volume tier's default instead.
+ */
+export type PricingOutcome = {
+  proposal: ProposalOutput;
+  targetMargin: number;
+  pricingModel: PricingModel;
+  cardPresentPct: number;
+  feeOverrides: FeeOverrides;
+};
 
 type Props = {
   analysis: StatementAnalysis;
   activeProcessor: Processor | null;
   activeTier: ProcessorTier | null;
   onBack: () => void;
-  onProposal: (proposal: ProposalOutput) => void;
+  onProposal: (outcome: PricingOutcome) => void;
 };
 
 // tone preserves the old T.blue/T.gold/T.green data-encoding per model —
@@ -79,6 +92,10 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
     return () => clearTimeout(handle);
   }, [effectiveAnalysis, targetMargin, model, feeOverrides, activeTier]);
 
+  // No statement means nothing is known about what they pay today
+  // (analysisFromQuoteConfig leaves totalFees at 0), so there is no savings
+  // figure to show — showing one would be a fabricated negative.
+  const hasCurrentCost = (analysis.totalFees || 0) > 0;
   const savings     = pricing ? (analysis.totalFees || 0) - pricing.projectedMonthlyFees : 0;
   const belowFloor  = pricing?.belowCostFloor ?? false;
   const belowMin    = pricing?.belowMarginFloor ?? false;
@@ -87,17 +104,24 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
   const sliderVal   = targetMargin ?? 0;
 
   const generate = async () => {
+    if (targetMargin == null) return; // the button is disabled until the server seeds it
     setLoading(true);
     setError(null);
     try {
       const res  = await fetch("/api/proposal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysis: effectiveAnalysis, pricingModel: model, targetMargin: targetMargin ?? undefined, feeOverrides }),
+        body: JSON.stringify({ analysis: effectiveAnalysis, pricingModel: model, targetMargin, feeOverrides }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Proposal generation failed");
-      onProposal(data.proposal);
+      onProposal({
+        proposal: data.proposal,
+        targetMargin,
+        pricingModel: model,
+        cardPresentPct: cpPct,
+        feeOverrides,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Proposal generation failed");
     }
@@ -111,7 +135,13 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
     <div className={styles.page}>
       <h1 className={styles.title}>Select Pricing Model</h1>
       <p className={styles.subtitle}>
-        Currently paying <strong className={styles.subtitleAccent}>{fmtPct2(analysis.effectiveRate)}</strong> ({fmt$(analysis.totalFees)}/mo).
+        {hasCurrentCost ? (
+          <>
+            Currently paying <strong className={styles.subtitleAccent}>{fmtPct2(analysis.effectiveRate)}</strong> ({fmt$(analysis.totalFees)}/mo).{" "}
+          </>
+        ) : (
+          <>No statement, so what they pay today is unknown — this quotes the AIO rate only.{" "}</>
+        )}
         Merchant volume: <strong className={styles.subtitleStrong}>{fmt$(analysis.totalVolume)}/mo</strong>.
       </p>
 
@@ -194,8 +224,12 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
             <div className={styles.projectionGrid}>
               {[
                 { lbl: "Projected Fees", val: pricing ? fmt$(pricing.projectedMonthlyFees) : "—", tone: styles["value--info"] },
-                { lbl: "Monthly Savings", val: pricing ? fmt$(savings) : "—", tone: styles["value--success"] },
-                { lbl: "Annual Savings", val: pricing ? fmt$(savings * 12) : "—", tone: styles["value--success"] },
+                hasCurrentCost
+                  ? { lbl: "Monthly Savings", val: pricing ? fmt$(savings) : "—", tone: styles["value--success"] }
+                  : { lbl: "Annual Fees", val: pricing ? fmt$(pricing.projectedMonthlyFees * 12) : "—", tone: styles["value--info"] },
+                hasCurrentCost
+                  ? { lbl: "Annual Savings", val: pricing ? fmt$(savings * 12) : "—", tone: styles["value--success"] }
+                  : { lbl: "Savings", val: "No statement", tone: "" },
                 { lbl: "New Effective Rate", val: pricing ? fmtPct2(pricing.projectedMonthlyFees / vol) : "—", tone: "" },
               ].map(m => (
                 <div key={m.lbl} className={styles.box}>
@@ -344,7 +378,7 @@ export default function PricingStep({ analysis, activeProcessor, activeTier, onB
           disabled={loading || blocked || !pricing || targetMargin == null}
           onClick={generate}
         >
-          {loading ? "Generating Proposal…" : blocked ? "Adjust Pricing to Continue" : "Generate Proposal →"}
+          {loading ? "Preparing proposal…" : blocked ? "Adjust Pricing to Continue" : "Continue to Products →"}
         </button>
       </div>
     </div>
