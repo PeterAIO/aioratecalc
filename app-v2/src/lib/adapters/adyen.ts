@@ -10,6 +10,27 @@
 import { usStateCode } from "@/lib/utils";
 import type { MerchantApplication } from "@/types/merchant";
 
+// Adyen requires E.164 phone numbers (e.g. "+15106680242"); reps hand-type free
+// text ("555-000-0000", "(714) 833-5760") and the HubSpot prefill deliberately
+// renders phones in that same display format. This is the Adyen-boundary
+// counterpart to hubspotPrefill.ts's normalizePhone(), which formats for DISPLAY
+// in the opposite direction — the two target different formats and must not be
+// conflated. Unlike usStateCode (shared with the HubSpot prefill mapper), this
+// has exactly one consumer — this adapter — so it stays local rather than
+// moving to utils.ts.
+// Anything that can't be confidently mapped to a 10-digit US number (or is
+// already E.164) is returned trimmed but otherwise UNCHANGED — a wrong number
+// silently sent to Adyen is worse than leaving the current value alone.
+export function toE164Phone(phone: string | undefined): string | undefined {
+  const raw = (phone ?? "").trim();
+  if (!raw) return undefined;
+  if (raw.startsWith("+")) return raw;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return raw;
+}
+
 export interface AdyenOnboardResult {
   legalEntityId: string;
   accountHolderId: string;
@@ -225,7 +246,7 @@ async function createStore(
     description: displayName,
     reference: storeReference,
     shopperStatement,
-    phoneNumber: app.business?.phone,
+    phoneNumber: toE164Phone(app.business?.phone),
     address: {
       country: "US",
       line1: app.business?.address,

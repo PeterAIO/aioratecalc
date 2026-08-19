@@ -418,6 +418,35 @@ export function planEasyobLinkUpdates(companies: EasyobLinkCompany[], baseUrl: s
 
 export type EasyobLinkBackfillSummary = { checked: number; updated: number; failed: number; error?: string };
 
+// HubSpot's batch/update returns 200 when every record in the chunk succeeded,
+// or 207 MULTI_STATUS when some failed — `results` holds only the records that
+// actually updated, `errors[].context.ids` holds the ids that didn't (with
+// `numErrors` as the failed count). Fetch's Response.ok is true for BOTH 200
+// and 207 (both are in the 200-299 range), so the HTTP status alone can't tell
+// success from partial failure — the body must be read either way.
+export type HubspotBatchUpdateResponse = {
+  status?: string;
+  results?: Array<{ id: string }>;
+  numErrors?: number;
+  errors?: Array<{ status?: string; category?: string; message?: string; context?: { ids?: string[] } }>;
+};
+
+/**
+ * Pure: turns one batch/update response body into per-record success/failure
+ * counts. `requestedCount` is the chunk size sent, used as the fallback for
+ * "failed" so a response with neither `results` nor error info still adds up
+ * rather than silently under-counting. Kept separate from the fetch so it's
+ * unit-testable without HubSpot.
+ */
+export function countBatchUpdateOutcome(
+  body: HubspotBatchUpdateResponse,
+  requestedCount: number
+): { updated: number; failed: number } {
+  const updated = body.results?.length ?? 0;
+  const failed = typeof body.numErrors === "number" ? body.numErrors : Math.max(requestedCount - updated, 0);
+  return { updated, failed };
+}
+
 // Companies API and platform-wide "secondly" limits are both far above these
 // counts in steady state, but a 429 does happen under load — retry a few
 // times (honoring Retry-After when HubSpot sends one) rather than just
@@ -505,10 +534,18 @@ export async function backfillEasyobLinks(): Promise<EasyobLinkBackfillSummary> 
       headers: headers(),
       body: JSON.stringify({ inputs: chunk }),
     });
-    if (res.ok) {
-      updated += chunk.length;
-    } else if (res.status === 403) {
+    if (res.status === 403) {
       throw new Error("companies.write scope missing on the general app — grant crm.objects.companies.write and retry");
+    } else if (res.ok) {
+      // 200 (all succeeded) or 207 MULTI_STATUS (partial failure) — both are
+      // res.ok, so the body is the only way to tell them apart.
+      const body = await res.json() as HubspotBatchUpdateResponse;
+      const outcome = countBatchUpdateOutcome(body, chunk.length);
+      updated += outcome.updated;
+      failed += outcome.failed;
+      if (outcome.failed > 0) {
+        console.error("backfillEasyobLinks: batch update partial failure", outcome.failed, "of", chunk.length, body.errors);
+      }
     } else {
       failed += chunk.length;
       console.error("backfillEasyobLinks: batch update failed", res.status, await res.text());

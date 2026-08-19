@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { buildEasyobLink, planEasyobLinkUpdates, isPublicBaseUrl, type EasyobLinkCompany } from "@/lib/adapters/hubspot";
+import {
+  buildEasyobLink,
+  planEasyobLinkUpdates,
+  isPublicBaseUrl,
+  countBatchUpdateOutcome,
+  type EasyobLinkCompany,
+} from "@/lib/adapters/hubspot";
 
 const BASE = "https://easyob.example.com";
 
@@ -85,5 +91,36 @@ describe("isPublicBaseUrl", () => {
 
   it("accepts a valid public https URL", () => {
     expect(isPublicBaseUrl("https://easyob.example.com")).toBe(true);
+  });
+});
+
+describe("countBatchUpdateOutcome", () => {
+  it("counts a full-success (200) response from results alone", () => {
+    const body = { status: "COMPLETE", results: [{ id: "1" }, { id: "2" }] };
+    expect(countBatchUpdateOutcome(body, 2)).toEqual({ updated: 2, failed: 0 });
+  });
+
+  it("counts a 207 MULTI_STATUS partial failure using numErrors", () => {
+    const body = {
+      status: "COMPLETE",
+      results: [{ id: "1" }],
+      numErrors: 1,
+      errors: [{ status: "error", category: "OBJECT_NOT_FOUND", context: { ids: ["2"] } }],
+    };
+    expect(countBatchUpdateOutcome(body, 2)).toEqual({ updated: 1, failed: 1 });
+  });
+
+  it("falls back to requestedCount - updated when numErrors is absent", () => {
+    const body = { results: [{ id: "1" }] };
+    expect(countBatchUpdateOutcome(body, 3)).toEqual({ updated: 1, failed: 2 });
+  });
+
+  it("treats a body with no results and no error info as a total failure", () => {
+    expect(countBatchUpdateOutcome({}, 5)).toEqual({ updated: 0, failed: 5 });
+  });
+
+  it("never reports negative failures when results exceeds requestedCount", () => {
+    const body = { results: [{ id: "1" }, { id: "2" }] };
+    expect(countBatchUpdateOutcome(body, 1)).toEqual({ updated: 2, failed: 0 });
   });
 });
