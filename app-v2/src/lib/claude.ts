@@ -232,10 +232,28 @@ Use 0 for unknown numerics. Never null.`,
     const cnpPct = (rawCp > 0 || rawCnp > 0) ? (rawCnp || 1 - rawCp) : 0.1;
     parsed.interchangeRate = blendedInterchangeEstimate(cpPct, cnpPct);
     parsed.icEstimated = true;
-    trace?.step("interchange ESTIMATED (flat/tiered, not itemized)", {
+
+    // Estimated interchange DOLLARS + re-split the fee stack. On a flat-rate/tiered
+    // statement RULE 3 set processorFees = totalFees − otherFees, which still contains
+    // the bundled interchange. Leaving interchangeFees at $0 made the 3-way split render
+    // "$0.00" interchange and dump the whole bundled amount into "Your Markup",
+    // overstating the current processor markup (a 3.12% flat-rate Toast merchant showed
+    // 2.58% markup instead of ~1%). Move the estimated interchange out of markup so the
+    // fee split and the gross-margin box agree. pricing/derivePricing keys off
+    // interchangeRate + icEstimated, NOT these dollar fields, so this is display-only
+    // and does not move any quoted number.
+    const estIcFees = parsed.interchangeRate * vol;
+    parsed.interchangeFees = estIcFees;
+    parsed.processorFees   = Math.max(0, ((parsed.totalFees || 0) as number) - estIcFees - ((parsed.otherFees || 0) as number));
+    parsed.processorMarkup = parsed.processorFees / vol;
+
+    trace?.step("interchange ESTIMATED (flat/tiered — bundled, not itemized)", {
       cpPct, cnpPct,
       estimatedInterchangeRate: parsed.interchangeRate,
-      note: "Statement bundles interchange; used 2.10% CP / 2.50% CNP blended estimate",
+      estimatedInterchangeFees: estIcFees,
+      residualProcessorFees: parsed.processorFees,
+      residualProcessorMarkupRate: parsed.processorMarkup,
+      note: "Statement bundles interchange; used 2.10% CP / 2.50% CNP blended estimate. Interchange $ and markup re-split for display; pricing unaffected.",
     });
   }
 

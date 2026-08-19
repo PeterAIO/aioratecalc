@@ -29,14 +29,14 @@ export default function AnalysisStep({ analysis, activeProcessor, activeTier, on
         const adyenRate = adyenCost / (analysis.totalVolume || 1);
         const myMarkup  = Math.max(0, (analysis.processorFees || 0) - adyenCost);
         return [
-          { name: "Interchange", note: analysis.interchangeNotShown ? "Back-calculated: total − markup − other" : "Card network cost — non-negotiable", amt: analysis.interchangeFees, rate: analysis.interchangeRate, ...CAT_INFO },
+          { name: "Interchange", note: analysis.interchangeNotShown ? "Back-calculated: total − markup − other" : analysis.icEstimated ? "Estimated — flat/tiered bundles interchange" : "Card network cost — non-negotiable", amt: analysis.interchangeFees, rate: analysis.interchangeRate, ...CAT_INFO },
           { name: `${activeProcessor?.name} Cost`, note: "Acquirer cost: processing + txn + scheme", amt: adyenCost, rate: adyenRate, ...CAT_WARNING },
           { name: "Your Markup", note: "Processor markup above interchange & acquirer", amt: myMarkup, rate: myMarkup / (analysis.totalVolume || 1), ...CAT_SUCCESS },
           { name: "Other Fees", note: "Monthly, PCI, misc. — pure margin", amt: analysis.otherFees, rate: (analysis.otherFees || 0) / (analysis.totalVolume || 1), ...CAT_SUCCESS },
         ];
       })()
     : [
-        { name: "Interchange", note: analysis.interchangeNotShown ? "Back-calculated from statement total" : "Pass-through", amt: analysis.interchangeFees, rate: analysis.interchangeRate, ...CAT_INFO },
+        { name: "Interchange", note: analysis.interchangeNotShown ? "Back-calculated from statement total" : analysis.icEstimated ? "Estimated — flat/tiered bundles interchange" : "Pass-through", amt: analysis.interchangeFees, rate: analysis.interchangeRate, ...CAT_INFO },
         { name: "Processor Markup", note: "Where savings are found", amt: analysis.processorFees, rate: analysis.processorMarkup, ...CAT_WARNING },
         { name: "Other Fees", note: "Monthly, PCI, misc. — pure margin", amt: analysis.otherFees, rate: (analysis.otherFees || 0) / (analysis.totalVolume || 1), ...CAT_SUCCESS },
       ];
@@ -71,6 +71,24 @@ export default function AnalysisStep({ analysis, activeProcessor, activeTier, on
               This statement shows total fees but does not itemize interchange separately.
               Markup was calculated from stated rates ({fmtPct2(analysis.statedMarkupRate)} + ${(analysis.statedPerTxnFee || 0).toFixed(2)}/txn).
               <strong> Interchange = total fees − markup − other fees</strong>.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Flat-rate / tiered: interchange is bundled, so it's estimated, not read */}
+      {analysis.icEstimated && !analysis.interchangeNotShown && (
+        <div className={styles.infoBanner}>
+          <span className={styles.infoBannerIcon}>ℹ️</span>
+          <div>
+            <div className={styles.infoBannerTitle}>
+              {analysis.currentPricingModel?.replace("-", " ").toUpperCase()} Statement — Interchange Estimated
+            </div>
+            <div className={styles.infoBannerBody}>
+              This statement bundles interchange into the rate, so it isn&apos;t itemized.
+              Interchange is <strong>estimated</strong> from the card-present mix
+              (2.10% card-present / 2.50% card-not-present blended to {fmtPct2(analysis.interchangeRate)}).
+              Everything above that estimate ({fmtPct2(analysis.currentMargin)}) is the merchant&apos;s cost above interchange.
             </div>
           </div>
         </div>
