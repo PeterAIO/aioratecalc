@@ -2,7 +2,7 @@
  * for authenticated app sections (rep + admin) so both mount the same AppNav. */
 
 .shell {
-  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-body);
@@ -14,3 +14,37 @@
 .main {
   flex: 1;
 }
+
+/* ---------------------------------------------------------------------------
+ * Page container. One place that owns the gutter, the max-width and the
+ * vertical rhythm, so pages stop re-declaring
+ *   margin-inline: auto; padding: var(--space-2xl) var(--space-lg) var(--space-3xl)
+ * Choose a measure class by content shape (see --measure-* in globals.css).
+ *
+ * Consumed by importing this module alongside the page's own module — no
+ * cross-file `composes`, so it works from any page module, at any depth:
+ *
+ *   import shell from "@/components/nav/shell.module.css";
+ *   import styles from "./accounts.module.css";
+ *
+ *   <div className={`${shell.pageApp} ${styles.page}`}> … </div>
+ *
+ * The page's own class then carries only what is genuinely page-specific
+ * (grid, gap, section rhythm) and no longer repeats width/gutter/padding.
+ *
+ * Escape hatch: a page that truly needs a one-off width sets --page-measure on
+ * its own class rather than forking the padding, and pairs it with shell.page —
+ *   .page { --page-measure: 64rem; }
+ * ------------------------------------------------------------------------- */
+
+.page {
+  width: 100%;
+  margin-inline: auto;
+  max-width: var(--page-measure, var(--measure-doc));
+  padding: var(--space-2xl) var(--space-lg) var(--space-3xl);
+}
+
+.pageForm { composes: page; --page-measure: var(--measure-form); }
+.pageDoc  { composes: page; --page-measure: var(--measure-doc); }
+.pageApp  { composes: page; --page-measure: var(--measure-app); }
+.pageWide { composes: page; --page-measure: var(--measure-wide); }

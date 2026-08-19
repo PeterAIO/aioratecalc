@@ -19,7 +19,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
   return (
     <html lang="en">
-      <body style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text)" }}>
+      <body>
         {children}
         {debugSwitchEnabled && <RoleSwitcher current={currentDebugRole} />}
       </body>

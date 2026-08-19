@@ -115,6 +115,64 @@ when other pages adopt them.
 --shadow-whisper: 0 1px 2px oklch(20% 0.01 32 / 0.05), 0 8px 24px oklch(20% 0.01 32 / 0.06);
 ```
 
+## Layout
+
+Layout is systematised the same way spacing is: a page picks a named measure, it
+does not invent a `max-width`. Four measures, chosen by content shape.
+
+```css
+--measure-form: 38rem;   /* single-column reading + data entry */
+--measure-doc:  50rem;   /* documents and prose */
+--measure-app:  72rem;   /* dashboards, tables, list views */
+--measure-wide: 84rem;   /* two-pane rep tooling */
+
+--nav-height: 3.5rem;                                     /* the floating pill, measured: 55.19px -> 56px */
+--nav-offset: calc(var(--space-md) + var(--nav-height));  /* viewport top -> pill bottom = 72px */
+```
+
+- `--measure-form` — auth cards, the prospect-link form, pillow settings. Anything
+  that is one column of labels and inputs.
+- `--measure-doc` — the rep wizard steps and the proposal. Prose and stat-led
+  reading; wider than this and line length gets uncomfortable.
+- `--measure-app` — dashboards and tables. The de-facto width the admin reference
+  implementation already uses.
+- `--measure-wide` — two-pane rep tooling only. At 1440px this leaves ~48px
+  gutters; the panes cap line length, so the container is allowed to be wide.
+- `--nav-offset` — anything `position: sticky` that must clear the nav offsets
+  from this, never from a pixel literal. Only meaningful above the 40rem
+  breakpoint; below it the nav is `position: static` and scrolls away.
+
+The gutter/rhythm triple (`margin-inline: auto` + `padding: var(--space-2xl)
+var(--space-lg) var(--space-3xl)`) is not re-declared per page — it lives on the
+container classes in `src/components/nav/shell.module.css`
+(`.page`, `.pageForm`, `.pageDoc`, `.pageApp`, `.pageWide`), imported alongside
+the page's own module:
+
+```tsx
+import shell from "@/components/nav/shell.module.css";
+import styles from "./accounts.module.css";
+
+<div className={`${shell.pageApp} ${styles.page}`}> … </div>
+```
+
+The nav pill is fixed at `--measure-wide` on every route — global chrome holds one
+width, and being pinned to the widest measure means it can never render narrower
+than the content beneath it.
+
+### Breakpoints
+
+Three, app-wide. CSS custom properties are illegal inside `@media` preludes, so
+these are typed as literals — these literals and no others.
+
+| Token-in-spirit | Value | Boundary |
+|---|---|---|
+| phone → tablet | `40rem` (640px) | below this the nav goes static and wraps |
+| tablet → laptop | `60rem` (960px) | multi-column content collapses |
+| laptop → wide | `80rem` (1280px) | `--measure-wide` two-pane layouts engage |
+
+Written mobile-last (`@media (max-width: 40rem)`) to match what is already in the
+codebase.
+
 ## Motion
 
 - Easing: `--ease-out: cubic-bezier(0.16, 1, 0.3, 1)` — never the browser default,

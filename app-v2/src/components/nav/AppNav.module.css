@@ -6,8 +6,18 @@
   top: var(--space-md);
   z-index: 200;
   margin-inline: auto;
-  max-width: 60rem;
+  /* The pill is global chrome, so its width is fixed across routes — a bar that
+   * resized per page would jump on every navigation. It is pinned to the widest
+   * page measure so it can never end up narrower than the content beneath it
+   * (it was 60rem against 72rem dashboards, which read as a mistake); on the
+   * narrower families it simply frames the content, which is the right
+   * hierarchy for chrome. Intrinsic min width of the fullest bar (admin) is
+   * ~859px, so there is a lot of headroom before anything can overflow. */
+  max-width: var(--measure-wide);
   width: calc(100% - 2 * var(--space-md));
+  /* Pins --nav-height to the pill's real height so sticky page furniture that
+   * offsets from --nav-offset can never silently desync from the nav. */
+  min-height: var(--nav-height);
   display: flex;
   align-items: center;
   justify-content: space-between;

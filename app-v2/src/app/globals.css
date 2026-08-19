@@ -59,14 +59,55 @@
 
   --radius-sm: 12px; --radius-md: 16px; --radius-lg: 20px; --radius-pill: 999px;
 
+  /* Layout measures — the four allowed page widths. Pick by content shape, not
+   * by eye. Never hand-roll a new max-width in a page module; if none of these
+   * fit, the page is telling you it belongs in a different family. Pages consume
+   * these through the container classes in components/nav/shell.module.css. */
+  --measure-form: 38rem;   /* single-column reading + data entry (auth, prospects, settings forms) */
+  --measure-doc:  50rem;   /* documents and prose (wizard steps, proposals) */
+  --measure-app:  72rem;   /* dashboards, tables, list views */
+  --measure-wide: 84rem;   /* two-pane rep tooling — panes cap the line length, not the container */
+
+  /* Nav geometry. --nav-height is the floating pill's real rendered height,
+   * measured in the browser: 37.19px tallest control (0.8rem Plus Jakarta line
+   * box + 2 * --space-xs padding + 2 * 1px border) + 2 * --space-xs pill
+   * padding + 2 * 1px pill border = 55.19px, rounded up to 56px. .nav pins that
+   * with min-height, so the token is authoritative, not just descriptive.
+   * --nav-offset is the distance from the viewport top to the pill's bottom
+   * edge, since the pill sticks at top: --space-md. Anything sticky that has to
+   * clear the nav uses calc(var(--nav-offset) + <gap>) — never a literal.
+   * Only meaningful above the 40rem breakpoint: below it the nav is static and
+   * scrolls away, so sticky page furniture should offset from 0 there. */
+  --nav-height: 3.5rem;
+  --nav-offset: calc(var(--space-md) + var(--nav-height));
+
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --shadow-whisper: 0 1px 2px oklch(20% 0.01 32 / 0.05), 0 8px 24px oklch(20% 0.01 32 / 0.06);
 }
+
+/* ---------------------------------------------------------------------------
+ * Breakpoints — AUTHORITATIVE. Three, and only three, for the whole app.
+ *
+ *   40rem   640px   phone   -> tablet
+ *   60rem   960px   tablet  -> laptop
+ *   80rem  1280px   laptop  -> wide
+ *
+ * CSS custom properties are not allowed inside @media preludes, so these can
+ * never be real tokens — they have to be typed as literals. Type these literals
+ * and no others; do not invent 34rem / 48rem / 56.25rem one-offs. Written
+ * max-width (mobile-last) to match the media queries already in the codebase.
+ *
+ *   @media (max-width: 40rem) { … }
+ * ------------------------------------------------------------------------- */
 
 * { box-sizing: border-box; }
 html, body { overflow-x: clip; }
 
 body {
+  /* dvh, not vh: on mobile Safari/Chrome the URL bar makes 100vh taller than the
+   * visible viewport, which manufactures a phantom scroll on short pages. Every
+   * other full-height rule in the app already moved to dvh. */
+  min-height: 100dvh;
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-body);
