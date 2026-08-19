@@ -274,7 +274,10 @@
 
 @media (max-width: 40rem) {
   .nav {
-    position: static;
+    /* relative, not static: the bar stops sticking here (top: auto), but it
+     * still has to be the containing block for the dropdowns below. */
+    position: relative;
+    top: auto;
     width: 100%;
     max-width: none;
     margin-inline: 0;
@@ -282,9 +285,30 @@
     flex-wrap: wrap;
   }
 
+  /* The pill wraps here, so the actions row has to wrap with it. Left at
+   * nowrap + flex-end, the rep bar's ~463px of controls were laid out in a
+   * ~343px row and the excess ran off the LEFT edge, where the app's
+   * overflow-x: clip swallowed it — at 375px that hid "Accounts" outright
+   * (and on admin, "Dashboard" and "Accounts"). */
+  .navActions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    row-gap: var(--space-xs);
+  }
+
+  /* Anchoring the menu to its trigger only worked while the actions were one
+   * right-aligned row. Now that they wrap, a trigger can sit anywhere along a
+   * row and a 200-248px menu hung off it ran past the right edge (New Account
+   * reached 369px on a 320px screen). Below the breakpoint the menu drops out
+   * of the bar and spans it instead. */
+  .dropdown {
+    position: static;
+  }
+
   .menu {
-    right: auto;
-    left: 0;
+    left: var(--space-xs);
+    right: var(--space-xs);
+    min-width: 0;
   }
 }
 

@@ -184,6 +184,26 @@
   outline-offset: 2px;
 }
 
+/* ---------- Narrow screens ---------- */
+
+/* Below the phone breakpoint a panel leaves ~277px of inner width, so the
+   two-up rows have to collapse: unfixed, .grid2 rendered pairs of ~130px
+   inputs and .actions overflowed the viewport outright. */
+@media (max-width: 40rem) {
+  .grid2 {
+    grid-template-columns: 1fr;
+  }
+
+  .inlineRow {
+    flex-direction: column;
+    gap: var(--space-md);
+  }
+
+  .actions {
+    flex-wrap: wrap;
+  }
+}
+
 /* ---------- Reduced motion ---------- */
 
 @media (prefers-reduced-motion: reduce) {
