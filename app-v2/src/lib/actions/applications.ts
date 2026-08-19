@@ -14,7 +14,6 @@ import type { MerchantApplication, AppSettings, CustomerSubmission } from "@/typ
 
 export type RepSummary = { id: string; name: string; email: string };
 
-const MERCHANT_LINK_TTL_DAYS = 14;
 const LOGIN_TOKEN_TTL_MINUTES = 30;
 
 async function requireScope(): Promise<StorageScope> {
@@ -59,10 +58,17 @@ export async function listSubmissionsAction(): Promise<CustomerSubmission[]> {
 
 // Rep/admin-triggered: emails the merchant contact a magic link that logs
 // them straight into /customer/applications/{id} to complete Adyen KYC.
-// customerLinkToken/Purpose/SentAt/ExpiresAt on the application are
-// bookkeeping only (mirrors how the lead_upload purpose uses these same
-// fields); the actual short-lived auth mechanism is the customerLoginTokens
-// row below, reusing the existing /api/customer/verify route unmodified.
+// The short-lived auth mechanism is the customerLoginTokens row below, reusing
+// the existing /api/customer/verify route unmodified.
+//
+// This deliberately does NOT touch customerLinkToken/Purpose/SentAt/ExpiresAt.
+// Those used to be written here with purpose "kyc_handoff" as bookkeeping, but
+// nothing ever read a kyc_handoff token — /lead/[token] and both lead API
+// routes require purpose === "lead_upload" — so the write's only observable
+// effect was silently killing a live quote link the merchant already had in
+// hand. The "we sent it" record lives in the stage move plus the
+// customerLoginTokens row's own createdAt. See lib/customerLink.ts.
+//
 // `url` is returned alongside `result` so the caller can always show the rep
 // the link itself — SendMagicLinkResult.devUrl is only populated when Resend
 // isn't configured, which would otherwise leave the rep with nothing to share.
@@ -77,10 +83,6 @@ export async function sendMerchantOnboardingLinkAction(id: string): Promise<{ ap
   const updated: MerchantApplication = {
     ...app,
     stage: "merchant_link_sent",
-    customerLinkToken: randomUUID(),
-    customerLinkPurpose: "kyc_handoff",
-    customerLinkSentAt: now.toISOString(),
-    customerLinkExpiresAt: new Date(now.getTime() + MERCHANT_LINK_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString(),
     updatedAt: now.toISOString(),
   };
   await postgresStorage.saveApplication(scope, updated);

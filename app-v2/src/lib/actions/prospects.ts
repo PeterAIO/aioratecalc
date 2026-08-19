@@ -10,6 +10,7 @@ import {
 import { buildProspectPrefill, type ProspectPrefill } from "@/lib/hubspotPrefill";
 import { listQuotableProductsAction } from "@/lib/actions/catalog";
 import { hasQuoteBasis } from "@/lib/leadQuote";
+import { resolveLeadLinkIssue } from "@/lib/customerLink";
 import { analysisFromQuoteConfig } from "@/lib/pricing";
 import { deriveOrderPoints, resolvePlatformTier, toQuoteLine } from "@/lib/quoting";
 import { shouldAdvance } from "@/lib/adapters/adyenWebhook";
@@ -20,6 +21,14 @@ import type {
 
 const LINK_TTL_DAYS = 14;
 
+function leadLinkUrl(token: string) {
+  return `${process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"}/lead/${token}`;
+}
+
+function leadLinkExpiry(now: Date) {
+  return new Date(now.getTime() + LINK_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
 // The customer-facing lead link, minted in one place. Both the prospect form
 // (link at row creation) and the proposal wizard (link at the end of the
 // wizard) issue the same thing: a `lead_upload` token on the 14-day TTL.
@@ -28,8 +37,8 @@ function mintLeadLink(now: Date) {
   return {
     token,
     sentAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + LINK_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString(),
-    url: `${process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"}/lead/${token}`,
+    expiresAt: leadLinkExpiry(now),
+    url: leadLinkUrl(token),
   };
 }
 
@@ -359,6 +368,11 @@ export async function saveApplicationDetailsAction(input: {
  *
  * The stage move is forward-only (the webhook's rule), so re-issuing a link on
  * a deal that has already moved into onboarding can't drag it backwards.
+ *
+ * Re-issuing is also non-destructive: a still-live `lead_upload` token is kept
+ * and its expiry pushed out, so the URL the merchant already has never stops
+ * working. A fresh token is minted only when there is nothing live to preserve.
+ * See lib/customerLink.ts for why the slot is handled this carefully.
  */
 export async function issueCustomerQuoteLinkAction(
   applicationId: string
@@ -371,7 +385,8 @@ export async function issueCustomerQuoteLinkAction(
   if (!app) throw new Error("Application not found");
 
   const now = new Date();
-  const link = mintLeadLink(now);
+  const decision = resolveLeadLinkIssue(app, now.getTime());
+  const token = decision.reuse ? decision.token : randomUUID();
 
   // Same gate the customer render uses: a link with nothing to show is still
   // the "upload your statement" link, not a sent quote.
@@ -380,15 +395,15 @@ export async function issueCustomerQuoteLinkAction(
   const updated: MerchantApplication = {
     ...app,
     stage: shouldAdvance(app.stage, nextStage) ? nextStage : app.stage,
-    customerLinkToken: link.token,
+    customerLinkToken: token,
     customerLinkPurpose: "lead_upload",
-    customerLinkSentAt: link.sentAt,
-    customerLinkExpiresAt: link.expiresAt,
+    customerLinkSentAt: now.toISOString(),
+    customerLinkExpiresAt: leadLinkExpiry(now),
     updatedAt: now.toISOString(),
   };
   await postgresStorage.saveApplication(scope, updated);
 
-  return { app: updated, linkUrl: link.url };
+  return { app: updated, linkUrl: leadLinkUrl(token) };
 }
 
 /**
