@@ -76,6 +76,16 @@ export function usStateCode(state: string | undefined): string | undefined {
   return US_STATE_CODES[s.toLowerCase().replace(/\s+/g, " ")] ?? s;
 }
 
+// usStateCode passes an UNRECOGNIZED two-letter value straight through ("XX"
+// stays "XX"), so "it normalized" is not the same as "Adyen will accept it".
+// Anything that has to survive the Adyen boundary checks membership here.
+const US_STATE_CODE_SET = new Set(Object.values(US_STATE_CODES));
+
+export function isUsStateCode(state: string | undefined): boolean {
+  const code = usStateCode(state);
+  return code !== undefined && US_STATE_CODE_SET.has(code);
+}
+
 export function parseJSON(text: string): Record<string, unknown> | null {
   try {
     const clean = text.replace(/```json|```/g, "").trim();

@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { saveMyApplicationOnboardingAction, updateMyApplicationDetailsAction } from "@/lib/actions/customer";
 import { agreementToSubmit, customerOnboardInitial, flattenSections, recordedConsent } from "@/lib/prefillMerge";
+import { validateOnboardingFields, type OnboardingFieldErrors } from "@/lib/onboardingValidation";
 import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
 import styles from "./CustomerOnboardStep.module.css";
 
@@ -40,9 +41,22 @@ export default function CustomerOnboardStep({ app }: Props) {
     recorded?.agreement ?? { sigName: "", sigDate: "", termsAccepted: false, electronicConsentAccepted: false }
   );
   const [saving, setSaving] = useState(false);
-  const [done, setDone] = useState<{ adyenReady: boolean; adyenUrl: string | null } | null>(null);
+  // Adyen wouldn't hand back an onboarding link. Its own rejection of the data
+  // is a different thing (fieldErrors) — this is only ever "our side broke".
+  const [failed, setFailed] = useState(false);
   const [savedEdit, setSavedEdit] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Same validator the Server Action gates on, so the customer sees exactly
+  // what would have been rejected — before any round trip. Live after the first
+  // submit attempt: flagging empty boxes before they've tried is scolding, and
+  // a message that outlives its fix is a lie.
+  const [attempted, setAttempted] = useState(false);
+  const [serverErrors, setServerErrors] = useState<OnboardingFieldErrors>({});
+  const liveErrors = useMemo(
+    () => validateOnboardingFields({ business: biz, ownerContact: owner }),
+    [biz, owner]
+  );
+  const fieldErrors: OnboardingFieldErrors = attempted ? { ...serverErrors, ...liveErrors } : {};
 
   const b = <T extends Record<string, unknown>>(setter: (fn: (prev: T) => T) => void) =>
     (k: keyof T) =>
@@ -62,25 +76,26 @@ export default function CustomerOnboardStep({ app }: Props) {
   };
 
   const handleSubmit = async () => {
+    setAttempted(true);
+    // Cleared first so a retry from the failed screen always lands back on the
+    // form, where any message it produces is actually visible.
+    setFailed(false);
     if (!agree.termsAccepted || !agree.electronicConsentAccepted) {
       setErr("Both checkboxes are required to submit.");
       return;
     }
-    // Adyen rejects the legal entity without a complete registered address, so
-    // require it here instead of failing silently server-side.
-    const missing = ([
-      [biz.legalName, "Legal Business Name"],
-      [biz.address, "Street Address"],
-      [biz.city, "City"],
-      [biz.state, "State"],
-      [biz.zip, "ZIP"],
-    ] as const).filter(([v]) => !(v || "").trim()).map(([, label]) => label);
-    if (missing.length) {
-      setErr(`Please fill in: ${missing.join(", ")}`);
+    // Adyen rejects the legal entity without a complete, well-formed registered
+    // address, so block here rather than sending it and swallowing the 422.
+    // The Server Action re-runs the same rules — this copy is only for the
+    // customer's benefit, it is not the gate.
+    if (Object.keys(liveErrors).length) {
+      setServerErrors({});
+      setErr("Please correct the highlighted fields above before submitting.");
       return;
     }
     setSaving(true);
     setErr(null);
+    setServerErrors({});
     try {
       const fields = {
         business: biz as BusinessInfo,
@@ -103,7 +118,14 @@ export default function CustomerOnboardStep({ app }: Props) {
         window.location.href = result.app.adyenOnboardingUrl;
         return;
       }
-      setDone({ adyenReady: result.adyenReady, adyenUrl: result.app.adyenOnboardingUrl });
+      // Saved either way. The two remaining outcomes are not the same thing:
+      // the customer can fix a field error themselves; an Adyen failure is ours.
+      if (result.fieldErrors) {
+        setServerErrors(result.fieldErrors);
+        setErr("Please correct the highlighted fields above before submitting.");
+      } else {
+        setFailed(true);
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Save failed");
     }
@@ -122,12 +144,24 @@ export default function CustomerOnboardStep({ app }: Props) {
     </label>
   );
 
-  const input = (label: string, path: string, val: string, onChange: (e: React.ChangeEvent<HTMLInputElement>) => void, placeholder = "", type = "text") => (
-    <div className={styles.field}>
-      {fieldLabel(label, path, val)}
-      <input type={type} value={val} onChange={onChange} placeholder={placeholder} className={styles.input} />
-    </div>
-  );
+  const input = (label: string, path: string, val: string, onChange: (e: React.ChangeEvent<HTMLInputElement>) => void, placeholder = "", type = "text") => {
+    const fieldErr = fieldErrors[path];
+    return (
+      <div className={styles.field}>
+        {fieldLabel(label, path, val)}
+        <input
+          type={type}
+          value={val}
+          onChange={onChange}
+          placeholder={placeholder}
+          className={fieldErr ? `${styles.input} ${styles.inputError}` : styles.input}
+          aria-invalid={fieldErr ? true : undefined}
+          aria-describedby={fieldErr ? `${path}-error` : undefined}
+        />
+        {fieldErr && <p id={`${path}-error`} className={styles.fieldError}>{fieldErr}</p>}
+      </div>
+    );
+  };
 
   if (savedEdit) {
     return (
@@ -147,21 +181,30 @@ export default function CustomerOnboardStep({ app }: Props) {
     );
   }
 
-  if (done) {
+  // Adyen didn't give us a link. Said plainly: this is not a submitted
+  // application, and telling the customer it was — the old behaviour — left them
+  // on a success screen with nothing to click.
+  if (failed) {
     return (
       <div className={styles.successWrap}>
-        <div className={styles.successIcon}>✓</div>
-        <h1 className={styles.successTitle}>Application Submitted</h1>
+        <div className={styles.failIcon}>!</div>
+        <h1 className={styles.failTitle}>We Couldn&apos;t Start Your Verification</h1>
         <p className={styles.successBody}>
-          Thanks — your details have been saved. We&apos;re finishing setting up your secure onboarding link;
-          an AIO representative will follow up shortly to help you complete the next step.
+          <strong>Your information is saved</strong> — nothing you entered was lost. Something went wrong on
+          our end while creating your secure verification link. Please try again; if it keeps failing, your
+          AIO representative can finish this with you.
         </p>
-        <button
-          onClick={() => router.push("/customer")}
-          className={styles.btnPrimary}
-        >
-          Return to Dashboard
-        </button>
+        <div className={styles.actionsCentered}>
+          <button onClick={handleSubmit} disabled={saving} className={styles.btnPrimary}>
+            {saving ? "Trying again…" : "Try Again"}
+          </button>
+          <button
+            onClick={() => router.push(`/customer/applications/${app.id}`)}
+            className={styles.btnSecondary}
+          >
+            Back to My Application
+          </button>
+        </div>
       </div>
     );
   }

@@ -19,6 +19,7 @@ import {
 } from "@/lib/adapters/check";
 import { pushToHubSpot } from "@/lib/adapters/hubspot";
 import { buildCustomerSafeQuote } from "@/lib/leadQuote";
+import { validateOnboardingFields, type OnboardingFieldErrors } from "@/lib/onboardingValidation";
 import { usStateCode } from "@/lib/utils";
 import type {
   MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo, CustomerSafeQuote,
@@ -120,42 +121,62 @@ export async function getMyQuoteAction(id: string): Promise<CustomerSafeQuote | 
 // thrown — ADYEN_LEM_API_KEY/HUBSPOT_PRIVATE_APP_TOKEN aren't configured yet,
 // and a missing-credential error there shouldn't block the customer's save
 // or surface a 500 to them.
+//
+// Adyen is validated against BEFORE it's called: this is the real gate, since
+// the client-side copy of the same rules is bypassable. The customer's input is
+// still saved when validation fails — losing what they typed would be worse
+// than the rejection — but the stage doesn't advance, because onboarding hasn't
+// started. `fieldErrors` (validation, the customer can fix it) and `adyenFailed`
+// (our side broke) are separate outcomes and the form renders them differently.
 export async function saveMyApplicationOnboardingAction(
   id: string,
   fields: { business: BusinessInfo; ownerContact: OwnerContact; processing: ProcessingInfo; agreement: AgreementInfo }
-): Promise<{ app: MerchantApplication; adyenReady: boolean }> {
+): Promise<{
+  app: MerchantApplication;
+  adyenReady: boolean;
+  fieldErrors: OnboardingFieldErrors | null;
+  adyenFailed: boolean;
+}> {
   const { userId } = await requireCustomer();
   const existing = await postgresStorage.getApplicationForCustomer(userId, id);
   if (!existing) throw new Error("Application not found");
+
+  const errors = validateOnboardingFields({ business: fields.business, ownerContact: fields.ownerContact });
+  const hasFieldErrors = Object.keys(errors).length > 0;
 
   let app = await postgresStorage.updateApplicationAsCustomer(userId, id, {
     business: withStateCode(fields.business),
     ownerContact: fields.ownerContact,
     processing: fields.processing,
     agreement: fields.agreement,
-    stage: "merchant_filling",
+    ...(hasFieldErrors ? {} : { stage: "merchant_filling" as const }),
   });
 
   let adyenReady = false;
-  try {
-    const result = await createLegalEntityAndGetOnboardingUrl(app);
-    app = await postgresStorage.updateApplicationAsCustomer(userId, id, {
-      adyenIds: {
-        legalEntityId: result.legalEntityId,
-        accountHolderId: result.accountHolderId,
-        balanceAccountId: result.balanceAccountId,
-        merchantAccountId: null, // set to the shared POS merchant account when the store is created (tenant number known)
-        storeId: null,
-        businessLineId: result.businessLineId,
-        tenantNumber: null,
-        environment: process.env.ADYEN_ENVIRONMENT === "live" ? "live" : "test",
-      },
-      adyenOnboardingUrl: result.onboardingUrl,
-      stage: "adyen_kyc_pending",
-    });
-    adyenReady = true;
-  } catch (err) {
-    console.error("Adyen onboarding not available yet:", err instanceof Error ? err.message : err);
+  let adyenFailed = false;
+  if (!hasFieldErrors) {
+    try {
+      const result = await createLegalEntityAndGetOnboardingUrl(app);
+      app = await postgresStorage.updateApplicationAsCustomer(userId, id, {
+        adyenIds: {
+          legalEntityId: result.legalEntityId,
+          accountHolderId: result.accountHolderId,
+          balanceAccountId: result.balanceAccountId,
+          merchantAccountId: null, // set to the shared POS merchant account when the store is created (tenant number known)
+          storeId: null,
+          businessLineId: result.businessLineId,
+          tenantNumber: null,
+          environment: process.env.ADYEN_ENVIRONMENT === "live" ? "live" : "test",
+        },
+        adyenOnboardingUrl: result.onboardingUrl,
+        stage: "adyen_kyc_pending",
+      });
+      adyenReady = Boolean(result.onboardingUrl);
+      adyenFailed = !adyenReady;
+    } catch (err) {
+      console.error("Adyen onboarding failed:", err instanceof Error ? err.message : err);
+      adyenFailed = true;
+    }
   }
 
   try {
@@ -165,7 +186,7 @@ export async function saveMyApplicationOnboardingAction(
     console.error("HubSpot sync not available yet:", err instanceof Error ? err.message : err);
   }
 
-  return { app, adyenReady };
+  return { app, adyenReady, fieldErrors: hasFieldErrors ? errors : null, adyenFailed };
 }
 
 // Edits after the first submission — e.g. after Adyen onboarding has already

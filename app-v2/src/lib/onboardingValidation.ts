@@ -1,0 +1,99 @@
+// What Adyen actually needs before the legal-entity → onboarding-link chain in
+// adapters/adyen.ts can succeed. Adyen 422s on a missing or malformed
+// registered address, and that rejection used to be invisible: the customer
+// saw a success screen with no link to click.
+//
+// Deliberately PURE and dependency-free apart from utils.ts (also pure) so the
+// same rules run in the browser (CustomerOnboardStep, for inline messages) and
+// in the Server Action (the real gate). It must never import adapters/adyen.ts,
+// pricing.ts, or anything under lib/db — those are server-only and would be
+// pulled into the client bundle.
+//
+// Errors are keyed by the dotted field path the onboarding form already uses
+// for its prefill bookkeeping ("business.zip"), so the form can render each
+// message next to the input it belongs to without a second mapping table.
+
+import { isUsStateCode } from "@/lib/utils";
+import type { BusinessInfo, OwnerContact } from "@/types/merchant";
+
+export type OnboardingFieldErrors = Record<string, string>;
+
+export type OnboardingValidationInput = {
+  business?: Partial<BusinessInfo> | null;
+  ownerContact?: Partial<OwnerContact> | null;
+};
+
+const s = (v: string | undefined | null) => (v ?? "").trim();
+
+// US ZIP, 5-digit or ZIP+4. Adyen validates postalCode against the country.
+const ZIP = /^\d{5}(-\d{4})?$/;
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// A hostname with at least one dot and no stray characters. Bare domains are
+// fine — adapters/adyen.ts prefixes "https://" before sending webAddress — but
+// free text like "n/a" or "not applicable" is not, and it reaches Adyen as
+// "https://not applicable" and 422s the business line.
+const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+
+function isWebsiteLike(raw: string): boolean {
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    return HOSTNAME.test(new URL(withScheme).hostname);
+  } catch {
+    return false;
+  }
+}
+
+const E164 = /^\+[1-9]\d{7,14}$/;
+
+// True only when adapters/adyen.ts's toE164Phone would turn this into a valid
+// E.164 number. That helper returns anything it can't confidently map UNCHANGED
+// — deliberately, since a guessed number is worse than the original — so
+// free text ("555-0000", "call the office") reaches Adyen verbatim and 422s the
+// store. Its mapping is mirrored here rather than imported: it lives in the
+// Adyen adapter, which must not be pulled into the client bundle.
+function isE164Convertible(raw: string): boolean {
+  if (raw.startsWith("+")) return E164.test(raw);
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 10) return true;
+  return digits.length === 11 && digits.startsWith("1");
+}
+
+// Returns {} when everything Adyen needs is present and well-formed.
+export function validateOnboardingFields(input: OnboardingValidationInput): OnboardingFieldErrors {
+  const errors: OnboardingFieldErrors = {};
+  const biz = input.business ?? {};
+  const owner = input.ownerContact ?? {};
+
+  // Required — organization.legalName + registeredAddress on the legal entity.
+  if (!s(biz.legalName)) errors["business.legalName"] = "Enter the legal business name.";
+  if (!s(biz.address)) errors["business.address"] = "Enter the street address.";
+  if (!s(biz.city)) errors["business.city"] = "Enter the city.";
+
+  const state = s(biz.state);
+  if (!state) errors["business.state"] = "Enter the state.";
+  else if (!isUsStateCode(state)) errors["business.state"] = "Use a US state — e.g. CA or California.";
+
+  const zip = s(biz.zip);
+  if (!zip) errors["business.zip"] = "Enter the ZIP code.";
+  else if (!ZIP.test(zip)) errors["business.zip"] = "Use a 5-digit ZIP, e.g. 90210.";
+
+  // Optional, but must be usable if given.
+  const phone = s(biz.phone);
+  if (phone && !isE164Convertible(phone)) {
+    errors["business.phone"] = "Enter a 10-digit phone number, e.g. 555-000-0000.";
+  }
+
+  const website = s(biz.website);
+  if (website && !isWebsiteLike(website)) {
+    errors["business.website"] = "Use a full web address, e.g. yourrestaurant.com — or leave it blank.";
+  }
+
+  const email = s(owner.email);
+  if (email && !EMAIL.test(email)) {
+    errors["ownerContact.email"] = "Enter a valid email address.";
+  }
+
+  return errors;
+}

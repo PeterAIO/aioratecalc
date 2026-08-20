@@ -127,6 +127,20 @@
   color: var(--ink-3);
 }
 
+/* A field Adyen would reject. Danger hue because it encodes "this will fail",
+   not decoration — the customer has to be able to find it among ~20 inputs. */
+.inputError {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.fieldError {
+  margin: var(--space-2xs) 0 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--danger);
+}
+
 .textarea {
   min-height: 5rem;
   resize: vertical;
@@ -315,6 +329,41 @@
 
 .successBody strong {
   color: var(--ink);
+}
+
+/* ---------- Failed state ---------- */
+
+/* Shares .successWrap / .successBody for layout — only the mark and the
+   headline carry the outcome, so the two screens read as the same object in
+   two states rather than two different pages. */
+.failIcon {
+  width: 3.5rem;
+  height: 3.5rem;
+  margin: 0 auto var(--space-md);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--danger-bg);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 2rem;
+  line-height: 1;
+  color: var(--danger);
+}
+
+.failTitle {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.75rem;
+  color: var(--ink);
+  margin: 0 0 var(--space-sm);
+}
+
+.actionsCentered {
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 /* ---------- Narrow screens ---------- */
