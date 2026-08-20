@@ -33,6 +33,7 @@ export default async function LeadPage({ params }: { params: Promise<{ token: st
   // straight to the quote instead of being asked for a statement first.
   // Built server-side, and only the CustomerSafeQuote crosses to the client.
   const preparedQuote = buildCustomerSafeQuote({
+    quoteType: row.quoteType,
     analysis: row.analysis,
     quoteConfig: row.quoteConfig,
     targetMargin: row.targetMargin != null ? Number(row.targetMargin) : null,

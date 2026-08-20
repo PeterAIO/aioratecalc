@@ -1,15 +1,23 @@
 import { describe, it, expect } from "vitest";
 import {
+  FOOD_TRUCK_PLATFORM_NAME,
+  INCLUDED_SERVICE_PRODUCTS,
+  MARKETING_PRODUCTS,
   ORDER_POINT_RULES,
   PICKER_EXCLUDED_PRODUCT_NAMES,
   PLATFORM_TIER_PRODUCT_NAMES,
   UNCATEGORIZED_GROUP,
+  buildQuote,
   deriveOrderPoints,
   groupProducts,
+  isAllowedForQuoteType,
   isPickable,
+  picksFromQuoteLines,
   platformTierNameFor,
   quoteTotals,
-  resolvePlatformTier,
+  quoteTypeOf,
+  resolveIncludedServices,
+  resolvePlatformLine,
   toQuoteLine,
 } from "@/lib/quoting";
 import type { CatalogProduct, QuoteLine } from "@/types/merchant";
@@ -38,7 +46,12 @@ const CATALOG: CatalogProduct[] = [
   p("223511653105", "Payment Terminal - AMS1", 99, "one_time", "inventory"),
   p("222497165011", "Cash Drawer", 69, "one_time", "inventory"),
   p("276751313619", "Orders Hub Tablet", 199, "one_time", "inventory"),
+  p("247901295335", "AIO Marketing Add Spend", 99, "monthly", "Service"),
+  p("252941875920", "QSR POS Hardware Bundle", 1110, "one_time", "inventory"),
+  // The three always-included services.
+  p("281351401209", "AIO WiFi Network Package", 999, "one_time", "inventory"),
   p("223452690133", "Onsite Installation", 999, "one_time", "Service"),
+  p("223152695032", "System Onboarding and Training", 499, "one_time", "Service"),
   p("318731436770", "CAMP Invoice", 300, "one_time", ""),
   p("281354281678", "AIO Pre Auth", 0.5, "one_time", "Service"),
   p("260559288040", "AIO Processing Two Tiered Rate", 0, "one_time", "AIO Payment Processing"),
@@ -49,25 +62,105 @@ const find = (name: string) => CATALOG.find(c => c.name === name)!;
 const line = (name: string, qty: number) => toQuoteLine(find(name), qty);
 
 describe("picker exclusions", () => {
-  it("hides the placeholders, CAMP Invoice, the per-transaction pre-auth, and both platform tiers", () => {
+  it("hides the placeholders, CAMP Invoice, the pre-auth, and every derived line", () => {
     const hidden = CATALOG.filter(c => !isPickable(c)).map(c => c.name).sort();
     expect(hidden).toEqual([
       "AIO Platform (1 to 5 Order Points)",
       "AIO Platform (6 + Order Points)",
+      "AIO Platform - Food Truck",
       "AIO Pre Auth",
       "AIO Processing Two Tiered Rate",
+      "AIO WiFi Network Package",
       "CAMP Invoice",
+      "Onsite Installation",
+      "System Onboarding and Training",
     ]);
   });
 
-  it("keeps everything else quotable, including the food-truck platform", () => {
-    expect(isPickable(find("AIO Platform - Food Truck"))).toBe(true);
+  it("hides the food-truck platform, which is now derived from the quote type", () => {
+    // It used to be pickable, with resolvePlatformTier sniffing the lines for it.
+    // A rep picking it by hand is how a quote ends up with two platform fees.
+    expect(isPickable(find(FOOD_TRUCK_PLATFORM_NAME))).toBe(false);
+  });
+
+  it("hides the three always-included services — they are added, not chosen", () => {
+    for (const s of INCLUDED_SERVICE_PRODUCTS) {
+      expect(isPickable(find(s.name))).toBe(false);
+    }
+  });
+
+  it("keeps ordinary hardware and software quotable", () => {
     expect(isPickable(find("POS Unit"))).toBe(true);
-    expect(isPickable(find("Onsite Installation"))).toBe(true);
+    expect(isPickable(find("AIO Marketing Platform"))).toBe(true);
   });
 
   it("names the exclusions rather than inlining them", () => {
     expect([...PICKER_EXCLUDED_PRODUCT_NAMES]).toContain("CAMP Invoice");
+  });
+});
+
+describe("quote types", () => {
+  it("reads a row written before quote types existed as a full-POS deal", () => {
+    expect(quoteTypeOf(null)).toBe("full_pos");
+    expect(quoteTypeOf(undefined)).toBe("full_pos");
+    expect(quoteTypeOf("marketing_only")).toBe("marketing_only");
+  });
+
+  it("lets a POS quote carry marketing products, but not the reverse", () => {
+    // A restaurant buying marketing alongside its POS is one deal, not two
+    // quotes — so only marketing-only restricts anything.
+    expect(isAllowedForQuoteType(find("AIO Marketing Platform"), "full_pos")).toBe(true);
+    expect(isAllowedForQuoteType(find("POS Unit"), "marketing_only")).toBe(false);
+    expect(isAllowedForQuoteType(find("Mega Kiosk"), "marketing_only")).toBe(false);
+  });
+
+  it("allows exactly the two marketing products on a marketing-only quote", () => {
+    const allowed = CATALOG.filter(c => isAllowedForQuoteType(c, "marketing_only")).map(c => c.name).sort();
+    expect(allowed).toEqual([...MARKETING_PRODUCTS].map(m => m.name).sort());
+  });
+
+  it("does not treat the Review Manager as marketing", () => {
+    // It's reputation management sold with a POS, not a marketing product.
+    expect(isAllowedForQuoteType(find("AIO - Automated Review Manager"), "marketing_only")).toBe(false);
+    expect(isAllowedForQuoteType(find("AIO - Automated Review Manager"), "full_pos")).toBe(true);
+  });
+});
+
+describe("always-included services", () => {
+  it("puts a network, an install and a training on every processing quote, one each", () => {
+    for (const quoteType of ["full_pos", "food_truck"] as const) {
+      const { lines, missing } = resolveIncludedServices(quoteType, CATALOG);
+      expect(missing).toEqual([]);
+      expect(lines.map(l => l.name)).toEqual([
+        "AIO WiFi Network Package",
+        "Onsite Installation",
+        "System Onboarding and Training",
+      ]);
+      expect(lines.every(l => l.qty === 1)).toBe(true);
+      expect(quoteTotals(lines).oneTime).toBe(999 + 999 + 499);
+    }
+  });
+
+  it("adds none of them to a marketing-only quote — nothing is being installed", () => {
+    expect(resolveIncludedServices("marketing_only", CATALOG)).toEqual({ lines: [], missing: [] });
+  });
+
+  it("is LOUD when a required service isn't in the catalog", () => {
+    // Silently dropping it is $999 off the quote, so it has to block the send
+    // rather than read as "not included."
+    const without = CATALOG.filter(c => c.name !== "Onsite Installation");
+    const { lines, missing } = resolveIncludedServices("full_pos", without);
+    expect(missing).toEqual(["Onsite Installation"]);
+    expect(lines.map(l => l.name)).not.toContain("Onsite Installation");
+  });
+
+  it("finds a service by product id, so a HubSpot rename can't drop it", () => {
+    const renamed = CATALOG.map(c =>
+      c.name === "Onsite Installation" ? { ...c, name: "On-Site Installation (2026)" } : c
+    );
+    const { lines, missing } = resolveIncludedServices("full_pos", renamed);
+    expect(missing).toEqual([]);
+    expect(lines.find(l => l.hubspotProductId === "223452690133")!.unitPrice).toBe(999);
   });
 });
 
@@ -158,7 +251,7 @@ describe("deriveOrderPoints", () => {
     expect(orderPoints.total).toBe(6);
     expect(platformTierNameFor(6)).toBe(PLATFORM_TIER_PRODUCT_NAMES.large);
 
-    const tier = resolvePlatformTier(orderPoints.total, CATALOG, lines);
+    const tier = resolvePlatformLine("full_pos", orderPoints.total, CATALOG);
     expect(tier.status).toBe("resolved");
     expect(tier.line!.name).toBe(PLATFORM_TIER_PRODUCT_NAMES.large);
     expect(tier.line!.unitPrice).toBe(199);
@@ -170,7 +263,18 @@ describe("deriveOrderPoints", () => {
     const { orderPoints } = deriveOrderPoints(lines, ["website"]);
     expect(orderPoints.total).toBe(5);
     expect(platformTierNameFor(5)).toBe(PLATFORM_TIER_PRODUCT_NAMES.small);
-    expect(resolvePlatformTier(5, CATALOG, lines).line!.unitPrice).toBe(99);
+    expect(resolvePlatformLine("full_pos", 5, CATALOG).line!.unitPrice).toBe(99);
+  });
+
+  it("counts the QSR bundle as the one POS it contains", () => {
+    // Confirmed 2026-08-20. It used to contribute 0 with a needs-review flag
+    // while nobody knew what was in it.
+    expect(ORDER_POINT_RULES["QSR POS Hardware Bundle"].pointsPerUnit).toBe(1);
+    expect(ORDER_POINT_RULES["QSR POS Hardware Bundle"].needsReview).toBeUndefined();
+
+    const { orderPoints, needsReview } = deriveOrderPoints([line("QSR POS Hardware Bundle", 3)], []);
+    expect(orderPoints.total).toBe(3);
+    expect(needsReview).toEqual([]);
   });
 
   it("counts a point-bearing product even when HubSpot lost its product type", () => {
@@ -246,22 +350,32 @@ describe("deriveOrderPoints", () => {
   });
 });
 
-describe("platform tier selection", () => {
+describe("platform line selection", () => {
   it("selects nothing at zero order points", () => {
     expect(platformTierNameFor(0)).toBeNull();
-    expect(resolvePlatformTier(0, CATALOG, [])).toEqual({ status: "none_needed", line: null, tierName: null });
+    expect(resolvePlatformLine("full_pos", 0, CATALOG))
+      .toEqual({ status: "none_needed", line: null, productName: null });
   });
 
-  it("suppresses the tier line when a flat-priced food-truck platform is quoted", () => {
-    const lines = [line("AIO Platform - Food Truck", 1), line("POS Unit", 1)];
-    expect(resolvePlatformTier(1, CATALOG, lines)).toEqual({ status: "food_truck", line: null, tierName: null });
+  it("gives a food-truck quote the flat platform fee, whatever the point count", () => {
+    for (const total of [0, 1, 9]) {
+      const platform = resolvePlatformLine("food_truck", total, CATALOG);
+      expect(platform.status).toBe("resolved");
+      expect(platform.line!.name).toBe(FOOD_TRUCK_PLATFORM_NAME);
+      expect(platform.line!.unitPrice).toBe(75);
+    }
+  });
+
+  it("gives a marketing-only quote no platform line at all", () => {
+    expect(resolvePlatformLine("marketing_only", 4, CATALOG))
+      .toEqual({ status: "not_applicable", line: null, productName: null });
   });
 
   it("finds the tier by product id, so a HubSpot rename can't drop the platform fee", () => {
     const renamed = CATALOG.map(c =>
       c.name === PLATFORM_TIER_PRODUCT_NAMES.large ? { ...c, name: "AIO Platform (6+ Ordering Points)" } : c
     );
-    const tier = resolvePlatformTier(6, renamed, []);
+    const tier = resolvePlatformLine("full_pos", 6, renamed);
     expect(tier.status).toBe("resolved");
     expect(tier.line!.unitPrice).toBe(199);
   });
@@ -269,9 +383,98 @@ describe("platform tier selection", () => {
   it("is LOUD, not null, when a tier is owed but the catalog can't supply it", () => {
     // Silently omitting this line is a $433/mo hole in the quote, so the caller
     // has to be forced to deal with it rather than reading it as "no fee due".
-    const tier = resolvePlatformTier(3, [], []);
+    const tier = resolvePlatformLine("full_pos", 3, []);
     expect(tier.status).toBe("unresolved");
     expect(tier.line).toBeNull();
-    expect(tier.tierName).toBe(PLATFORM_TIER_PRODUCT_NAMES.small);
+    expect(tier.productName).toBe(PLATFORM_TIER_PRODUCT_NAMES.small);
+  });
+});
+
+describe("buildQuote — the one derivation", () => {
+  const picked = (names: Array<[string, number]>) => names.map(([n, q]) => line(n, q));
+
+  it("assembles a full-POS quote: platform line, the three services, then the picks", () => {
+    const built = buildQuote("full_pos", picked([["POS Unit", 2], ["Cash Drawer", 1]]), ["website"], CATALOG);
+
+    expect(built.blockers).toEqual([]);
+    expect(built.orderPoints.total).toBe(3); // 2 POS + website
+    expect(built.quoteLines.map(l => l.name)).toEqual([
+      PLATFORM_TIER_PRODUCT_NAMES.small,
+      "AIO WiFi Network Package",
+      "Onsite Installation",
+      "System Onboarding and Training",
+      "POS Unit",
+      "Cash Drawer",
+    ]);
+    // 999 + 999 + 499 + 2×749 + 69 = $4,064 due once; the platform fee is weekly.
+    expect(built.totals.oneTime).toBe(4064);
+    expect(built.totals.recurring).toEqual([{ frequency: "weekly", amount: 99 }]);
+  });
+
+  it("drops declared channels on a marketing-only quote", () => {
+    // Otherwise ticking "website / online ordering" conjures a $99/wk platform
+    // tier onto a $49/wk marketing quote.
+    const built = buildQuote(
+      "marketing_only",
+      picked([["AIO Marketing Platform", 1]]),
+      ["website", "qr"],
+      CATALOG
+    );
+
+    expect(built.orderPoints).toEqual({ hardware: {}, channels: [], total: 0 });
+    expect(built.platform.status).toBe("not_applicable");
+    expect(built.quoteLines.map(l => l.name)).toEqual(["AIO Marketing Platform"]);
+    expect(built.totals.oneTime).toBe(0);
+    expect(built.blockers).toEqual([]);
+  });
+
+  it("still carries the three services on a rate-only quote with nothing picked", () => {
+    // "Every single quote" is unqualified: a POS quote with no hardware on it
+    // still owes the network, install and training.
+    const built = buildQuote("full_pos", [], [], CATALOG);
+    expect(built.platform.status).toBe("none_needed");
+    expect(built.quoteLines.map(l => l.name)).toEqual([
+      "AIO WiFi Network Package",
+      "Onsite Installation",
+      "System Onboarding and Training",
+    ]);
+  });
+
+  it("gives a food-truck quote its flat platform fee with nothing picked", () => {
+    const built = buildQuote("food_truck", [], [], CATALOG);
+    expect(built.quoteLines[0].name).toBe(FOOD_TRUCK_PLATFORM_NAME);
+    expect(built.totals.recurring).toEqual([{ frequency: "weekly", amount: 75 }]);
+  });
+
+  it("puts nothing on a marketing-only quote with nothing picked", () => {
+    expect(buildQuote("marketing_only", [], [], CATALOG).quoteLines).toEqual([]);
+  });
+
+  it("blocks the send when a required line can't be priced", () => {
+    const stripped = CATALOG.filter(
+      c => c.name !== "Onsite Installation" && c.name !== PLATFORM_TIER_PRODUCT_NAMES.small
+    );
+    const built = buildQuote("full_pos", picked([["POS Unit", 1]]), [], stripped);
+
+    expect(built.blockers).toHaveLength(2);
+    expect(built.blockers.join(" ")).toContain(PLATFORM_TIER_PRODUCT_NAMES.small);
+    expect(built.blockers.join(" ")).toContain("Onsite Installation");
+  });
+
+  it("round-trips through picksFromQuoteLines without duplicating a derived line", () => {
+    // Reopening a saved quote must not send the platform fee or the services
+    // back as picks — they'd be quoted twice, or refused as unpickable.
+    const first = buildQuote("full_pos", picked([["Mega Kiosk", 1]]), [], CATALOG);
+    const reopened = picksFromQuoteLines(first.quoteLines);
+
+    expect(reopened).toEqual([{ hubspotProductId: "260674226888", qty: 1 }]);
+
+    const second = buildQuote(
+      "full_pos",
+      reopened.map(pick => toQuoteLine(CATALOG.find(c => c.hubspotProductId === pick.hubspotProductId)!, pick.qty)),
+      [],
+      CATALOG
+    );
+    expect(second.quoteLines).toEqual(first.quoteLines);
   });
 });

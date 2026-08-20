@@ -14,9 +14,10 @@ import PricingStep, { type PricingOutcome } from "@/components/rep/PricingStep";
 import ProposalStep   from "@/components/rep/ProposalStep";
 import ApplyStep      from "@/components/rep/ApplyStep";
 import ProductConfigurator, { type ConfiguredQuote, type ProductPick } from "@/components/quoting/ProductConfigurator";
-import { isPlatformTierProduct } from "@/lib/quoting";
+import { picksFromQuoteLines, quoteTypeOf } from "@/lib/quoting";
 import type {
   MerchantApplication, StatementAnalysis, Processor, ProcessorTier, AppSettings, QuoteConfig,
+  QuoteType,
 } from "@/types/merchant";
 import styles from "./proposals-new.module.css";
 
@@ -41,6 +42,7 @@ function newApp(): MerchantApplication {
     adyenOnboardingUrl: null,
     checkIds: null,
     hubspotIds: null,
+    quoteType: "full_pos",
     quoteConfig: null,
     quoteLines: null,
     orderPoints: null,
@@ -83,7 +85,10 @@ function NewProposalFlow() {
   // PricingStep's state, as it used to) so it can be persisted with the picks.
   const [outcome, setOutcome]     = useState<PricingOutcome | null>(null);
 
-  // Product configurator — the parent owns the picks, the server owns the money.
+  // Product configurator — the parent owns the type and picks, the server owns
+  // the money. Marketing-only isn't offered here: this wizard starts from a
+  // statement analysis, and a marketing quote has no processing behind it.
+  const [quoteType, setQuoteType] = useState<QuoteType>("full_pos");
   const [picks, setPicks]         = useState<ProductPick[]>([]);
   const [channels, setChannels]   = useState<string[]>([]);
   const [quote, setQuote]         = useState<ConfiguredQuote | null>(null);
@@ -112,13 +117,11 @@ function NewProposalFlow() {
           setStep(stepForApp(existing));
           // Rehydrate the configurator from what was quoted, or a rep who
           // reopens a deal and steps back through Products would re-derive it
-          // from an empty picker and wipe the hardware. The platform-tier line
-          // is dropped: it isn't pickable, it's derived from the count.
-          setPicks(
-            (existing.quoteLines ?? [])
-              .filter(l => !isPlatformTierProduct(l.name))
-              .map(l => ({ hubspotProductId: l.hubspotProductId, qty: l.qty }))
-          );
+          // from an empty picker and wipe the hardware. Derived lines (the
+          // platform fee, the three always-included services) are dropped —
+          // they aren't picks, they come back from the quote type and count.
+          setQuoteType(quoteTypeOf(existing.quoteType));
+          setPicks(picksFromQuoteLines(existing.quoteLines));
           setChannels(existing.orderPoints?.channels ?? []);
         }
       })
@@ -154,15 +157,14 @@ function NewProposalFlow() {
   // A tier is owed but the catalog didn't yield it — the biggest recurring line
   // would go missing. Same block the prospect form applies, and the server
   // refuses it too.
-  const tierUnresolved = quote?.tier.status === "unresolved";
+  const blockers = quote?.blockers ?? [];
 
-  // The one write of the quoting half. The browser sends picks and channels;
-  // prices, the ordering-point count and the platform tier are derived
-  // server-side against the live catalog.
+  // The one write of the quoting half. The browser sends the quote type, picks
+  // and channels; prices, the ordering-point count and every derived line are
+  // computed server-side against the live catalog.
   const handleProducts = async () => {
-    const tier = quote?.tier;
-    if (tier && tier.status === "unresolved") {
-      setError(`This quote needs the "${tier.tierName}" platform product, which isn't in the HubSpot catalog. Fix the catalog before sending it.`);
+    if (blockers.length) {
+      setError(blockers.join(" "));
       return;
     }
     // On a resumed application the pricing step hasn't been re-run this
@@ -176,6 +178,7 @@ function NewProposalFlow() {
     try {
       const saved = await saveQuoteConfigurationAction({
         applicationId: app.id,
+        quoteType,
         picks,
         channels,
         targetMargin,
@@ -331,11 +334,14 @@ function NewProposalFlow() {
           <h1 className={styles.productsTitle}>Products &amp; Hardware</h1>
           <p className={styles.productsSubtitle}>
             What the merchant is buying alongside the rate. The platform fee follows the ordering-point
-            count automatically — leave everything at zero for a rate-only quote.
+            count automatically, and the network, install and training are on every quote.
           </p>
           <ProductConfigurator
+            quoteType={quoteType}
             picks={picks}
             channels={channels}
+            selectableTypes={["full_pos", "food_truck"]}
+            onQuoteTypeChange={setQuoteType}
             onPicksChange={setPicks}
             onChannelsChange={setChannels}
             onDerivedChange={setQuote}
@@ -343,7 +349,7 @@ function NewProposalFlow() {
           {error && <div className={styles.error}>{error}</div>}
           <div className={styles.stepActions}>
             <button className={styles.btnGhost} onClick={() => setStep(2)}>← Adjust Pricing</button>
-            <button className={styles.btnPrimary} disabled={busy || tierUnresolved} onClick={handleProducts}>
+            <button className={styles.btnPrimary} disabled={busy || blockers.length > 0} onClick={handleProducts}>
               {busy ? "Pricing…" : "Continue to Proposal →"}
             </button>
           </div>

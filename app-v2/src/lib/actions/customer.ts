@@ -117,6 +117,7 @@ export async function getMyQuoteAction(id: string): Promise<CustomerSafeQuote | 
   const app = await postgresStorage.getApplicationForCustomer(userId, id);
   if (!app) return null;
   return buildCustomerSafeQuote({
+    quoteType: app.quoteType,
     analysis: app.analysis,
     quoteConfig: app.quoteConfig,
     targetMargin: app.targetMargin,

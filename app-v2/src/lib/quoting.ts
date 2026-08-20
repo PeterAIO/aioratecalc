@@ -6,7 +6,43 @@
 // operates on is read from HubSpot server-side and passed in.
 
 import { monthlyEquivalent } from "@/lib/utils";
-import type { BillingFrequency, CatalogProduct, OrderPoints, QuoteLine, QuoteTotals } from "@/types/merchant";
+import type {
+  BillingFrequency, CatalogProduct, OrderPoints, QuoteLine, QuoteTotals, QuoteType,
+} from "@/types/merchant";
+
+// ── Quote types ─────────────────────────────────────────────────────────────
+
+// The type is picked FIRST and everything else follows from it. It has to be,
+// not inferred from what's on the quote: the mandatory install lines and the
+// platform line are added to an EMPTY quote, so there's nothing to infer from
+// at the moment the decision is needed.
+export const QUOTE_TYPES: Array<{ id: QuoteType; label: string; note: string }> = [
+  {
+    id: "full_pos",
+    label: "Full POS",
+    note: "Hardware, software and a processing rate. Platform fee follows the ordering-point count.",
+  },
+  {
+    id: "food_truck",
+    label: "Food Truck",
+    note: "Same as Full POS, but the platform fee is the flat food-truck rate rather than a tier.",
+  },
+  {
+    id: "marketing_only",
+    label: "Marketing Only",
+    note: "Marketing products alone — no POS hardware, no platform fee, no processing rate.",
+  },
+];
+
+/** Read a persisted quote type. Rows written before quote types existed are full-POS deals. */
+export function quoteTypeOf(stored: QuoteType | null | undefined): QuoteType {
+  return stored ?? "full_pos";
+}
+
+/** True for the quote types that carry a processing rate, an ordering-point count and a platform fee. */
+export function isProcessingQuote(quoteType: QuoteType): boolean {
+  return quoteType !== "marketing_only";
+}
 
 // ── The rep-facing picker ───────────────────────────────────────────────────
 
@@ -22,9 +58,6 @@ import type { BillingFrequency, CatalogProduct, OrderPoints, QuoteLine, QuoteTot
 //   - "CAMP Invoice" is a billing artifact, not something a rep sells
 //   - "AIO Pre Auth" ($0.50/Service) is a PER-TRANSACTION fee — quoting it as a
 //     single $0.50 line is meaningless
-//   - the two platform tiers are excluded because they are DERIVED from the
-//     ordering-point count (see below), not chosen; they still land on the
-//     quote, just not by hand
 export const PICKER_EXCLUDED_PRODUCT_NAMES = [
   "AIO Processing Two Tiered Rate",
   "AIO Tier Processing",
@@ -32,11 +65,98 @@ export const PICKER_EXCLUDED_PRODUCT_NAMES = [
   "AIO Pre Auth",
 ] as const;
 
+/**
+ * Everything a rep can never pick by hand. Two reasons land here:
+ *   - the exclusions above — things nobody sells as a line
+ *   - DERIVED lines: all three platform products and the three mandatory
+ *     install services. They still land on the quote, just not by hand, and
+ *     leaving them in the picker is how you get billed for two platform fees
+ *     or a second $999 install.
+ */
 export function isPickable(product: CatalogProduct): boolean {
   return (
     !PICKER_EXCLUDED_PRODUCT_NAMES.includes(product.name as (typeof PICKER_EXCLUDED_PRODUCT_NAMES)[number]) &&
-    !isPlatformTierProduct(product.name)
+    !isPlatformProduct(product.name, product.hubspotProductId) &&
+    !isIncludedServiceProduct(product.hubspotProductId, product.name)
   );
+}
+
+// ── Selection rules per quote type ──────────────────────────────────────────
+
+// The only products a marketing-only quote may carry. Confirmed with Shaheer
+// 2026-08-20: the Marketing Platform and Add Spend, and nothing else — the
+// Review Manager and Payroll are POS add-ons, not marketing.
+export const MARKETING_PRODUCTS = [
+  { name: "AIO Marketing Platform", hubspotProductId: "223152695997" },
+  { name: "AIO Marketing Add Spend", hubspotProductId: "247901295335" },
+] as const;
+
+function isMarketingProduct(id: string, name: string): boolean {
+  return MARKETING_PRODUCTS.some(m => m.hubspotProductId === id || m.name === name.trim());
+}
+
+/**
+ * Whether a rep may put this product on a quote of this type. Applied to the
+ * picker AND re-applied server-side, because "the rep can't see it" is not the
+ * same as "it can't be sent".
+ *
+ * Only marketing-only restricts anything: a POS or food-truck deal can carry
+ * any pickable product, marketing included (a restaurant buying both is one
+ * deal, not two quotes).
+ */
+export function isAllowedForQuoteType(product: CatalogProduct, quoteType: QuoteType): boolean {
+  if (!isPickable(product)) return false;
+  if (quoteType !== "marketing_only") return true;
+  return isMarketingProduct(product.hubspotProductId, product.name);
+}
+
+// ── Mandatory install services (derived, not chosen) ────────────────────────
+
+// Confirmed with Shaheer 2026-08-20: every quote that puts AIO's system in a
+// restaurant includes a network, an install and a training — qty 1 each, not a
+// rep decision. So they're derived lines with no stepper, exactly like the
+// platform fee, rather than three checkboxes a rep can forget or unpick.
+//
+// Marketing-only quotes are the exception: nothing is being installed.
+export const INCLUDED_SERVICE_PRODUCTS = [
+  { name: "AIO WiFi Network Package", hubspotProductId: "281351401209" },
+  { name: "Onsite Installation", hubspotProductId: "223452690133" },
+  { name: "System Onboarding and Training", hubspotProductId: "223152695032" },
+] as const;
+
+function isIncludedServiceProduct(id: string, name: string): boolean {
+  return INCLUDED_SERVICE_PRODUCTS.some(s => s.hubspotProductId === id || s.name === name.trim());
+}
+
+export type IncludedServicesResult = {
+  /** The lines to put on the quote, qty 1 each. */
+  lines: QuoteLine[];
+  /**
+   * Names a quote of this type requires but the catalog didn't yield (renamed,
+   * archived, or the catalog didn't load). Same posture as an unresolved
+   * platform tier: never quietly quote without them.
+   */
+  missing: string[];
+};
+
+/**
+ * The install lines every processing quote carries. Resolved from the catalog
+ * like any other line, so the price on the quote is the price HubSpot holds
+ * today and is snapshotted from here on.
+ */
+export function resolveIncludedServices(quoteType: QuoteType, catalog: CatalogProduct[]): IncludedServicesResult {
+  if (!isProcessingQuote(quoteType)) return { lines: [], missing: [] };
+
+  const lines: QuoteLine[] = [];
+  const missing: string[] = [];
+  for (const service of INCLUDED_SERVICE_PRODUCTS) {
+    const product =
+      catalog.find(p => p.hubspotProductId === service.hubspotProductId) ??
+      catalog.find(p => p.name.trim() === service.name);
+    if (product) lines.push(toQuoteLine(product, 1));
+    else missing.push(service.name);
+  }
+  return { lines, missing };
 }
 
 // HubSpot's hs_product_type values, in the order a configurator should show
@@ -153,6 +273,10 @@ export const ORDER_POINT_RULES: Record<string, OrderPointRule> = {
   "Mega Kiosk": { pointsPerUnit: 1, hubspotProductId: "260674226888" },
   "Kiosk + Payment Terminal (AMS1) and Mount": { pointsPerUnit: 1, hubspotProductId: "222497165009" },
   "Kiosk Mini + Payment Terminal (AMS1) and Mount": { pointsPerUnit: 1, hubspotProductId: "223519571666" },
+  // Resolved by Shaheer 2026-08-20: the bundle contains exactly one POS, so it
+  // counts one point like a bare POS Unit. Was 0-with-needsReview while the
+  // contents were unknown.
+  "QSR POS Hardware Bundle": { pointsPerUnit: 1, hubspotProductId: "252941875920" },
 
   // Needs review — quantity is a judgement, so it contributes 0 by default
   "Orders Hub Tablet": {
@@ -164,11 +288,6 @@ export const ORDER_POINT_RULES: Record<string, OrderPointRule> = {
     pointsPerUnit: 0,
     hubspotProductId: "276754193118",
     needsReview: "Named as a time clock, but it is a tablet — confirm it isn't taking orders.",
-  },
-  "QSR POS Hardware Bundle": {
-    pointsPerUnit: 0,
-    hubspotProductId: "252941875920",
-    needsReview: "Bundle — confirm how many POS terminals it contains.",
   },
 
   // Explicitly does not count
@@ -280,13 +399,25 @@ export const PLATFORM_TIER_PRODUCT_IDS: Record<string, string> = {
   [PLATFORM_TIER_PRODUCT_NAMES.large]: "292286544587",
 };
 
-// Not order-point tiered — a food truck is priced flat. When a rep quotes it,
-// the derived tier line is suppressed so a quote can't carry two platform fees.
+// Not order-point tiered — a food truck is priced flat. It's the food_truck
+// quote type's platform line, derived like the tiers rather than picked: a rep
+// picking it by hand next to a tiered quote is how you get two platform fees.
 export const FOOD_TRUCK_PLATFORM_NAME = "AIO Platform - Food Truck";
 export const FOOD_TRUCK_PLATFORM_ID = "247900575472";
 
 export function isPlatformTierProduct(name: string): boolean {
   return name === PLATFORM_TIER_PRODUCT_NAMES.small || name === PLATFORM_TIER_PRODUCT_NAMES.large;
+}
+
+/** Any derived platform line — both order-point tiers and the flat food-truck one. */
+export function isPlatformProduct(name: string, id?: string): boolean {
+  const trimmed = name.trim();
+  return (
+    isPlatformTierProduct(trimmed) ||
+    trimmed === FOOD_TRUCK_PLATFORM_NAME ||
+    id === FOOD_TRUCK_PLATFORM_ID ||
+    (!!id && Object.values(PLATFORM_TIER_PRODUCT_IDS).includes(id))
+  );
 }
 
 /** Which tier product a given order-point total selects. Zero points selects nothing. */
@@ -295,37 +426,137 @@ export function platformTierNameFor(total: number): string | null {
   return total <= PLATFORM_TIER_BOUNDARY ? PLATFORM_TIER_PRODUCT_NAMES.small : PLATFORM_TIER_PRODUCT_NAMES.large;
 }
 
-export type PlatformTierResult =
-  /** The tier line to put on the quote. */
-  | { status: "resolved"; line: QuoteLine; tierName: string }
-  /** Zero ordering points — no platform fee is due. */
-  | { status: "none_needed"; line: null; tierName: null }
-  /** A flat-priced food-truck platform is already quoted; the tier doesn't apply. */
-  | { status: "food_truck"; line: null; tierName: null }
-  /** A tier IS due but the catalog didn't yield it. Never quietly quote without it. */
-  | { status: "unresolved"; line: null; tierName: string };
+export type PlatformLineResult =
+  /** The platform line to put on the quote. */
+  | { status: "resolved"; line: QuoteLine; productName: string }
+  /** Zero ordering points on a processing quote — no platform fee is due yet. */
+  | { status: "none_needed"; line: null; productName: null }
+  /** Marketing-only: AIO's platform isn't part of this quote at all. */
+  | { status: "not_applicable"; line: null; productName: null }
+  /** A platform line IS due but the catalog didn't yield it. Never quietly quote without it. */
+  | { status: "unresolved"; line: null; productName: string };
 
 /**
- * The platform-fee line implied by the order-point count, snapshotted from the
- * catalog like any other line.
+ * The platform-fee line the quote type and order-point count imply, snapshotted
+ * from the catalog like any other line. Which product that is depends on the
+ * type, not on what the rep happened to pick:
+ *   full_pos       → the 1–5 or 6+ tier, by count
+ *   food_truck     → the flat food-truck platform, regardless of count
+ *   marketing_only → none
  *
- * Returns a status rather than a bare null because the three "no line" cases
- * are not the same thing: two are correct, and the third — a tier is owed but
- * the catalog didn't yield the product — is the largest recurring charge on the
+ * Returns a status rather than a bare null because the "no line" cases are not
+ * the same thing: three are correct, and the fourth — a line is owed but the
+ * catalog didn't yield the product — is the largest recurring charge on the
  * quote going missing. That case must reach the rep and must block the save.
  */
-export function resolvePlatformTier(total: number, catalog: CatalogProduct[], lines: QuoteLine[]): PlatformTierResult {
-  const foodTruck = lines.some(
-    l => l.hubspotProductId === FOOD_TRUCK_PLATFORM_ID || l.name.trim() === FOOD_TRUCK_PLATFORM_NAME
-  );
-  if (foodTruck) return { status: "food_truck", line: null, tierName: null };
-  const tierName = platformTierNameFor(total);
-  if (!tierName) return { status: "none_needed", line: null, tierName: null };
+export function resolvePlatformLine(
+  quoteType: QuoteType,
+  total: number,
+  catalog: CatalogProduct[]
+): PlatformLineResult {
+  if (!isProcessingQuote(quoteType)) return { status: "not_applicable", line: null, productName: null };
 
-  const tierId = PLATFORM_TIER_PRODUCT_IDS[tierName];
+  const [productName, productId] =
+    quoteType === "food_truck"
+      ? [FOOD_TRUCK_PLATFORM_NAME, FOOD_TRUCK_PLATFORM_ID]
+      : [platformTierNameFor(total), null];
+
+  if (!productName) return { status: "none_needed", line: null, productName: null };
+
+  const id = productId ?? PLATFORM_TIER_PRODUCT_IDS[productName];
   const product =
-    catalog.find(p => p.hubspotProductId === tierId) ?? catalog.find(p => p.name.trim() === tierName);
+    catalog.find(p => p.hubspotProductId === id) ?? catalog.find(p => p.name.trim() === productName);
   return product
-    ? { status: "resolved", line: toQuoteLine(product, 1), tierName }
-    : { status: "unresolved", line: null, tierName };
+    ? { status: "resolved", line: toQuoteLine(product, 1), productName }
+    : { status: "unresolved", line: null, productName };
+}
+
+/**
+ * Reopen a saved quote in the configurator: the picks that produced it.
+ *
+ * Derived lines are dropped, because they're re-derived on the way back out —
+ * keeping them would send the platform fee and the three install services back
+ * as picks, and the server refuses those (they aren't pickable) rather than
+ * quoting them twice.
+ */
+export function picksFromQuoteLines(
+  lines: QuoteLine[] | null | undefined
+): Array<{ hubspotProductId: string; qty: number }> {
+  return (lines ?? [])
+    .filter(l => !isPlatformProduct(l.name, l.hubspotProductId) && !isIncludedServiceProduct(l.hubspotProductId, l.name))
+    .map(l => ({ hubspotProductId: l.hubspotProductId, qty: l.qty }));
+}
+
+// ── The one derivation ──────────────────────────────────────────────────────
+
+export type BuiltQuote = {
+  /** Platform line, then the mandatory services, then what the rep picked. */
+  quoteLines: QuoteLine[];
+  orderPoints: OrderPoints;
+  platform: PlatformLineResult;
+  includedServices: IncludedServicesResult;
+  breakdown: OrderPointsBreakdown;
+  totals: QuoteTotals;
+  /**
+   * Reasons this quote must not be sent, in rep-readable prose. Empty means
+   * sendable. The client disables submit on these and the server refuses on the
+   * same list, so the two can't disagree about what's blocking.
+   */
+  blockers: string[];
+};
+
+/**
+ * Picks + channels + quote type → the whole quote. The configurator's live
+ * preview and the server's authoritative derivation both call this, so the
+ * money math exists once: the browser was previously running its own copy of
+ * these five steps next to the server's, which is how a preview and a saved
+ * quote drift apart.
+ *
+ * The picked lines are passed in already resolved against the catalog (the
+ * caller owns which catalog it trusts); everything derived from them is decided
+ * here.
+ */
+export function buildQuote(
+  quoteType: QuoteType,
+  pickedLines: QuoteLine[],
+  channels: string[],
+  catalog: CatalogProduct[]
+): BuiltQuote {
+  // Marketing-only quotes have no ordering points, so declared channels are
+  // dropped rather than trusted: a rep who ticks "website / online ordering"
+  // must not conjure a $99/wk platform tier onto a $49/wk marketing quote.
+  const effectiveChannels = isProcessingQuote(quoteType) ? channels : [];
+
+  const breakdown = deriveOrderPoints(pickedLines, effectiveChannels);
+  const platform = resolvePlatformLine(quoteType, breakdown.orderPoints.total, catalog);
+  const includedServices = resolveIncludedServices(quoteType, catalog);
+
+  const quoteLines = [
+    ...(platform.line ? [platform.line] : []),
+    ...includedServices.lines,
+    ...pickedLines,
+  ];
+
+  const blockers: string[] = [];
+  if (platform.status === "unresolved") {
+    blockers.push(
+      `This quote needs the "${platform.productName}" platform product, which isn't in the HubSpot ` +
+      `catalog (renamed, archived, or the catalog didn't load). Sending it would quote no platform fee at all.`
+    );
+  }
+  for (const name of includedServices.missing) {
+    blockers.push(
+      `"${name}" is included on every quote but isn't in the HubSpot catalog, so it can't be priced.`
+    );
+  }
+
+  return {
+    quoteLines,
+    orderPoints: breakdown.orderPoints,
+    platform,
+    includedServices,
+    breakdown,
+    totals: quoteTotals(quoteLines),
+    blockers,
+  };
 }

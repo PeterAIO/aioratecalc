@@ -149,7 +149,7 @@ onboarding code — ignore unless that work resumes.
 | Tablet order-point resolution | Phase H counting | Per-account admin override |
 | Headline metric for the P&L list | Phase I sort order | Hardware payback in months |
 | Is the tier re-evaluated as clients grow, and who acts on a mismatch? | Phase H admin view | Report first, task queue later |
-| Which catalog products may reps quote? | Phase C picker | Exclude $0 processing placeholders + CAMP Invoice |
+| Which catalog products may reps quote? | Phase C picker | Resolved 2026-08-20 — see "Quote types and selection rules" below |
 | Is hardware COGS the right cost basis, or landed cost? | Phase I | COGS, flag the gap |
 | Foodbuy scope | Phase E module | Ship `coming_soon` |
 
@@ -876,7 +876,35 @@ toward a tier or silently drop it, same rule as the tablet and unmapped-customer
 | --- | --- |
 | `POS Terminal`, `Kiosk` (**one point each**, not one per lane), `MPOS`, `Tableside AI Device` | `Payment Terminal`, `Card Reader`, `Customer-Facing Display`, `Kitchen Display System`, printers, `Menu Board`, mounts/stands, all network gear (`Gateway/Router`, `Wi-Fi Access Point`, `PoE Switch`, `LTE Failover`), `Cash Drawer` |
 | **Website / online ordering — counts.** Confirmed, and treated as important | |
+| `QSR POS Hardware Bundle` — **1 point** (confirmed 2026-08-20: it contains exactly one POS) | |
 | `Tablet` — **conditional**: sometimes deployed as a D3 POS replacement (counts), sometimes not | |
+
+### Quote types and selection rules — resolved 2026-08-20
+
+A quote's **type** is chosen before anything is picked, and every selection rule hangs off it. It
+has to be explicit rather than inferred: the derived lines land on an empty quote, so there is
+nothing to infer from at the moment the decision is needed. Stored on the application as
+`quote_type` (null on pre-existing rows = `full_pos`).
+
+| | `full_pos` | `food_truck` | `marketing_only` |
+| --- | --- | --- | --- |
+| Platform line (derived) | 1–5 or 6+ tier, by order-point count | flat `AIO Platform - Food Truck` | none |
+| Network + install + training | **always, qty 1 each, locked** | **always, qty 1 each, locked** | none |
+| Pickable products | anything pickable, marketing included | same | Marketing Platform + Marketing Add Spend only |
+| Ordering-point channels | declared by the rep | declared by the rep | **ignored** — a ticked "website" must not conjure a $99/wk tier |
+| Processing rate / margin target / statement | yes | yes | **none** — the lines are the whole quote |
+
+**Derived lines are never pickable.** All three platform products and the three always-included
+services are hidden from the picker and re-derived server-side, for the same reason: a rep able to
+add one by hand is how a quote ends up with two platform fees or a second $999 install. Reopening a
+saved quote goes through `picksFromQuoteLines()`, which strips them back out.
+
+**A missing derived line blocks the send.** `buildQuote()` returns `blockers[]`; the configurator
+disables submit on it and the server action throws on the same list. Silently omitting the platform
+tier is a $433/mo hole; silently omitting the install is $999.
+
+Still excluded from the picker for the original reasons: the two $0 processing placeholders, CAMP
+Invoice, and AIO Pre Auth (a per-transaction fee, meaningless as a $0.50 line).
 
 Keep this mapping **in EasyOB, not in the inventory endpoint** — it's a pricing rule, and it will
 change when the tier definition does. The endpoint stays generic and returns raw category counts.

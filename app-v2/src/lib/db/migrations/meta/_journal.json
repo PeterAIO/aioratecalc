@@ -50,6 +50,13 @@
       "when": 1787084099637,
       "tag": "0006_white_power_pack",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787266934019,
+      "tag": "0007_purple_korath",
+      "breakpoints": true
     }
   ]
 }

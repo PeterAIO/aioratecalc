@@ -5,6 +5,7 @@ import { merchantApplications } from "@/lib/db/schema";
 import { analyzeStatement } from "@/lib/claude";
 import { shouldAdvance } from "@/lib/adapters/adyenWebhook";
 import { buildCustomerSafeQuote } from "@/lib/leadQuote";
+import { isProcessingQuote, quoteTypeOf } from "@/lib/quoting";
 import type { StatementAnalysis } from "@/types/merchant";
 
 // Public, unauthenticated by design — the token itself (time-limited,
@@ -28,10 +29,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       return NextResponse.json({ error: "This link has expired" }, { status: 410 });
     }
 
+    // A marketing-only quote has no processing behind it, so there is nothing a
+    // statement could price. The lead page offers no upload on such a quote;
+    // this refuses the request outright rather than burning a Claude call and
+    // storing an analysis the quote would ignore.
+    if (!isProcessingQuote(quoteTypeOf(row.quoteType))) {
+      return NextResponse.json(
+        { error: "This quote doesn't include payment processing, so there's nothing to compare a statement against." },
+        { status: 409 }
+      );
+    }
+
     const quoteFrom = (analysis: StatementAnalysis | null) =>
       // Same projection the prepared-quote render on /lead/[token] uses, so the
       // customer-safe boundary is one function rather than two implementations.
       buildCustomerSafeQuote({
+        quoteType: row.quoteType,
         analysis,
         quoteConfig: row.quoteConfig,
         targetMargin: row.targetMargin != null ? Number(row.targetMargin) : null,

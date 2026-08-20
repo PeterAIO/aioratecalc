@@ -113,6 +113,20 @@ export type CatalogProduct = {
   productType: string; // HubSpot hs_product_type: "inventory" | "Software" | "Service" | "AIO Payment Processing"
 };
 
+// What kind of quote this is. Chosen BEFORE anything is picked, because every
+// selection rule hangs off it: which products a rep may put on the quote, which
+// platform line is derived, whether the mandatory network/install/training lines
+// are added, and whether a processing rate is quoted at all.
+export type QuoteType =
+  // The normal deal: POS hardware, an order-point-tiered platform fee, a rate.
+  | "full_pos"
+  // Same shape, but the platform fee is the flat food-truck product rather than
+  // an order-point tier.
+  | "food_truck"
+  // Marketing products alone. No POS hardware, no platform fee, no processing
+  // rate, and none of the mandatory install lines.
+  | "marketing_only";
+
 // A line on a quote. Price and frequency are SNAPSHOT at quote time rather than
 // joined live from the catalog — HubSpot line items work the same way (they
 // capture the product at time of sale and don't move when the catalog changes).
@@ -288,6 +302,11 @@ export type MerchantApplication = {
   adyenOnboardingUrl: string | null;
   checkIds: CheckIds | null; // Check payroll onboarding — null until the customer opts in
   hubspotIds: HubspotIds | null; // HubSpot deal/quote/subscription — null until a quote is built
+  // What kind of quote this is. Frozen with the rest of the quote, because it's
+  // what the lines were derived UNDER: re-reading a marketing-only quote as a
+  // full-POS one would imply a platform fee that was never quoted. Null on rows
+  // written before quote types existed; read those as "full_pos".
+  quoteType: QuoteType | null;
   quoteConfig: QuoteConfig | null; // rep-entered ticket/volume basis when there's no statement
   quoteLines: QuoteLine[] | null;  // hardware/platform/service lines; priced at quote time
   orderPoints: OrderPoints | null; // the quoted order-point count that selected the platform tier
@@ -352,7 +371,23 @@ export type CustomerSubmission = {
 // Phase C: quote lines and the order-point count are customer-safe — they are
 // literally what's printed on the paper quote. Costs, margins and floors are
 // not, and never join this shape.
-export type CustomerSafeQuote = {
+// The priced-lines half, present on every basis.
+type CustomerSafeLines = {
+  // Hardware / platform / service lines as quoted, price and cycle snapshotted.
+  // Empty (not null) when nothing was configured, so the view has one shape.
+  lines: QuoteLine[];
+  // Totals for those lines. Null when there are none. Never one number: the
+  // one-time and recurring halves are different units.
+  lineTotals: QuoteTotals | null;
+  // Stated on the quote as the basis for the platform-fee line.
+  orderPoints: OrderPoints | null;
+};
+
+// The processing-rate half. A discriminated union rather than nullable fields
+// because a marketing-only quote has no rate at ALL — no volume, no effective
+// rate, no projected cost — and zeros there would render as a real 0.00% quote.
+// The `basis` tag is what the view branches on.
+type CustomerSafeRate = {
   // "statement" — read off the merchant's own statement (theirs or the rep's upload).
   // "config"    — derived from the rep-entered quoteConfig, no statement in hand.
   basis: "statement" | "config";
@@ -369,12 +404,11 @@ export type CustomerSafeQuote = {
   monthlySavings: number | null;
   annualSavings: number | null;
   savingsPct: number | null;
-  // Hardware / platform / service lines as quoted, price and cycle snapshotted.
-  // Empty (not null) when nothing was configured, so the view has one shape.
-  lines: QuoteLine[];
-  // Totals for those lines. Null when there are none. Never one number: the
-  // one-time and recurring halves are different units.
-  lineTotals: QuoteTotals | null;
-  // Stated on the quote as the basis for the platform-fee line.
-  orderPoints: OrderPoints | null;
 };
+
+export type CustomerSafeQuote =
+  | (CustomerSafeRate & CustomerSafeLines)
+  // "products" — priced lines with no processing rate behind them. A
+  // marketing-only quote (QuoteType "marketing_only"): AIO isn't processing for
+  // this merchant, so there is nothing to quote a rate on.
+  | ({ basis: "products" } & CustomerSafeLines);

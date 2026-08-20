@@ -12,11 +12,11 @@ import { listQuotableProductsAction } from "@/lib/actions/catalog";
 import { hasQuoteBasis } from "@/lib/leadQuote";
 import { resolveLeadLinkIssue } from "@/lib/customerLink";
 import { analysisFromQuoteConfig } from "@/lib/pricing";
-import { deriveOrderPoints, resolvePlatformTier, toQuoteLine } from "@/lib/quoting";
+import { buildQuote, isAllowedForQuoteType, isProcessingQuote, toQuoteLine } from "@/lib/quoting";
 import { shouldAdvance } from "@/lib/adapters/adyenWebhook";
 import type {
   MerchantApplication, OrderPoints, PricingModel, ProcessingInfo, QuoteConfig, QuoteLine,
-  StatementAnalysis, TenantLink,
+  QuoteType, StatementAnalysis, TenantLink,
 } from "@/types/merchant";
 
 const LINK_TTL_DAYS = 14;
@@ -106,17 +106,27 @@ function tenantLinkFromCompany(company: TenantCompany, linkedByUserId: string): 
 export type QuotePick = { hubspotProductId: string; qty: number };
 
 async function deriveQuoteLines(
+  quoteType: QuoteType,
   picks: QuotePick[],
   channels: string[]
 ): Promise<{ quoteLines: QuoteLine[] | null; orderPoints: OrderPoints | null }> {
   const wanted = picks.filter(p => p.hubspotProductId && p.qty > 0);
-  if (!wanted.length && !channels.length) return { quoteLines: null, orderPoints: null };
+  // A marketing-only quote with nothing picked has nothing on it at all. A
+  // RATED one always has the three always-included services, so it can't take
+  // this shortcut even with an empty picker — dropping them here would
+  // contradict the preview the rep just approved, which is the exact drift
+  // buildQuote exists to prevent.
+  if (!wanted.length && !channels.length && !isProcessingQuote(quoteType)) {
+    return { quoteLines: null, orderPoints: null };
+  }
 
   const catalog = await listQuotableProductsAction();
   if (catalog.error) throw new Error(`Couldn't price this quote: ${catalog.error}`);
 
-  // Resolved against the PICKABLE list, so the picker's exclusions (the derived
-  // platform tiers among them) are enforced server-side too.
+  // Resolved against the PICKABLE list, so the picker's exclusions (every
+  // derived line among them) are enforced server-side too — and then re-checked
+  // against the quote type, because "the picker didn't show it" is not the same
+  // as "it can't be sent".
   const lines = wanted.map(pick => {
     const product = catalog.products.find(p => p.hubspotProductId === pick.hubspotProductId);
     if (!product) {
@@ -124,22 +134,23 @@ async function deriveQuoteLines(
         `Product ${pick.hubspotProductId} is no longer in the AIO catalog — reload the page and re-add it.`
       );
     }
+    if (!isAllowedForQuoteType(product, quoteType)) {
+      throw new Error(`"${product.name}" can't go on a ${quoteType.replace("_", " ")} quote.`);
+    }
     return toQuoteLine(product, Math.floor(pick.qty));
   });
 
-  const breakdown = deriveOrderPoints(lines, channels);
-  const tier = resolvePlatformTier(breakdown.orderPoints.total, catalog.all, lines);
-  if (tier.status === "unresolved") {
-    throw new Error(
-      `${breakdown.orderPoints.total} ordering points require "${tier.tierName}", which isn't in the ` +
-      `HubSpot catalog. Fix the catalog before sending this quote — it would go out with no platform fee.`
-    );
-  }
+  const built = buildQuote(quoteType, lines, channels, catalog.all);
+  if (built.blockers.length) throw new Error(built.blockers.join(" "));
 
-  const quoteLines = tier.line ? [tier.line, ...lines] : lines;
   return {
-    quoteLines: quoteLines.length ? quoteLines : null,
-    orderPoints: quoteLines.length || channels.length ? breakdown.orderPoints : null,
+    quoteLines: built.quoteLines.length ? built.quoteLines : null,
+    // A marketing-only quote has no ordering-point count to record, even if the
+    // browser sent channels along.
+    orderPoints:
+      isProcessingQuote(quoteType) && (built.quoteLines.length || channels.length)
+        ? built.orderPoints
+        : null,
   };
 }
 
@@ -155,6 +166,9 @@ export async function createProspectAction(input: {
   // analysis wins for pricing; quoteConfig stays as what the rep quoted on.
   quoteConfig?: QuoteConfig | null;
   analysis?: StatementAnalysis | null;
+  // What KIND of quote this is. Every selection rule hangs off it, so it's part
+  // of the payload rather than inferred from the picks. Defaults to full_pos.
+  quoteType?: QuoteType | null;
   // Phase C — what the rep picked in the configurator. Prices, the
   // ordering-point count and the platform tier are derived server-side from
   // these (see deriveQuoteLines); the client's own copy is preview only.
@@ -197,16 +211,27 @@ export async function createProspectAction(input: {
     }
   }
 
+  // A marketing-only quote has no processing behind it, so the whole rate half
+  // is dropped rather than stored-but-ignored: a statement, a ticket/volume
+  // basis or a margin target on such a row would render as a rate we never
+  // quoted. The rep form hides those inputs; this is the enforcement.
+  const quoteType: QuoteType = input.quoteType ?? "full_pos";
+  const rated = isProcessingQuote(quoteType);
+
   const quoteConfig =
-    input.quoteConfig && input.quoteConfig.monthlyVolume > 0 && input.quoteConfig.avgTicket > 0
+    rated && input.quoteConfig && input.quoteConfig.monthlyVolume > 0 && input.quoteConfig.avgTicket > 0
       ? input.quoteConfig
       : null;
-  const analysis = input.analysis ?? null;
-  // The same predicate the customer-facing render uses, so a quote can't be
-  // marked "sent" when it would draw as nothing.
-  const hasQuote = hasQuoteBasis({ analysis, quoteConfig, targetMargin: null, pricingModel: null });
+  const analysis = rated ? input.analysis ?? null : null;
 
-  const { quoteLines, orderPoints } = await deriveQuoteLines(input.picks ?? [], input.channels ?? []);
+  const { quoteLines, orderPoints } = await deriveQuoteLines(quoteType, input.picks ?? [], input.channels ?? []);
+
+  // The same predicate the customer-facing render uses, so a quote can't be
+  // marked "sent" when it would draw as nothing. On a marketing-only quote the
+  // lines ARE the quote, so they're what makes it sendable.
+  const hasQuote = hasQuoteBasis({
+    quoteType, analysis, quoteConfig, targetMargin: null, pricingModel: null, quoteLines,
+  });
 
   // Only materialize a ProcessingInfo when HubSpot actually gave us something —
   // an all-blank record would read as "the rep answered these" downstream.
@@ -234,6 +259,7 @@ export async function createProspectAction(input: {
     adyenOnboardingUrl: null,
     checkIds: null,
     hubspotIds: null,
+    quoteType,
     quoteConfig,
     // Kept even when there's no rate basis yet: the lines are what the rep
     // configured, and the customer sees them once a quote exists (their own
@@ -241,8 +267,8 @@ export async function createProspectAction(input: {
     quoteLines,
     orderPoints,
     quoteAcceptedAt: null,
-    targetMargin: input.targetMargin,
-    pricingModel: input.pricingModel,
+    targetMargin: rated ? input.targetMargin : null,
+    pricingModel: rated ? input.pricingModel : null,
     customerLinkToken: link.token,
     customerLinkPurpose: "lead_upload",
     customerLinkSentAt: link.sentAt,
@@ -295,6 +321,11 @@ export async function saveQuoteConfigurationAction(input: {
   targetMargin: number;
   pricingModel: PricingModel;
   quoteConfig?: QuoteConfig | null;
+  // The wizard is statement-driven, so it only ever offers the rated types —
+  // there is no marketing-only path through it (see ProductConfigurator's
+  // `selectableTypes`). Still explicit rather than assumed, so a food-truck
+  // deal built in the wizard gets the flat platform fee.
+  quoteType?: QuoteType | null;
 }): Promise<MerchantApplication> {
   const effective = await getEffectiveRole();
   if (!effective) throw new Error("Not authenticated");
@@ -303,7 +334,8 @@ export async function saveQuoteConfigurationAction(input: {
   const app = await postgresStorage.getApplication(scope, input.applicationId);
   if (!app) throw new Error("Application not found");
 
-  const { quoteLines, orderPoints } = await deriveQuoteLines(input.picks ?? [], input.channels ?? []);
+  const quoteType: QuoteType = input.quoteType ?? "full_pos";
+  const { quoteLines, orderPoints } = await deriveQuoteLines(quoteType, input.picks ?? [], input.channels ?? []);
 
   const quoteConfig =
     input.quoteConfig && input.quoteConfig.monthlyVolume > 0 && input.quoteConfig.avgTicket > 0
@@ -312,6 +344,7 @@ export async function saveQuoteConfigurationAction(input: {
 
   const updated: MerchantApplication = {
     ...app,
+    quoteType,
     quoteConfig,
     quoteLines,
     orderPoints,

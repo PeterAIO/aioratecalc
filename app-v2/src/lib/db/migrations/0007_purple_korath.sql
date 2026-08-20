@@ -1,0 +1,1 @@
+ALTER TABLE "merchant_applications" ADD COLUMN "quote_type" text;

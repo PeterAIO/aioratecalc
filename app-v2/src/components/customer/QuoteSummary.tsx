@@ -23,7 +23,11 @@ type Props = {
 };
 
 export default function QuoteSummary({ quote, basisAction }: Props) {
-  const showSavings = quote.annualSavings !== null && quote.annualSavings > 0;
+  // A marketing-only quote has no processing rate behind it, so there is no
+  // effective rate, volume or savings to headline — the recurring cost of what
+  // they're buying is the whole story.
+  const rated = quote.basis !== "products";
+  const showSavings = rated && quote.annualSavings !== null && quote.annualSavings > 0;
 
   const oneTimeLines  = quote.lines.filter(l => l.billingFrequency === "one_time");
   const recurringLines = quote.lines.filter(l => l.billingFrequency !== "one_time");
@@ -35,7 +39,22 @@ export default function QuoteSummary({ quote, basisAction }: Props) {
   return (
     <>
       <div className={styles.statWrap}>
-        {showSavings ? (
+        {!rated ? (
+          <>
+            <div className={styles.statCaption}>Your Monthly Total</div>
+            <div className={styles.statHero} data-tone="rate">
+              {fmt$(quote.lineTotals?.monthlyEquivalent ?? 0)}
+            </div>
+            {quote.lineTotals && quote.lineTotals.oneTime > 0 && (
+              <div className={styles.statTicker}>
+                <div className={styles.statTickerItem}>
+                  <div className={styles.statTickerValue}>{fmt$(quote.lineTotals.oneTime)}</div>
+                  <div className={styles.statTickerLabel}>Due Once</div>
+                </div>
+              </div>
+            )}
+          </>
+        ) : showSavings ? (
           <>
             <div className={styles.statCaption}>Estimated Annual Savings</div>
             <div className={styles.statHero}>{fmt$(quote.annualSavings)}</div>
@@ -145,8 +164,8 @@ export default function QuoteSummary({ quote, basisAction }: Props) {
 
           <p className={styles.lineFootnote}>
             Ongoing and one-time charges are listed separately because they bill on different
-            schedules — they aren&apos;t a single number. Processing fees are quoted above at your
-            effective rate.
+            schedules — they aren&apos;t a single number.
+            {rated && <> Processing fees are quoted above at your effective rate.</>}
           </p>
         </div>
       )}

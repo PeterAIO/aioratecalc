@@ -67,6 +67,10 @@ export const merchantApplications = pgTable("merchant_applications", {
   // We never write the subscription or its invoices — HubSpot creates both when
   // the customer pays the quote (see E2E-PLAN.md).
   hubspotIds: jsonb("hubspot_ids").$type<MerchantApplication["hubspotIds"]>(),
+  // What kind of quote this is — it decides which products may be on it, which
+  // platform line was derived, and whether there's a processing rate at all.
+  // Nullable because rows predate quote types; read those as "full_pos".
+  quoteType: text("quote_type", { enum: ["full_pos", "food_truck", "marketing_only"] }),
   // The rep-entered ticket/volume basis for a quote built without a statement.
   quoteConfig: jsonb("quote_config").$type<MerchantApplication["quoteConfig"]>(),
   // Quote lines, priced at quote time. Prices are per BILLING CYCLE (weekly for

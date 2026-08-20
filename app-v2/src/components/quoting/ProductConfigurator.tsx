@@ -3,42 +3,45 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listQuotableProductsAction } from "@/lib/actions/catalog";
 import {
-  FOOD_TRUCK_PLATFORM_NAME,
   ORDER_POINT_CHANNELS,
   PLATFORM_TIER_BOUNDARY,
-  deriveOrderPoints,
+  QUOTE_TYPES,
+  buildQuote,
   groupProducts,
-  quoteTotals,
-  resolvePlatformTier,
+  isAllowedForQuoteType,
+  isProcessingQuote,
   toQuoteLine,
-  type PlatformTierResult,
+  type BuiltQuote,
 } from "@/lib/quoting";
 import { fmt$, fmtFrequency, monthlyEquivalent } from "@/lib/utils";
-import type { CatalogProduct, OrderPoints, QuoteLine, QuoteTotals } from "@/types/merchant";
+import type { CatalogProduct, QuoteLine, QuoteType } from "@/types/merchant";
 import styles from "./ProductConfigurator.module.css";
 
-/** What the rep picked. Prices and the derived tier are the server's business. */
+/** What the rep picked. Prices and the derived lines are the server's business. */
 export type ProductPick = { hubspotProductId: string; qty: number };
 
 /**
  * Everything downstream of the picks, recomputed here for the live preview.
- * DISPLAY ONLY — the same derivation runs again server-side against the live
- * catalog, and that result is what gets persisted. The parent gets it so it can
- * gate its own submit (notably on `tier.status === "unresolved"`).
+ * DISPLAY ONLY — the same derivation (`buildQuote`) runs again server-side
+ * against the live catalog, and that result is what gets persisted. The parent
+ * gets it so it can gate its own submit on `blockers`.
  */
-export type ConfiguredQuote = {
-  quoteLines: QuoteLine[];
-  orderPoints: OrderPoints;
-  tier: PlatformTierResult;
-  totals: QuoteTotals;
-};
+export type ConfiguredQuote = BuiltQuote;
 
 type Props = {
+  quoteType: QuoteType;
   picks: ProductPick[];
   channels: string[];
+  onQuoteTypeChange: (quoteType: QuoteType) => void;
   onPicksChange: (picks: ProductPick[]) => void;
   onChannelsChange: (channels: string[]) => void;
   onDerivedChange: (quote: ConfiguredQuote) => void;
+  /**
+   * Which types this caller offers. Defaults to all of them; the proposal
+   * wizard passes only the rated ones because it starts from a statement, and a
+   * marketing-only quote has no statement behind it.
+   */
+  selectableTypes?: QuoteType[];
 };
 
 // A recurring line always shows BOTH figures: the charge as it actually bills
@@ -50,12 +53,15 @@ function priceLabel(unitPrice: number, frequency: QuoteLine["billingFrequency"])
 }
 
 export default function ProductConfigurator({
-  picks, channels, onPicksChange, onChannelsChange, onDerivedChange,
+  quoteType, picks, channels,
+  onQuoteTypeChange, onPicksChange, onChannelsChange, onDerivedChange,
+  selectableTypes,
 }: Props) {
   // The catalog is read from HubSpot server-side and cached there, so this is
   // one call per mount, not one per keystroke. It lives in here rather than in
   // the page because every caller needs exactly the same call, and the derived
-  // platform tier needs the unfiltered `all` list that only this fetch returns.
+  // platform and service lines need the unfiltered `all` list that only this
+  // fetch returns.
   const [catalog, setCatalog]         = useState<CatalogProduct[]>([]);
   const [fullCatalog, setFullCatalog] = useState<CatalogProduct[]>([]);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -68,38 +74,59 @@ export default function ProductConfigurator({
       .finally(() => setCatalogLoading(false));
   }, []);
 
-  const groups = useMemo(() => groupProducts(catalog), [catalog]);
+  const types = QUOTE_TYPES.filter(t => !selectableTypes || selectableTypes.includes(t.id));
+  const rated = isProcessingQuote(quoteType);
+
+  // The picker only ever shows what this quote type may carry.
+  const selectable = useMemo(
+    () => catalog.filter(p => isAllowedForQuoteType(p, quoteType)),
+    [catalog, quoteType]
+  );
+  const groups = useMemo(() => groupProducts(selectable), [selectable]);
 
   // Everything downstream of the picker is derived, never separately stored:
-  // the order-point count comes from the lines, and the platform tier comes
-  // from the count. The rep changes quantities; the tier follows.
+  // the order-point count comes from the lines, the platform tier comes from the
+  // count, and the mandatory install lines come from the quote type. The rep
+  // changes quantities; the rest follows.
   //
-  // This is a PREVIEW. The same derivation runs again server-side, against the
-  // live catalog, and that result is what gets persisted — the browser only
-  // ever sends the picks.
+  // This is a PREVIEW. `buildQuote` runs again server-side, against the live
+  // catalog, and that result is what gets persisted — the browser only ever
+  // sends the picks.
   const pickedLines = useMemo(() => {
-    const byId = new Map(catalog.map(p => [p.hubspotProductId, p]));
+    const byId = new Map(selectable.map(p => [p.hubspotProductId, p]));
     return picks.flatMap(pick => {
       const product = byId.get(pick.hubspotProductId);
       return product && pick.qty > 0 ? [toQuoteLine(product, pick.qty)] : [];
     });
-  }, [catalog, picks]);
-  const breakdown = useMemo(() => deriveOrderPoints(pickedLines, channels), [pickedLines, channels]);
-  const tier      = useMemo(
-    () => resolvePlatformTier(breakdown.orderPoints.total, fullCatalog, pickedLines),
-    [breakdown.orderPoints.total, fullCatalog, pickedLines]
+  }, [selectable, picks]);
+
+  const built = useMemo(
+    () => buildQuote(quoteType, pickedLines, channels, fullCatalog),
+    [quoteType, pickedLines, channels, fullCatalog]
   );
-  const tierLine   = tier.line;
-  const quoteLines = useMemo(() => (tierLine ? [tierLine, ...pickedLines] : pickedLines), [tierLine, pickedLines]);
-  const totals     = useMemo(() => quoteTotals(quoteLines), [quoteLines]);
+  const { orderPoints, breakdown, platform, includedServices, totals, quoteLines } = built;
 
   // Held in a ref so a caller passing an inline arrow can't turn the push of
   // derived state back up into a render loop.
   const emit = useRef(onDerivedChange);
   useEffect(() => { emit.current = onDerivedChange; });
-  useEffect(() => {
-    emit.current({ quoteLines, orderPoints: breakdown.orderPoints, tier, totals });
-  }, [quoteLines, breakdown.orderPoints, tier, totals]);
+  useEffect(() => { emit.current(built); }, [built]);
+
+  // Switching to a type that forbids something already picked has to drop it,
+  // or the rep sends a marketing-only quote with a POS unit they can no longer
+  // see. Runs off the catalog rather than the picks so it's a no-op until the
+  // catalog has actually loaded.
+  const changeType = (next: QuoteType) => {
+    onQuoteTypeChange(next);
+    if (catalog.length) {
+      const allowed = new Set(
+        catalog.filter(p => isAllowedForQuoteType(p, next)).map(p => p.hubspotProductId)
+      );
+      const kept = picks.filter(p => allowed.has(p.hubspotProductId));
+      if (kept.length !== picks.length) onPicksChange(kept);
+    }
+    if (!isProcessingQuote(next) && channels.length) onChannelsChange([]);
+  };
 
   // Picks are kept in catalog order, so the lines the server is asked to price
   // arrive in the same order the rep sees them listed.
@@ -111,7 +138,7 @@ export default function ProductConfigurator({
     if (qty > 0) wanted.set(id, qty);
     else wanted.delete(id);
     onPicksChange(
-      catalog
+      selectable
         .filter(p => wanted.has(p.hubspotProductId))
         .map(p => ({ hubspotProductId: p.hubspotProductId, qty: wanted.get(p.hubspotProductId)! }))
     );
@@ -122,13 +149,48 @@ export default function ProductConfigurator({
 
   return (
     <>
+      {types.length > 1 && (
+        <div className={styles.panel}>
+          <div className={styles.sectionHead}>
+            <h2 className={styles.sectionTitle}>Quote Type</h2>
+            <p className={styles.sectionNote}>
+              Pick this first — it decides what can go on the quote, which platform fee applies,
+              and whether there&apos;s a processing rate at all.
+            </p>
+          </div>
+          <div className={styles.typeRow}>
+            {types.map(t => (
+              <button
+                key={t.id}
+                type="button"
+                className={styles.typeCard}
+                data-active={quoteType === t.id}
+                onClick={() => changeType(t.id)}
+              >
+                <span className={styles.typeLabel}>{t.label}</span>
+                <span className={styles.typeNote}>{t.note}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className={styles.panel}>
         <div className={styles.sectionHead}>
           <h2 className={styles.sectionTitle}>Products &amp; Hardware</h2>
           <p className={styles.sectionNote}>
-            Priced from the live AIO catalog and snapshotted onto the quote, so a later catalog
-            change never moves what this customer was quoted. The platform fee isn&apos;t in the
-            list — it follows the ordering-point count below.
+            {rated ? (
+              <>
+                Priced from the live AIO catalog and snapshotted onto the quote, so a later catalog
+                change never moves what this customer was quoted. The platform fee isn&apos;t in the
+                list — it follows the ordering-point count below.
+              </>
+            ) : (
+              <>
+                A marketing-only quote carries the marketing products and nothing else — no POS
+                hardware, no platform fee, no install. Switch the quote type above to sell those.
+              </>
+            )}
           </p>
         </div>
 
@@ -171,74 +233,109 @@ export default function ProductConfigurator({
         ))}
       </div>
 
-      <div className={styles.panel}>
-        <div className={styles.sectionHead}>
-          <h2 className={styles.sectionTitle}>Ordering Points</h2>
-          <p className={styles.sectionNote}>
-            Every place an order can be placed. Hardware is counted from the lines above; these
-            channels never appear on a hardware list, so they have to be declared here.
-          </p>
-        </div>
-
-        <div className={styles.channelGrid}>
-          {ORDER_POINT_CHANNELS.map(c => (
-            <label key={c.id} className={styles.channel} data-on={channels.includes(c.id)}>
-              <input
-                type="checkbox" checked={channels.includes(c.id)}
-                onChange={() => toggleChannel(c.id)} className={styles.channelBox}
-              />
-              <span className={styles.channelLabel}>{c.label}</span>
-              {c.note && <span className={styles.channelNote}>{c.note}</span>}
-            </label>
-          ))}
-        </div>
-
-        <div className={styles.countRow}>
-          <span className={styles.countLabel}>Ordering points</span>
-          <span className={styles.countValue}>{breakdown.orderPoints.total}</span>
-        </div>
-
-        {tierLine ? (
-          <div className={styles.tierBox} data-tier={breakdown.orderPoints.total > PLATFORM_TIER_BOUNDARY ? "large" : "small"}>
-            <div className={styles.tierName}>{tierLine.name}</div>
-            <div className={styles.tierPrice}>{priceLabel(tierLine.unitPrice, tierLine.billingFrequency)}</div>
-            <div className={styles.tierNote}>
-              {breakdown.orderPoints.total} ordering point{breakdown.orderPoints.total === 1 ? "" : "s"} →{" "}
-              {breakdown.orderPoints.total > PLATFORM_TIER_BOUNDARY
-                ? `6+ tier. One point fewer would price at the 1–${PLATFORM_TIER_BOUNDARY} tier.`
-                : `1–${PLATFORM_TIER_BOUNDARY} tier. One more point moves this to the 6+ tier.`}
+      {/* Every quote that puts the system in a restaurant includes these three.
+          Shown, priced, and not a decision — hence no stepper. */}
+      {rated && (includedServices.lines.length > 0 || includedServices.missing.length > 0) && (
+        <div className={styles.panel}>
+          <div className={styles.sectionHead}>
+            <h2 className={styles.sectionTitle}>Always Included</h2>
+            <p className={styles.sectionNote}>
+              On every quote, one of each. Not optional — the system doesn&apos;t go live without a
+              network, an install and a training.
+            </p>
+          </div>
+          {includedServices.lines.map(l => (
+            <div key={l.hubspotProductId} className={styles.includedRow}>
+              <div className={styles.productMain}>
+                <div className={styles.productName}>{l.name}</div>
+                <div className={styles.productPrice}>{priceLabel(l.unitPrice, l.billingFrequency)}</div>
+              </div>
+              <span className={styles.includedTag}>Included ×1</span>
             </div>
-          </div>
-        ) : tier.status === "none_needed" ? (
-          <p className={styles.sectionNote}>
-            No platform fee yet — add hardware or a channel and the tier is selected automatically.
-          </p>
-        ) : tier.status === "food_truck" ? (
-          <p className={styles.sectionNote}>
-            {FOOD_TRUCK_PLATFORM_NAME} quoted, so the order-point tier isn&apos;t applied.
-          </p>
-        ) : (
-          <div className={styles.error}>
-            <strong>Platform fee missing.</strong> {breakdown.orderPoints.total} ordering points
-            require &ldquo;{tier.tierName}&rdquo;, which isn&apos;t in the HubSpot catalog (renamed,
-            archived, or the catalog didn&apos;t load). This quote can&apos;t be sent until that&apos;s
-            fixed — sending it would quote no platform fee at all.
-          </div>
-        )}
+          ))}
+          {includedServices.missing.length > 0 && (
+            <div className={styles.error}>
+              <strong>Can&apos;t price a required line.</strong>{" "}
+              {includedServices.missing.join(", ")} {includedServices.missing.length === 1 ? "is" : "are"}{" "}
+              included on every quote but missing from the HubSpot catalog (renamed, archived, or the
+              catalog didn&apos;t load). Fix that before sending this quote.
+            </div>
+          )}
+        </div>
+      )}
 
-        {breakdown.needsReview.map(r => (
-          <div key={r.name} className={styles.reviewNote}>
-            <strong>Needs review:</strong> {r.name} ×{r.qty} — {r.reason} Counted as 0 for now.
+      {rated && (
+        <div className={styles.panel}>
+          <div className={styles.sectionHead}>
+            <h2 className={styles.sectionTitle}>Ordering Points</h2>
+            <p className={styles.sectionNote}>
+              Every place an order can be placed. Hardware is counted from the lines above; these
+              channels never appear on a hardware list, so they have to be declared here.
+            </p>
           </div>
-        ))}
-        {breakdown.unclassified.length > 0 && (
-          <div className={styles.reviewNote}>
-            <strong>Unclassified hardware:</strong>{" "}
-            {breakdown.unclassified.map(u => `${u.name} ×${u.qty}`).join(", ")} — not in the
-            ordering-point rules, counted as 0. Check before sending.
+
+          <div className={styles.channelGrid}>
+            {ORDER_POINT_CHANNELS.map(c => (
+              <label key={c.id} className={styles.channel} data-on={channels.includes(c.id)}>
+                <input
+                  type="checkbox" checked={channels.includes(c.id)}
+                  onChange={() => toggleChannel(c.id)} className={styles.channelBox}
+                />
+                <span className={styles.channelLabel}>{c.label}</span>
+                {c.note && <span className={styles.channelNote}>{c.note}</span>}
+              </label>
+            ))}
           </div>
-        )}
-      </div>
+
+          <div className={styles.countRow}>
+            <span className={styles.countLabel}>Ordering points</span>
+            <span className={styles.countValue}>{orderPoints.total}</span>
+          </div>
+
+          {platform.line ? (
+            <div className={styles.tierBox} data-tier={orderPoints.total > PLATFORM_TIER_BOUNDARY ? "large" : "small"}>
+              <div className={styles.tierName}>{platform.line.name}</div>
+              <div className={styles.tierPrice}>{priceLabel(platform.line.unitPrice, platform.line.billingFrequency)}</div>
+              <div className={styles.tierNote}>
+                {quoteType === "food_truck" ? (
+                  <>Food-truck platform is priced flat, so the ordering-point count doesn&apos;t move it.</>
+                ) : (
+                  <>
+                    {orderPoints.total} ordering point{orderPoints.total === 1 ? "" : "s"} →{" "}
+                    {orderPoints.total > PLATFORM_TIER_BOUNDARY
+                      ? `6+ tier. One point fewer would price at the 1–${PLATFORM_TIER_BOUNDARY} tier.`
+                      : `1–${PLATFORM_TIER_BOUNDARY} tier. One more point moves this to the 6+ tier.`}
+                  </>
+                )}
+              </div>
+            </div>
+          ) : platform.status === "none_needed" ? (
+            <p className={styles.sectionNote}>
+              No platform fee yet — add hardware or a channel and the tier is selected automatically.
+            </p>
+          ) : (
+            <div className={styles.error}>
+              <strong>Platform fee missing.</strong> This quote requires
+              &ldquo;{platform.productName}&rdquo;, which isn&apos;t in the HubSpot catalog (renamed,
+              archived, or the catalog didn&apos;t load). This quote can&apos;t be sent until
+              that&apos;s fixed — sending it would quote no platform fee at all.
+            </div>
+          )}
+
+          {breakdown.needsReview.map(r => (
+            <div key={r.name} className={styles.reviewNote}>
+              <strong>Needs review:</strong> {r.name} ×{r.qty} — {r.reason} Counted as 0 for now.
+            </div>
+          ))}
+          {breakdown.unclassified.length > 0 && (
+            <div className={styles.reviewNote}>
+              <strong>Unclassified hardware:</strong>{" "}
+              {breakdown.unclassified.map(u => `${u.name} ×${u.qty}`).join(", ")} — not in the
+              ordering-point rules, counted as 0. Check before sending.
+            </div>
+          )}
+        </div>
+      )}
 
       {quoteLines.length > 0 && (
         <div className={styles.panel}>

@@ -5,7 +5,16 @@ import {
   analysisFromQuoteConfig,
 } from "@/lib/pricing";
 import { buildCustomerSafeQuote, hasQuoteBasis } from "@/lib/leadQuote";
-import type { StatementAnalysis } from "@/types/merchant";
+import type { CustomerSafeQuote, StatementAnalysis } from "@/types/merchant";
+
+// Narrows away the products-basis variant. A marketing-only quote carries no
+// rate fields at all (see CustomerSafeQuote), and every quote in this file is a
+// rated one — so this doubles as the assertion that it built at all.
+function rated(quote: CustomerSafeQuote | null) {
+  if (!quote) throw new Error("expected a quote, got null");
+  if (quote.basis === "products") throw new Error("expected a rated quote, got a products-only one");
+  return quote;
+}
 
 // A statement-less quote is pure arithmetic on two rep-entered numbers, so the
 // expectations below are hand-computed from Steve's constants rather than
@@ -54,12 +63,12 @@ describe("analysisFromQuoteConfig", () => {
 });
 
 describe("buildCustomerSafeQuote — config basis", () => {
-  const quote = buildCustomerSafeQuote({
+  const quote = rated(buildCustomerSafeQuote({
     analysis: null,
     quoteConfig: CONFIG,
     targetMargin: 0.008,
     pricingModel: "2-tier",
-  })!;
+  }));
 
   it("prices each lane at its own interchange estimate plus the target margin", () => {
     // 2-tier charges fees on top of the rate (Steve 2026-07-23), and a customer
@@ -91,9 +100,9 @@ describe("buildCustomerSafeQuote — config basis", () => {
 
   it("falls back to the volume tier's desired margin when the rep set none", () => {
     // $100k lands in the maxVol 100,000 tier: desiredMargin 0.0038.
-    const defaulted = buildCustomerSafeQuote({
+    const defaulted = rated(buildCustomerSafeQuote({
       analysis: null, quoteConfig: CONFIG, targetMargin: null, pricingModel: "2-tier",
-    })!;
+    }));
     const expectedMonthly =
       90_000 * (INTERCHANGE_ESTIMATE.cardPresent + 0.0038) +
       10_000 * (INTERCHANGE_ESTIMATE.cardNotPresent + 0.0038);
@@ -134,14 +143,14 @@ describe("buildCustomerSafeQuote — quote lines and order points", () => {
     },
   ] as const;
 
-  const quote = buildCustomerSafeQuote({
+  const quote = rated(buildCustomerSafeQuote({
     analysis: null,
     quoteConfig: CONFIG,
     targetMargin: 0.008,
     pricingModel: "2-tier",
     quoteLines: [...LINES],
     orderPoints: { hardware: { "POS Unit": 2 }, channels: ["website"], total: 3 },
-  })!;
+  }));
 
   it("passes the lines through exactly as snapshotted", () => {
     expect(quote.lines).toEqual([...LINES]);
@@ -182,9 +191,9 @@ describe("buildCustomerSafeQuote — statement basis", () => {
   } as StatementAnalysis;
 
   it("compares against the statement's own fee total", () => {
-    const quote = buildCustomerSafeQuote({
+    const quote = rated(buildCustomerSafeQuote({
       analysis, quoteConfig: null, targetMargin: 0.008, pricingModel: "2-tier",
-    })!;
+    }));
     // Itemized interchange, so each lane keeps the statement's blended rate:
     // 100,000 × (1.80% + 0.80%) = $2,600.
     expect(quote.basis).toBe("statement");
@@ -197,12 +206,12 @@ describe("buildCustomerSafeQuote — statement basis", () => {
   });
 
   it("takes precedence over a quoteConfig on the same application", () => {
-    const quote = buildCustomerSafeQuote({
+    const quote = rated(buildCustomerSafeQuote({
       analysis,
       quoteConfig: { avgTicket: 5, monthlyVolume: 1_000 },
       targetMargin: 0.008,
       pricingModel: "2-tier",
-    })!;
+    }));
     expect(quote.basis).toBe("statement");
     expect(quote.monthlyVolume).toBe(100_000);
   });
@@ -246,10 +255,79 @@ describe("hasQuoteBasis", () => {
       // A statement that read as zero does NOT fall back to the configs — the
       // statement wins in buildCustomerSafeQuote, so it has to win here too.
       { ...none, analysis: { totalVolume: 0 } as StatementAnalysis, quoteConfig: CONFIG },
+      // Marketing-only: the lines are the whole quote, so the rate half decides
+      // nothing either way.
+      { ...none, quoteType: "marketing_only" as const },
+      { ...none, quoteType: "marketing_only" as const, quoteLines: [...MARKETING_LINES] },
+      { ...none, quoteType: "marketing_only" as const, quoteConfig: CONFIG },
     ];
     for (const basis of cases) {
       expect(hasQuoteBasis(basis)).toBe(buildCustomerSafeQuote(basis) !== null);
     }
+  });
+});
+
+const MARKETING_LINES = [
+  {
+    hubspotProductId: "223152695997", name: "AIO Marketing Platform",
+    qty: 1, unitPrice: 49, billingFrequency: "weekly" as const, productType: "Software",
+  },
+  {
+    hubspotProductId: "247901295335", name: "AIO Marketing Add Spend",
+    qty: 1, unitPrice: 99, billingFrequency: "monthly" as const, productType: "Service",
+  },
+];
+
+describe("buildCustomerSafeQuote — marketing-only", () => {
+  const basis = {
+    quoteType: "marketing_only" as const,
+    analysis: null, quoteConfig: null, targetMargin: null, pricingModel: null,
+    quoteLines: [...MARKETING_LINES],
+    orderPoints: null,
+  };
+
+  it("prices the lines with no rate half at all", () => {
+    const quote = buildCustomerSafeQuote(basis)!;
+    expect(quote.basis).toBe("products");
+    expect(quote.lines).toEqual([...MARKETING_LINES]);
+    // 49/wk and 99/mo are different cycles and stay apart.
+    expect(quote.lineTotals).toEqual({
+      oneTime: 0,
+      recurring: [{ frequency: "weekly", amount: 49 }, { frequency: "monthly", amount: 99 }],
+      monthlyEquivalent: 49 * (52 / 12) + 99,
+    });
+    expect(quote.orderPoints).toBeNull();
+  });
+
+  it("exposes no rate, volume or savings field — there is no processing behind it", () => {
+    const quote = buildCustomerSafeQuote(basis)!;
+    for (const key of [
+      "monthlyVolume", "averageTicket", "effectiveRate", "projectedMonthlyCost",
+      "projectedAnnualCost", "currentMonthlyCost", "currentEffectiveRate",
+      "monthlySavings", "annualSavings", "savingsPct",
+    ]) {
+      expect(quote).not.toHaveProperty(key);
+    }
+  });
+
+  it("ignores a rate basis that somehow rode along on the row", () => {
+    // Belt and braces: createProspectAction already drops these for this type.
+    const quote = buildCustomerSafeQuote({
+      ...basis, quoteConfig: CONFIG, targetMargin: 0.008, pricingModel: "2-tier",
+    })!;
+    expect(quote.basis).toBe("products");
+  });
+
+  it("is null with no lines — an empty marketing quote is not a quote", () => {
+    expect(buildCustomerSafeQuote({ ...basis, quoteLines: [] })).toBeNull();
+    expect(buildCustomerSafeQuote({ ...basis, quoteLines: null })).toBeNull();
+  });
+
+  it("reads a row with no quoteType as a rated quote, unchanged", () => {
+    const rated = buildCustomerSafeQuote({
+      analysis: null, quoteConfig: CONFIG, targetMargin: 0.008, pricingModel: "2-tier",
+    })!;
+    expect(rated.basis).toBe("config");
   });
 });
 
@@ -281,8 +359,8 @@ describe("buildCustomerSafeQuote — one projection for both rep flows", () => {
   it("honours the rep's own margin instead of the volume tier default", () => {
     // The wizard used to hard-code targetMargin to null, so a Flow A deal was
     // silently quoted at the $100k tier's 0.38% desired margin.
-    const chosen   = buildCustomerSafeQuote(wizardRow)!;
-    const defaulted = buildCustomerSafeQuote({ ...wizardRow, targetMargin: null })!;
+    const chosen   = rated(buildCustomerSafeQuote(wizardRow));
+    const defaulted = rated(buildCustomerSafeQuote({ ...wizardRow, targetMargin: null }));
     const expectedMonthly =
       90_000 * (INTERCHANGE_ESTIMATE.cardPresent + 0.011) +
       10_000 * (INTERCHANGE_ESTIMATE.cardNotPresent + 0.011);
@@ -291,7 +369,7 @@ describe("buildCustomerSafeQuote — one projection for both rep flows", () => {
   });
 
   it("renders a real quote — lines, totals and points all present", () => {
-    const quote = buildCustomerSafeQuote(wizardRow)!;
+    const quote = rated(buildCustomerSafeQuote(wizardRow));
     expect(quote.projectedMonthlyCost).toBeGreaterThan(0);
     expect(quote.effectiveRate).toBeGreaterThan(0);
     expect(quote.lines).toEqual([...LINES]);
@@ -302,19 +380,19 @@ describe("buildCustomerSafeQuote — one projection for both rep flows", () => {
   it("never fabricates a saving on the statement-less path", () => {
     // analysisFromQuoteConfig leaves totalFees at 0, so a naive
     // current − projected would print a large negative "saving".
-    const quote = buildCustomerSafeQuote(wizardRow)!;
+    const quote = rated(buildCustomerSafeQuote(wizardRow));
     expect(quote.basis).toBe("config");
     expect(quote.monthlySavings).toBeNull();
     expect(quote.annualSavings).toBeNull();
   });
 
   it("shows the saving as soon as a statement supplies the current cost", () => {
-    const withStatement = buildCustomerSafeQuote({
+    const withStatement = rated(buildCustomerSafeQuote({
       ...wizardRow,
       analysis: { totalVolume: 100_000, totalTransactions: 2500, totalFees: 4_000, averageTicket: 40,
         interchangeRate: 0.018, icEstimated: false, cardPresentPct: 0.9, cardNotPresentPct: 0.1,
         cardPresentVolume: 90_000, cardNotPresentVolume: 10_000 } as StatementAnalysis,
-    })!;
+    }));
     expect(withStatement.basis).toBe("statement");
     expect(withStatement.currentMonthlyCost).toBe(4_000);
     expect(withStatement.monthlySavings).toBeGreaterThan(0);

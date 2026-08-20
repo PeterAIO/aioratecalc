@@ -15,9 +15,9 @@ import {
   NO_PREFILL_APPLIED,
   type AppliedProspectPrefill,
 } from "@/lib/prefillMerge";
-import { ORDER_POINT_CHANNELS } from "@/lib/quoting";
+import { ORDER_POINT_CHANNELS, isProcessingQuote } from "@/lib/quoting";
 import { fmtPct2 } from "@/lib/utils";
-import type { PricingModel, StatementAnalysis } from "@/types/merchant";
+import type { PricingModel, QuoteType, StatementAnalysis } from "@/types/merchant";
 import type { ProspectPrefill } from "@/lib/hubspotPrefill";
 import type { TenantCompany } from "@/lib/adapters/hubspot";
 import styles from "./prospects-new.module.css";
@@ -43,12 +43,19 @@ function NewProspectFlow() {
   const [saving, setSaving]             = useState(false);
   const [error, setError]               = useState<string | null>(null);
 
-  // Product configurator. The picks and channels are owned here; the lines,
-  // ordering-point count and platform tier they imply come back derived.
-  // Declared above the HubSpot block because the prefill seeds `channels`.
+  // Product configurator. The quote type, picks and channels are owned here;
+  // the lines, ordering-point count and derived platform/service lines they
+  // imply come back derived. Declared above the HubSpot block because the
+  // prefill seeds `channels`.
+  const [quoteType, setQuoteType] = useState<QuoteType>("full_pos");
   const [picks, setPicks]       = useState<ProductPick[]>([]);
   const [channels, setChannels] = useState<string[]>([]);
   const [quote, setQuote]       = useState<ConfiguredQuote | null>(null);
+
+  // A marketing-only quote has no processing behind it: no rate, no margin
+  // target, no statement. The server drops those fields for this type too — this
+  // is just not asking for them.
+  const rated = isProcessingQuote(quoteType);
 
   // Phase F — deep link from the HubSpot Company record. Fetched server-side
   // via the server action; failure here must never block the form, only show
@@ -172,10 +179,10 @@ function NewProspectFlow() {
   const [dragOver, setDragOver]     = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // A tier is owed but the catalog didn't yield it: the biggest recurring line
-  // on the quote would go missing. Blocks the save rather than quietly
-  // shipping a tier-less quote — the server refuses it too.
-  const tierUnresolved = quote?.tier.status === "unresolved";
+  // A required line — the platform tier, or one of the always-included services
+  // — is owed but the catalog didn't yield it. Blocks the save rather than
+  // quietly shipping a quote with a hole in it; the server refuses it too.
+  const blockers = quote?.blockers ?? [];
 
   const handleFile = (f: File) => {
     setFile(f);
@@ -208,24 +215,27 @@ function NewProspectFlow() {
       setError("Business name and contact email are required.");
       return;
     }
-    const ticket = parseFloat(avgTicket) || 0;
-    const volume = parseFloat(monthlyVolume) || 0;
+    const ticket = rated ? parseFloat(avgTicket) || 0 : 0;
+    const volume = rated ? parseFloat(monthlyVolume) || 0 : 0;
     if ((ticket > 0) !== (volume > 0)) {
       setError("Enter both average ticket and monthly volume, or neither.");
       return;
     }
-    const tier = quote?.tier;
-    if (tier && tier.status === "unresolved") {
-      setError(`This quote needs the "${tier.tierName}" platform product, which isn't in the HubSpot catalog. Fix the catalog before sending it.`);
+    if (blockers.length) {
+      setError(blockers.join(" "));
+      return;
+    }
+    if (!rated && !picks.length) {
+      setError("A marketing-only quote needs at least one marketing product on it.");
       return;
     }
     setSaving(true);
     setError(null);
     try {
       const { linkUrl, warning } = await createProspectAction({
-        merchantName, contactEmail, targetMargin, pricingModel,
+        merchantName, contactEmail, targetMargin, pricingModel, quoteType,
         quoteConfig: ticket > 0 && volume > 0 ? { avgTicket: ticket, monthlyVolume: volume } : null,
-        analysis,
+        analysis: rated ? analysis : null,
         // Only the picks cross the wire — prices and the tier are re-derived
         // server-side against the live catalog.
         picks,
@@ -243,7 +253,7 @@ function NewProspectFlow() {
   const reset = () => {
     setMerchantName(""); setContactEmail(""); setTargetMargin(0.008); setPricingModel("2-tier");
     setAvgTicket(""); setMonthlyVolume(""); setFile(null); setAnalysis(null);
-    setPicks([]); setChannels([]); setQuote(null);
+    setQuoteType("full_pos"); setPicks([]); setChannels([]); setQuote(null);
     setLinkUrl(null); setLinkWarning(null); setCopied(false); setError(null);
     setHubspotCompany(null); setHubspotNotice(null);
     setPrefill(null); setApplied(NO_PREFILL_APPLIED); appliedRef.current = NO_PREFILL_APPLIED;
@@ -251,9 +261,11 @@ function NewProspectFlow() {
   };
 
   // Matches the server's gate (hasQuoteBasis): a statement with no readable
-  // volume is not a quote, so don't promise the customer one.
-  const hasQuote =
-    (analysis?.totalVolume ?? 0) > 0 || (parseFloat(avgTicket) > 0 && parseFloat(monthlyVolume) > 0);
+  // volume is not a quote, so don't promise the customer one. On a
+  // marketing-only quote the lines are the quote — there's no rate to have.
+  const hasQuote = rated
+    ? (analysis?.totalVolume ?? 0) > 0 || (parseFloat(avgTicket) > 0 && parseFloat(monthlyVolume) > 0)
+    : picks.length > 0;
 
   // The prefill covers more than this form shows — createProspectAction stamps
   // the rest onto the application server-side — so name what's riding along
@@ -394,6 +406,9 @@ function NewProspectFlow() {
         )}
       </div>
 
+      {/* Rate half. A marketing-only quote has no processing behind it, so there
+          is nothing to price against a statement — the products ARE the quote. */}
+      {rated && (
       <div className={styles.panel}>
         <div className={styles.sectionHead}>
           <h2 className={styles.sectionTitle}>Prepare the Quote (optional)</h2>
@@ -452,15 +467,19 @@ function NewProspectFlow() {
           )}
         </div>
       </div>
+      )}
 
       <ProductConfigurator
+        quoteType={quoteType}
         picks={picks}
         channels={channels}
+        onQuoteTypeChange={setQuoteType}
         onPicksChange={setPicks}
         onChannelsChange={setChannels}
         onDerivedChange={setQuote}
       />
 
+      {rated && (
       <div className={styles.panel}>
         <label className={styles.label}>Pricing Model</label>
         <div className={styles.modelRow}>
@@ -496,6 +515,7 @@ function NewProspectFlow() {
           </div>
         )}
       </div>
+      )}
 
       {error && (
         <div className={styles.error}>
@@ -503,7 +523,7 @@ function NewProspectFlow() {
         </div>
       )}
 
-      <button onClick={submit} disabled={saving || analyzing || tierUnresolved} className={styles.btnPrimary}>
+      <button onClick={submit} disabled={saving || analyzing || blockers.length > 0} className={styles.btnPrimary}>
         {saving ? "Creating…" : hasQuote ? "Create Quote Link →" : "Create Link →"}
       </button>
     </div>

@@ -10,9 +10,9 @@
 // pricing.ts itself. Client components receive the returned CustomerSafeQuote
 // as a prop; they never import this module.
 import { analysisFromQuoteConfig, derivePricing, type FeeOverrides } from "@/lib/pricing";
-import { quoteTotals } from "@/lib/quoting";
+import { isProcessingQuote, quoteTotals, quoteTypeOf } from "@/lib/quoting";
 import type {
-  CustomerSafeQuote, OrderPoints, QuoteConfig, QuoteLine, StatementAnalysis,
+  CustomerSafeQuote, OrderPoints, QuoteConfig, QuoteLine, QuoteType, StatementAnalysis,
 } from "@/types/merchant";
 
 // What a quote can be built from. Mirrors the application columns that matter
@@ -25,6 +25,9 @@ export type QuoteBasis = {
   // Phase C. Optional so the rate-only callers and their tests are unchanged.
   quoteLines?: QuoteLine[] | null;
   orderPoints?: OrderPoints | null;
+  // Omitted / null on rows written before quote types existed — read as
+  // "full_pos", i.e. the rate is what makes the quote (see quoteTypeOf).
+  quoteType?: QuoteType | null;
 };
 
 // Customer-facing quotes carry no separate per-transaction or monthly fee —
@@ -32,12 +35,18 @@ export type QuoteBasis = {
 const NO_FEE_OVERRIDES: FeeOverrides = { monthlyFee: 0, perTxnFee: 0, cpPerTxnFee: 0, cnpPerTxnFee: 0 };
 
 /**
- * The one gate. `hasQuoteBasis` and `buildCustomerSafeQuote` both go through
- * it, so "a quote exists" and "a quote renders" can never disagree — a
- * mis-read statement (volume 0) used to pass the first and fail the second,
- * which marked a deal quote_sent and let it be accepted with nothing on screen.
+ * The rated path's gate: is there a readable rate basis? "A quote exists" and
+ * "a quote renders" must never disagree — a mis-read statement (volume 0) used
+ * to pass the first and fail the second, which marked a deal quote_sent and let
+ * it be accepted with nothing on screen. `hasQuoteBasis` now asks
+ * `buildCustomerSafeQuote` directly rather than sharing this predicate, because
+ * with marketing-only quotes the two paths to "sendable" are different: a rate
+ * basis on a POS quote, priced lines on a marketing one.
  */
 function quotableAnalysis(basis: QuoteBasis): StatementAnalysis | null {
+  // A marketing-only quote has no processing behind it, so there is no rate to
+  // derive and nothing to derive it from — its lines are the whole quote.
+  if (!isProcessingQuote(quoteTypeOf(basis.quoteType))) return null;
   const analysis = basis.analysis ?? (basis.quoteConfig ? analysisFromQuoteConfig(basis.quoteConfig) : null);
   if (!analysis || !(analysis.totalVolume > 0)) return null;
   return analysis;
@@ -45,7 +54,7 @@ function quotableAnalysis(basis: QuoteBasis): StatementAnalysis | null {
 
 /** True when there is enough on the application to show a quote without asking for a statement. */
 export function hasQuoteBasis(basis: QuoteBasis): boolean {
-  return quotableAnalysis(basis) !== null;
+  return buildCustomerSafeQuote(basis) !== null;
 }
 
 /**
@@ -54,6 +63,21 @@ export function hasQuoteBasis(basis: QuoteBasis): boolean {
  * no-statement base, not an override.
  */
 export function buildCustomerSafeQuote(basis: QuoteBasis): CustomerSafeQuote | null {
+  const lines = basis.quoteLines ?? [];
+
+  // Marketing-only: priced lines with no rate half at all. Null (not a $0 rate)
+  // when there are no lines, so an empty marketing quote reads as "no quote yet"
+  // exactly like a missing statement does on the rated path.
+  if (!isProcessingQuote(quoteTypeOf(basis.quoteType))) {
+    if (!lines.length) return null;
+    return {
+      basis: "products",
+      lines,
+      lineTotals: quoteTotals(lines),
+      orderPoints: null,
+    };
+  }
+
   const analysis = quotableAnalysis(basis);
   if (!analysis) return null;
   const fromStatement = !!basis.analysis;
@@ -64,11 +88,6 @@ export function buildCustomerSafeQuote(basis: QuoteBasis): CustomerSafeQuote | n
   const targetMargin = basis.targetMargin ?? undefined;
   const pricingModel = basis.pricingModel || "2-tier";
   const pricing = derivePricing(analysis, targetMargin, pricingModel, NO_FEE_OVERRIDES);
-
-  // Hardware/platform/service lines are customer-safe as they stand — they're
-  // what gets printed on the quote. Totals are computed here rather than in the
-  // view so the "never sum across billing frequencies" rule has one owner.
-  const lines = basis.quoteLines ?? [];
 
   const projectedMonthlyCost = pricing.projectedMonthlyFees;
   // Savings require a current cost. Only a statement supplies one.

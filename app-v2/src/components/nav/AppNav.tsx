@@ -42,12 +42,18 @@ export function AppNav({ role, userName }: { role: NavRole; userName?: string })
   return (
     <nav className={isAdmin ? `${styles.nav} ${styles.navAdmin}` : styles.nav} ref={navRef}>
       <div className={styles.navLeft}>
-        <Link href={isAdmin ? "/admin" : "/rep"} className={styles.navWordmark}>
+        <Link
+          href={isAdmin ? "/admin" : "/rep"}
+          className={styles.navWordmark}
+          aria-label={isAdmin ? "AIO Admin Console" : undefined}
+        >
           <span className={styles.navMark}>A</span>
           AIO
-          <span className={styles.navSub}>{isAdmin ? "Admin Console" : "Rate Calculator"}</span>
+          {!isAdmin && <span className={styles.navSub}>Rate Calculator</span>}
         </Link>
-        {isAdmin && <span className={styles.navBadge}>Admin</span>}
+        {isAdmin && (
+          <span className={styles.navBadge} aria-hidden="true">Admin</span>
+        )}
       </div>
       <div className={styles.navActions}>
         {isAdmin ? (

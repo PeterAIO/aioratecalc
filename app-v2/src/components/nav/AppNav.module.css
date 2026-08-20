@@ -82,12 +82,12 @@
  * bottom of the band ("Rate Calculator" ended at 201.5 against an "Accounts"
  * pill starting at 152.6 at 641px).
  *
- * The subtitle is decoration; the badge is the only thing telling you which
- * console you are in. So the subtitle is what goes. 40rem is below the whole
- * band, so 60rem is the only standard breakpoint that covers it — which costs
- * the subtitle over 841-960px, where it would still have fit. Below 40rem the
- * bar wraps and .navLeft gets its full intrinsic width back, so the subtitle
- * comes back with it.
+ * The subtitle is decoration; the Admin chip (admin only) is the role marker.
+ * So the subtitle is what goes. 40rem is below the whole band, so 60rem is the
+ * only standard breakpoint that covers it — which costs the subtitle over
+ * 841-960px, where it would still have fit. Below 40rem the bar wraps and
+ * .navLeft gets its full intrinsic width back, so the subtitle comes back with
+ * it.
  *
  * This buys ~98px and clears admin from ~743px up (768: -25, 840: -97). Admin
  * still overlaps at 641-743 — five action pills plus the badge want ~727px of a
@@ -95,8 +95,9 @@
  * action set itself to change and is out of scope here. Rep clears everywhere.
  *
  * Hidden visually, not removed: taken out of flow so it contributes no box and
- * no flex gap, but left in the accessibility tree so the wordmark link still
- * announces "AIO Admin Console" / "AIO Rate Calculator" at every width. */
+ * no flex gap, but left in the accessibility tree so the rep wordmark still
+ * announces "AIO Rate Calculator" at every width. Admin has no subtitle; the
+ * wordmark's aria-label covers that. */
 @media (min-width: 40rem) and (max-width: 60rem) {
   .navSub {
     position: absolute;

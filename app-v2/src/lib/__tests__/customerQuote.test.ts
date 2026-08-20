@@ -111,6 +111,9 @@ describe("getMyQuoteAction — what the customer gets back", () => {
     }));
 
     const quote = (await getMyQuoteAction("app-1"))!;
+    // Narrowed off `basis`: the products-basis variant (marketing-only) has no
+    // rate fields at all.
+    if (quote.basis === "products") throw new Error("expected a rated quote");
     expect(quote.basis).toBe("config");
     expect(quote.monthlyVolume).toBe(100_000);
     expect(quote.lines).toHaveLength(1);

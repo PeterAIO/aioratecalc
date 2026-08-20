@@ -28,6 +28,38 @@
   margin: 0;
 }
 
+/* ---------- Quote type ---------- */
+
+.typeRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-xs);
+}
+
+.typeCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.typeCard[data-active="true"] {
+  border-color: var(--accent);
+  background: oklch(69% 0.17 32 / 0.08);
+}
+
+.typeCard:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.typeLabel { font-size: 0.88rem; font-weight: 700; color: var(--ink); }
+
+.typeNote { font-size: 0.72rem; color: var(--ink-2); line-height: 1.45; }
+
 /* ---------- Product configurator ---------- */
 
 .group { margin-top: var(--space-md); }
@@ -106,6 +138,31 @@
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
+}
+
+/* ---------- Always-included services ---------- */
+
+/* Same row shape as .productRow, minus the stepper — these aren't a choice. */
+.includedRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-xs) var(--space-2xs);
+  border-radius: var(--radius-sm);
+  background: oklch(69% 0.17 32 / 0.07);
+}
+
+.includedRow + .includedRow { margin-top: var(--space-3xs); }
+
+.includedTag {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- Ordering points ---------- */
