@@ -334,7 +334,8 @@ function NewProposalFlow() {
           <h1 className={styles.productsTitle}>Products &amp; Hardware</h1>
           <p className={styles.productsSubtitle}>
             What the merchant is buying alongside the rate. The platform fee follows the ordering-point
-            count automatically, and the network, install and training are on every quote.
+            count automatically, and any quote with products on it also carries the network, install
+            and training — leave everything at zero for a rate-only quote.
           </p>
           <ProductConfigurator
             quoteType={quoteType}

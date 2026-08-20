@@ -111,11 +111,12 @@ async function deriveQuoteLines(
   channels: string[]
 ): Promise<{ quoteLines: QuoteLine[] | null; orderPoints: OrderPoints | null }> {
   const wanted = picks.filter(p => p.hubspotProductId && p.qty > 0);
-  // A marketing-only quote with nothing picked has nothing on it at all. A
-  // RATED one always has the three always-included services, so it can't take
-  // this shortcut even with an empty picker — dropping them here would
-  // contradict the preview the rep just approved, which is the exact drift
-  // buildQuote exists to prevent.
+  // Nothing picked and nothing declared still falls through for a rated quote:
+  // a food-truck deal owes its flat platform fee either way. What it does NOT
+  // pick up is the install services — those follow the products, so an empty
+  // picker is a rate-only quote (see resolveIncludedServices). A marketing-only
+  // quote with an empty picker genuinely has nothing on it, so it short-cuts
+  // the catalog read.
   if (!wanted.length && !channels.length && !isProcessingQuote(quoteType)) {
     return { quoteLines: null, orderPoints: null };
   }

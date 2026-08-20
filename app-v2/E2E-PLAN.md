@@ -889,10 +889,16 @@ nothing to infer from at the moment the decision is needed. Stored on the applic
 | | `full_pos` | `food_truck` | `marketing_only` |
 | --- | --- | --- | --- |
 | Platform line (derived) | 1–5 or 6+ tier, by order-point count | flat `AIO Platform - Food Truck` | none |
-| Network + install + training | **always, qty 1 each, locked** | **always, qty 1 each, locked** | none |
+| Network + install + training | qty 1 each, locked — **whenever any product is picked** | same | none |
 | Pickable products | anything pickable, marketing included | same | Marketing Platform + Marketing Add Spend only |
 | Ordering-point channels | declared by the rep | declared by the rep | **ignored** — a ticked "website" must not conjure a $99/wk tier |
 | Processing rate / margin target / statement | yes | yes | **none** — the lines are the whole quote |
+
+**The install services follow the products, not the quote type alone** (confirmed 2026-08-20). An
+empty picker is a **rate-only quote** — nothing to install, no network to run, nothing to train on —
+so all three come off. Declared ordering channels do *not* pull them back in: a website-ordering
+merchant carries a platform fee but has no on-site anything for a $999 install or a $999 WiFi
+package to cover. A food-truck quote with an empty picker still owes its flat platform fee.
 
 **Derived lines are never pickable.** All three platform products and the three always-included
 services are hidden from the picker and re-derived server-side, for the same reason: a rep able to

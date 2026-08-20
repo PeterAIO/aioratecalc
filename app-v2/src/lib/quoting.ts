@@ -117,7 +117,13 @@ export function isAllowedForQuoteType(product: CatalogProduct, quoteType: QuoteT
 // rep decision. So they're derived lines with no stepper, exactly like the
 // platform fee, rather than three checkboxes a rep can forget or unpick.
 //
-// Marketing-only quotes are the exception: nothing is being installed.
+// Two exceptions, both meaning "nothing is being installed":
+//   - a marketing-only quote
+//   - a RATE-ONLY quote: a processing quote with no products picked at all.
+//     The services attach to the products, so an empty picker means there's
+//     nothing to install, no network to run and nothing to train on. Declared
+//     ordering channels do NOT pull them in — a website-ordering merchant has
+//     no on-site anything for a $999 install or a $999 WiFi package to cover.
 export const INCLUDED_SERVICE_PRODUCTS = [
   { name: "AIO WiFi Network Package", hubspotProductId: "281351401209" },
   { name: "Onsite Installation", hubspotProductId: "223452690133" },
@@ -140,12 +146,19 @@ export type IncludedServicesResult = {
 };
 
 /**
- * The install lines every processing quote carries. Resolved from the catalog
- * like any other line, so the price on the quote is the price HubSpot holds
- * today and is snapshotted from here on.
+ * The install lines a quote carries. Resolved from the catalog like any other
+ * line, so the price on the quote is the price HubSpot holds today and is
+ * snapshotted from here on.
+ *
+ * Takes the picked lines because the services follow the products: no products
+ * means a rate-only quote, and a rate-only quote installs nothing.
  */
-export function resolveIncludedServices(quoteType: QuoteType, catalog: CatalogProduct[]): IncludedServicesResult {
-  if (!isProcessingQuote(quoteType)) return { lines: [], missing: [] };
+export function resolveIncludedServices(
+  quoteType: QuoteType,
+  pickedLines: QuoteLine[],
+  catalog: CatalogProduct[]
+): IncludedServicesResult {
+  if (!isProcessingQuote(quoteType) || pickedLines.length === 0) return { lines: [], missing: [] };
 
   const lines: QuoteLine[] = [];
   const missing: string[] = [];
@@ -529,7 +542,7 @@ export function buildQuote(
 
   const breakdown = deriveOrderPoints(pickedLines, effectiveChannels);
   const platform = resolvePlatformLine(quoteType, breakdown.orderPoints.total, catalog);
-  const includedServices = resolveIncludedServices(quoteType, catalog);
+  const includedServices = resolveIncludedServices(quoteType, pickedLines, catalog);
 
   const quoteLines = [
     ...(platform.line ? [platform.line] : []),

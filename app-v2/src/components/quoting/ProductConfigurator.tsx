@@ -240,8 +240,9 @@ export default function ProductConfigurator({
           <div className={styles.sectionHead}>
             <h2 className={styles.sectionTitle}>Always Included</h2>
             <p className={styles.sectionNote}>
-              On every quote, one of each. Not optional — the system doesn&apos;t go live without a
-              network, an install and a training.
+              One of each, on every quote that has products on it. Not optional — the system
+              doesn&apos;t go live without a network, an install and a training. Remove every product
+              above and they come off too, leaving a rate-only quote.
             </p>
           </div>
           {includedServices.lines.map(l => (

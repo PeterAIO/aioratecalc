@@ -187,6 +187,11 @@ npm run dev
 - `MerchantApplication` has **no EIN, bank account, or payroll tax fields** for Check either — Check collects those on its hosted pages, same rule as Adyen
 - Check's `industry_type` is **its own enum, not an MCC/SIC code** (`restaurant`, `food_and_beverage_retail_or_wholesale`, …) — `check.ts` maps `processing.mcc` onto it, defaulting to `restaurant`. Don't pass a raw MCC through.
 - `/api/lead/[token]/analyze` must only ever return `CustomerSafeQuote` — never the raw `StatementAnalysis` or any cost/margin field
+- **A quote's `quoteType` (`full_pos` | `food_truck` | `marketing_only`) drives every selection rule** and is chosen before anything is picked — never inferred from the picks, because the derived lines land on an empty quote. Null on pre-existing rows means `full_pos` (`quoteTypeOf`). Matrix in E2E-PLAN.md, "Quote types and selection rules".
+- **Derived quote lines are never pickable**: all three platform products and the three always-included services (AIO WiFi Network Package, Onsite Installation, System Onboarding and Training) are hidden from the picker and re-derived server-side. A rep able to add one by hand is a double platform fee or a second $999 install. Reopening a saved quote strips them via `picksFromQuoteLines()`.
+- The three install services attach to the **picked products**, not to the quote type alone — an empty picker is a rate-only quote and carries none of them. Declared ordering channels don't pull them in (a website-ordering merchant has nothing on site to install), though they do still drive the platform fee.
+- `buildQuote()` in `quoting.ts` is the **one** derivation — the configurator's live preview and the server's authoritative write both call it. Don't reintroduce a second copy in the client. Its `blockers[]` gates both the submit button and the server action.
+- A `marketing_only` quote has **no processing rate at all** — `CustomerSafeQuote` is a discriminated union whose `basis: "products"` variant carries no volume/rate/savings fields. Don't flatten that back to nullable numbers; zeros there render as a real 0.00% quote.
 - `ENABLE_DEBUG_ROLE_SWITCH` must never be set in a Vercel project environment — local `.env.local` only
 
 ### Env vars needed (per phase)

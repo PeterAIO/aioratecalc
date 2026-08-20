@@ -127,9 +127,11 @@ describe("quote types", () => {
 });
 
 describe("always-included services", () => {
-  it("puts a network, an install and a training on every processing quote, one each", () => {
+  const SOMETHING = [line("POS Unit", 1)];
+
+  it("puts a network, an install and a training on any quote with products, one each", () => {
     for (const quoteType of ["full_pos", "food_truck"] as const) {
-      const { lines, missing } = resolveIncludedServices(quoteType, CATALOG);
+      const { lines, missing } = resolveIncludedServices(quoteType, SOMETHING, CATALOG);
       expect(missing).toEqual([]);
       expect(lines.map(l => l.name)).toEqual([
         "AIO WiFi Network Package",
@@ -142,14 +144,30 @@ describe("always-included services", () => {
   });
 
   it("adds none of them to a marketing-only quote — nothing is being installed", () => {
-    expect(resolveIncludedServices("marketing_only", CATALOG)).toEqual({ lines: [], missing: [] });
+    expect(resolveIncludedServices("marketing_only", SOMETHING, CATALOG)).toEqual({ lines: [], missing: [] });
+  });
+
+  it("adds none of them to a rate-only quote — no products means nothing to install", () => {
+    expect(resolveIncludedServices("full_pos", [], CATALOG)).toEqual({ lines: [], missing: [] });
+    expect(resolveIncludedServices("food_truck", [], CATALOG)).toEqual({ lines: [], missing: [] });
+  });
+
+  it("attaches to products, not to declared channels", () => {
+    // A website-ordering merchant has no on-site anything for a $999 install or
+    // a $999 WiFi package to cover, even though the channel does carry a
+    // platform fee.
+    const built = buildQuote("full_pos", [], ["website"], CATALOG);
+    expect(built.orderPoints.total).toBe(1);
+    expect(built.platform.status).toBe("resolved");
+    expect(built.includedServices.lines).toEqual([]);
+    expect(built.quoteLines.map(l => l.name)).toEqual([PLATFORM_TIER_PRODUCT_NAMES.small]);
   });
 
   it("is LOUD when a required service isn't in the catalog", () => {
     // Silently dropping it is $999 off the quote, so it has to block the send
     // rather than read as "not included."
     const without = CATALOG.filter(c => c.name !== "Onsite Installation");
-    const { lines, missing } = resolveIncludedServices("full_pos", without);
+    const { lines, missing } = resolveIncludedServices("full_pos", SOMETHING, without);
     expect(missing).toEqual(["Onsite Installation"]);
     expect(lines.map(l => l.name)).not.toContain("Onsite Installation");
   });
@@ -158,7 +176,7 @@ describe("always-included services", () => {
     const renamed = CATALOG.map(c =>
       c.name === "Onsite Installation" ? { ...c, name: "On-Site Installation (2026)" } : c
     );
-    const { lines, missing } = resolveIncludedServices("full_pos", renamed);
+    const { lines, missing } = resolveIncludedServices("full_pos", SOMETHING, renamed);
     expect(missing).toEqual([]);
     expect(lines.find(l => l.hubspotProductId === "223452690133")!.unitPrice).toBe(999);
   });
@@ -428,22 +446,18 @@ describe("buildQuote — the one derivation", () => {
     expect(built.blockers).toEqual([]);
   });
 
-  it("still carries the three services on a rate-only quote with nothing picked", () => {
-    // "Every single quote" is unqualified: a POS quote with no hardware on it
-    // still owes the network, install and training.
+  it("leaves a rate-only quote empty — no products, so no install services", () => {
     const built = buildQuote("full_pos", [], [], CATALOG);
     expect(built.platform.status).toBe("none_needed");
-    expect(built.quoteLines.map(l => l.name)).toEqual([
-      "AIO WiFi Network Package",
-      "Onsite Installation",
-      "System Onboarding and Training",
-    ]);
+    expect(built.quoteLines).toEqual([]);
+    expect(built.totals.oneTime).toBe(0);
   });
 
-  it("gives a food-truck quote its flat platform fee with nothing picked", () => {
+  it("gives a food-truck quote its flat platform fee with nothing picked, and no services", () => {
     const built = buildQuote("food_truck", [], [], CATALOG);
-    expect(built.quoteLines[0].name).toBe(FOOD_TRUCK_PLATFORM_NAME);
+    expect(built.quoteLines.map(l => l.name)).toEqual([FOOD_TRUCK_PLATFORM_NAME]);
     expect(built.totals.recurring).toEqual([{ frequency: "weekly", amount: 75 }]);
+    expect(built.totals.oneTime).toBe(0);
   });
 
   it("puts nothing on a marketing-only quote with nothing picked", () => {
