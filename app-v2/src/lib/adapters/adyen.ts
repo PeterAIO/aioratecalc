@@ -1,7 +1,10 @@
 // Phase 2: Adyen for Platforms hosted onboarding adapter.
-// Builds the object graph Adyen needs, then returns a hosted onboarding URL:
+// Exposes the object graph Adyen needs as one function per object, in the order
+// the caller must create them:
 //   legal entity (LEM) → account holder + capabilities (Config) →
 //   business line (LEM) → balance account (Config) → onboarding link (LEM)
+// The caller drives the sequence and persists each id as it lands, so a broken
+// chain can resume rather than duplicate — see lib/actions/customer.ts.
 // AIO never collects SSN, bank account, routing number, or EIN — Adyen collects
 // those on its hosted page. Calls span two APIs / hosts / credentials:
 //   LEM API    → kyc-*.adyen.com/lem/v3           (ADYEN_LEM_API_KEY)
@@ -29,14 +32,6 @@ export function toE164Phone(phone: string | undefined): string | undefined {
   if (digits.length === 10) return `+1${digits}`;
   if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
   return raw;
-}
-
-export interface AdyenOnboardResult {
-  legalEntityId: string;
-  accountHolderId: string;
-  balanceAccountId: string;
-  businessLineId: string;
-  onboardingUrl: string;
 }
 
 function bases(env: string) {
@@ -87,45 +82,76 @@ function adyenOrgType(bizType: string | undefined): string {
   }
 }
 
-export async function createLegalEntityAndGetOnboardingUrl(
-  app: MerchantApplication
-): Promise<AdyenOnboardResult> {
-  const lemKey    = process.env.ADYEN_LEM_API_KEY;
-  const configKey = process.env.ADYEN_CONFIG_API_KEY;
-  const env       = process.env.ADYEN_ENVIRONMENT || "test";
-  if (!lemKey)    throw new Error("ADYEN_LEM_API_KEY is required (Phase 2)");
-  if (!configKey) throw new Error("ADYEN_CONFIG_API_KEY is required (Phase 2)");
-  const { lem, bcl } = bases(env);
+// Credentials + host for each API, resolved per call so a step never depends on
+// module-load-time env. Both throw the same way the old single-shot chain did.
+function lemContext(): { apiKey: string; lem: string } {
+  const apiKey = process.env.ADYEN_LEM_API_KEY;
+  if (!apiKey) throw new Error("ADYEN_LEM_API_KEY is required (Phase 2)");
+  return { apiKey, lem: bases(process.env.ADYEN_ENVIRONMENT || "test").lem };
+}
 
-  const legalName = app.business?.legalName || "Unknown";
-  // Human-readable name for the Adyen object descriptions (what shows in the
-  // Customer Area account-holder / store lists). Matches AIO's convention of the
-  // restaurant's trading name rather than an "AIO merchant —" prefix.
-  const displayName = app.business?.dba || legalName;
-  const registeredAddress = {
-    street: app.business?.address,
-    city: app.business?.city,
-    stateOrProvince: usStateCode(app.business?.state),
-    postalCode: app.business?.zip,
-    country: "US",
-  };
+function configContext(): { apiKey: string; bcl: string } {
+  const apiKey = process.env.ADYEN_CONFIG_API_KEY;
+  if (!apiKey) throw new Error("ADYEN_CONFIG_API_KEY is required (Phase 2)");
+  return { apiKey, bcl: bases(process.env.ADYEN_ENVIRONMENT || "test").bcl };
+}
 
-  // 1. Legal entity (LEM). AIO never fills sensitive fields — Adyen collects them.
-  const entity = await adyenCall(`${lem}/legalEntities`, lemKey, {
+// Human-readable name for the Adyen object descriptions (what shows in the
+// Customer Area account-holder / store lists). Matches AIO's convention of the
+// restaurant's trading name rather than an "AIO merchant —" prefix.
+function displayNameOf(app: MerchantApplication): string {
+  return app.business?.dba || app.business?.legalName || "Unknown";
+}
+
+// ── The onboarding chain, one remote object per function ─────────────────────
+// Deliberately NOT a single orchestrating call any more. Each step returns the
+// id it created and nothing else, so its caller can persist that id before
+// attempting the next one — a chain that breaks in the middle then resumes from
+// the break instead of creating a second legal entity on the retry. The ordering
+// and the persistence live in lib/actions/customer.ts; this module stays a pure
+// adapter with no storage of its own, same shape as adapters/check.ts.
+//
+//   1. createAdyenLegalEntity     (LEM)    → legalEntityId
+//   2. createAdyenAccountHolder   (Config) → accountHolderId
+//   3. createAdyenBusinessLine    (LEM)    → businessLineId
+//   4. createAdyenBalanceAccount  (Config) → balanceAccountId
+//   5. createOnboardingLink       (LEM)    → a fresh, single-use hosted URL
+
+// 1. Legal entity (LEM). AIO never fills sensitive fields — Adyen collects them.
+export async function createAdyenLegalEntity(app: MerchantApplication): Promise<string> {
+  const { apiKey, lem } = lemContext();
+  const entity = await adyenCall(`${lem}/legalEntities`, apiKey, {
     type: "organization",
-    organization: { legalName, type: adyenOrgType(app.business?.bizType), registeredAddress },
+    organization: {
+      legalName: app.business?.legalName || "Unknown",
+      type: adyenOrgType(app.business?.bizType),
+      registeredAddress: {
+        street: app.business?.address,
+        city: app.business?.city,
+        stateOrProvince: usStateCode(app.business?.state),
+        postalCode: app.business?.zip,
+        country: "US",
+      },
+    },
   }, "legal entity creation");
+  return entity.id;
+}
 
-  // 2. Account holder + capabilities (Config API). Capabilities MUST be requested
-  //    here — this is what makes the onboarding link (step 5) valid. Only "requested"
-  //    is settable on create; enabled/allowed are read-only (Adyen sets after KYC).
-  //    Split model: AIO's platform is the merchant of record and processes payments;
-  //    each sub-merchant RECEIVES its split (receiveFromPlatformPayments) and pays out
-  //    to its own bank (sendToTransferInstrument). A sub-merchant does NOT process
-  //    directly, so it does not request receivePayments.
-  const accountHolder = await adyenCall(`${bcl}/accountHolders`, configKey, {
-    legalEntityId: entity.id,
-    description: displayName,
+// 2. Account holder + capabilities (Config API). Capabilities MUST be requested
+//    here — this is what makes the onboarding link (step 5) valid. Only "requested"
+//    is settable on create; enabled/allowed are read-only (Adyen sets after KYC).
+//    Split model: AIO's platform is the merchant of record and processes payments;
+//    each sub-merchant RECEIVES its split (receiveFromPlatformPayments) and pays out
+//    to its own bank (sendToTransferInstrument). A sub-merchant does NOT process
+//    directly, so it does not request receivePayments.
+export async function createAdyenAccountHolder(
+  app: MerchantApplication,
+  legalEntityId: string
+): Promise<string> {
+  const { apiKey, bcl } = configContext();
+  const accountHolder = await adyenCall(`${bcl}/accountHolders`, apiKey, {
+    legalEntityId,
+    description: displayNameOf(app),
     // Fallback reference until the AIO tenant number is known — setTenantNumberAction
     // PATCHes this to the tenant number later (AH reference is mutable). The webhook
     // links back by legalEntityId, not this reference, so app.id here is safe.
@@ -135,16 +161,23 @@ export async function createLegalEntityAndGetOnboardingUrl(
       sendToTransferInstrument:    { requested: true },
     },
   }, "account holder creation");
+  return accountHolder.id;
+}
 
-  // 3. Business line (LEM). Describes what the merchant sells.
-  //    - salesChannels: eCommerce only when a website exists (Adyen requires
-  //      webData/webAddress for the eCommerce channel), plus pos when the merchant
-  //      takes any card-present volume. Always at least one channel.
-  //    - industryCode: this is NOT the merchant's MCC — Adyen uses its own enumerated
-  //      industry-code list (a raw MCC like "5812" 422s with "not recognised"). Left
-  //      as Adyen's retail example until we add an MCC→Adyen-industry-code mapping
-  //      from Adyen's reference list (go-live TODO). The merchant's real MCC is
-  //      collected in processing.mcc and is ready to map when that lands.
+// 3. Business line (LEM). Describes what the merchant sells.
+//    - salesChannels: eCommerce only when a website exists (Adyen requires
+//      webData/webAddress for the eCommerce channel), plus pos when the merchant
+//      takes any card-present volume. Always at least one channel.
+//    - industryCode: this is NOT the merchant's MCC — Adyen uses its own enumerated
+//      industry-code list (a raw MCC like "5812" 422s with "not recognised"). Left
+//      as Adyen's retail example until we add an MCC→Adyen-industry-code mapping
+//      from Adyen's reference list (go-live TODO). The merchant's real MCC is
+//      collected in processing.mcc and is ready to map when that lands.
+export async function createAdyenBusinessLine(
+  app: MerchantApplication,
+  legalEntityId: string
+): Promise<string> {
+  const { apiKey, lem } = lemContext();
   // Adyen requires webAddress to be a full URL (http:// or https://). Merchants
   // routinely enter a bare domain ("aioapp.com"), which 422s, so normalize here.
   const rawWebsite = app.business?.website?.trim();
@@ -156,31 +189,29 @@ export async function createLegalEntityAndGetOnboardingUrl(
   if (website) salesChannels.push("eCommerce");
   if (Number.isNaN(cpPct) ? !website : cpPct > 0) salesChannels.push("pos");
   if (salesChannels.length === 0) salesChannels.push("pos");
-  const businessLine = await adyenCall(`${lem}/businessLines`, lemKey, {
-    legalEntityId: entity.id,
+
+  const businessLine = await adyenCall(`${lem}/businessLines`, apiKey, {
+    legalEntityId,
     service: "paymentProcessing",
     industryCode: "4431A",
     salesChannels,
     ...(website ? { webData: [{ webAddress: website }] } : {}),
   }, "business line creation");
+  return businessLine.id;
+}
 
-  // 4. Balance account (Config API) — where the merchant's funds settle.
-  const balanceAccount = await adyenCall(`${bcl}/balanceAccounts`, configKey, {
-    accountHolderId: accountHolder.id,
-    description: `${displayName} — primary`,
+// 4. Balance account (Config API) — where the merchant's funds settle.
+export async function createAdyenBalanceAccount(
+  app: MerchantApplication,
+  accountHolderId: string
+): Promise<string> {
+  const { apiKey, bcl } = configContext();
+  const balanceAccount = await adyenCall(`${bcl}/balanceAccounts`, apiKey, {
+    accountHolderId,
+    description: `${displayNameOf(app)} — primary`,
     defaultCurrencyCode: "USD",
   }, "balance account creation");
-
-  // 5. Hosted onboarding link (LEM). Expires ~4 min and is single-use — generate on demand.
-  const onboardingUrl = await createOnboardingLink(entity.id, app.id);
-
-  return {
-    legalEntityId: entity.id,
-    accountHolderId: accountHolder.id,
-    balanceAccountId: balanceAccount.id,
-    businessLineId: businessLine.id,
-    onboardingUrl,
-  };
+  return balanceAccount.id;
 }
 
 // Mints a FRESH hosted onboarding link for an already-created legal entity.

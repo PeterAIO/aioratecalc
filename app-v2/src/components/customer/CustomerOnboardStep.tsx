@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { saveMyApplicationOnboardingAction, updateMyApplicationDetailsAction } from "@/lib/actions/customer";
 import { agreementToSubmit, customerOnboardInitial, flattenSections, recordedConsent } from "@/lib/prefillMerge";
-import { validateOnboardingFields, type OnboardingFieldErrors } from "@/lib/onboardingValidation";
+import { validateOnboardingSubmission, type OnboardingFieldErrors } from "@/lib/onboardingValidation";
 import type { MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo } from "@/types/merchant";
 import styles from "./CustomerOnboardStep.module.css";
 
@@ -45,6 +45,10 @@ export default function CustomerOnboardStep({ app }: Props) {
   // is a different thing (fieldErrors) — this is only ever "our side broke".
   const [failed, setFailed] = useState(false);
   const [savedEdit, setSavedEdit] = useState(false);
+  // An edit that saved here but couldn't be pushed to Adyen. Saying "sent to our
+  // processing partner" in that case would be the same lie the failed-handoff
+  // screen below exists to stop telling.
+  const [editSyncFailed, setEditSyncFailed] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Same validator the Server Action gates on, so the customer sees exactly
   // what would have been rejected — before any round trip. Live after the first
@@ -52,9 +56,15 @@ export default function CustomerOnboardStep({ app }: Props) {
   // a message that outlives its fix is a lie.
   const [attempted, setAttempted] = useState(false);
   const [serverErrors, setServerErrors] = useState<OnboardingFieldErrors>({});
+  // Exactly what gets submitted, so the consent the validator sees is the
+  // consent the server will see — a replay of recorded consent included.
+  const submittedAgreement = useMemo(
+    () => agreementToSubmit(recorded, agree as AgreementInfo, consentTouched),
+    [recorded, agree, consentTouched]
+  );
   const liveErrors = useMemo(
-    () => validateOnboardingFields({ business: biz, ownerContact: owner }),
-    [biz, owner]
+    () => validateOnboardingSubmission({ business: biz, ownerContact: owner, agreement: submittedAgreement }),
+    [biz, owner, submittedAgreement]
   );
   const fieldErrors: OnboardingFieldErrors = attempted ? { ...serverErrors, ...liveErrors } : {};
 
@@ -80,14 +90,11 @@ export default function CustomerOnboardStep({ app }: Props) {
     // Cleared first so a retry from the failed screen always lands back on the
     // form, where any message it produces is actually visible.
     setFailed(false);
-    if (!agree.termsAccepted || !agree.electronicConsentAccepted) {
-      setErr("Both checkboxes are required to submit.");
-      return;
-    }
     // Adyen rejects the legal entity without a complete, well-formed registered
-    // address, so block here rather than sending it and swallowing the 422.
-    // The Server Action re-runs the same rules — this copy is only for the
-    // customer's benefit, it is not the gate.
+    // address, and AIO won't hand a merchant over without their own consent, so
+    // block here rather than sending it and swallowing the 422. The Server
+    // Action re-runs the same rules — this copy is only for the customer's
+    // benefit, it is not the gate.
     if (Object.keys(liveErrors).length) {
       setServerErrors({});
       setErr("Please correct the highlighted fields above before submitting.");
@@ -103,12 +110,18 @@ export default function CustomerOnboardStep({ app }: Props) {
         processing: proc as ProcessingInfo,
         // Untouched recorded consent goes back verbatim — its date is a fact
         // about when consent was given, not something an edit gets to rewrite.
-        agreement: agreementToSubmit(recorded, agree as AgreementInfo, consentTouched),
+        agreement: submittedAgreement,
       };
 
       if (isEditingAfterAdyen) {
-        await updateMyApplicationDetailsAction(app.id, fields);
+        const edited = await updateMyApplicationDetailsAction(app.id, fields);
         setSaving(false);
+        if (edited.fieldErrors) {
+          setServerErrors(edited.fieldErrors);
+          setErr("Please correct the highlighted fields above before submitting.");
+          return;
+        }
+        setEditSyncFailed(edited.adyenFailed);
         setSavedEdit(true);
         return;
       }
@@ -166,10 +179,20 @@ export default function CustomerOnboardStep({ app }: Props) {
   if (savedEdit) {
     return (
       <div className={styles.successWrap}>
-        <div className={styles.successIcon}>✓</div>
-        <h1 className={styles.successTitle}>Changes Saved</h1>
+        {editSyncFailed
+          ? <div className={styles.failIcon}>!</div>
+          : <div className={styles.successIcon}>✓</div>}
+        <h1 className={editSyncFailed ? styles.failTitle : styles.successTitle}>Changes Saved</h1>
         <p className={styles.successBody}>
-          Your updated info has been saved and sent to our processing partner.
+          {editSyncFailed ? (
+            <>
+              <strong>Your changes are saved</strong> — but we couldn&apos;t send them on to our
+              processing partner, so the details they hold are still the previous ones. Your AIO
+              representative can push the update through.
+            </>
+          ) : (
+            "Your updated info has been saved and sent to our processing partner."
+          )}
         </p>
         <button
           onClick={() => router.push(`/customer/applications/${app.id}`)}
@@ -349,6 +372,12 @@ export default function CustomerOnboardStep({ app }: Props) {
               </label>
             </div>
           </>
+        )}
+        {/* Consent is the one requirement with no input of its own to sit under,
+            so it gets its message here — a rejection the customer can't see is
+            the same dead end as no rejection at all. */}
+        {fieldErrors["agreement.consent"] && (
+          <p className={styles.fieldError}>{fieldErrors["agreement.consent"]}</p>
         )}
       </div>
 

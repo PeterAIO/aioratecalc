@@ -3,24 +3,29 @@
 // registered address, and that rejection used to be invisible: the customer
 // saw a success screen with no link to click.
 //
-// Deliberately PURE and dependency-free apart from utils.ts (also pure) so the
-// same rules run in the browser (CustomerOnboardStep, for inline messages) and
-// in the Server Action (the real gate). It must never import adapters/adyen.ts,
-// pricing.ts, or anything under lib/db — those are server-only and would be
-// pulled into the client bundle.
+// Deliberately PURE and dependency-free apart from utils.ts and consent.ts
+// (both also pure) so the same rules run in the browser (CustomerOnboardStep,
+// for inline messages) and in the Server Action (the real gate). It must never
+// import adapters/adyen.ts, pricing.ts, or anything under lib/db — those are
+// server-only and would be pulled into the client bundle.
 //
 // Errors are keyed by the dotted field path the onboarding form already uses
 // for its prefill bookkeeping ("business.zip"), so the form can render each
 // message next to the input it belongs to without a second mapping table.
 
+import { isCustomerConsent } from "@/lib/consent";
 import { isUsStateCode } from "@/lib/utils";
-import type { BusinessInfo, OwnerContact } from "@/types/merchant";
+import type { AgreementInfo, BusinessInfo, OwnerContact } from "@/types/merchant";
 
 export type OnboardingFieldErrors = Record<string, string>;
 
 export type OnboardingValidationInput = {
   business?: Partial<BusinessInfo> | null;
   ownerContact?: Partial<OwnerContact> | null;
+};
+
+export type OnboardingSubmissionInput = OnboardingValidationInput & {
+  agreement?: AgreementInfo | null;
 };
 
 const s = (v: string | undefined | null) => (v ?? "").trim();
@@ -96,4 +101,32 @@ export function validateOnboardingFields(input: OnboardingValidationInput): Onbo
   }
 
   return errors;
+}
+
+// Consent is a different class of requirement from the Adyen field rules above:
+// Adyen never asks for it, AIO's own agreement does. It's checked here anyway
+// because this module is what the Server Action runs before the handoff, and
+// that is precisely where consent has to hold — the boxes were only ever
+// enforced in the browser, so a bypassed client could reach Adyen's KYC pages
+// having agreed to nothing.
+//
+// The rule itself is NOT restated: lib/consent.ts owns who may author consent
+// and what counts as complete, and this only asks it. So a legacy row with no
+// recorded actor fails here too, exactly as that module intends — the merchant
+// is asked to tick the boxes themselves rather than being credited with an act
+// of unknown origin.
+export function validateOnboardingConsent(
+  agreement: AgreementInfo | null | undefined
+): OnboardingFieldErrors {
+  if (isCustomerConsent(agreement)) return {};
+  return {
+    "agreement.consent":
+      "Accept the terms and consent to electronic records to continue.",
+  };
+}
+
+// Everything that must hold before the Adyen chain starts: the fields Adyen
+// needs, plus the merchant's own consent.
+export function validateOnboardingSubmission(input: OnboardingSubmissionInput): OnboardingFieldErrors {
+  return { ...validateOnboardingFields(input), ...validateOnboardingConsent(input.agreement) };
 }

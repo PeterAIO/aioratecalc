@@ -9,7 +9,14 @@ import { db } from "@/lib/db/client";
 import { customerLoginTokens, users } from "@/lib/db/schema";
 import { postgresStorage } from "@/lib/storage/postgresAdapter";
 import { sendMagicLinkEmail, type SendMagicLinkResult } from "@/lib/adapters/email";
-import { createLegalEntityAndGetOnboardingUrl, updateLegalEntity } from "@/lib/adapters/adyen";
+import {
+  createAdyenAccountHolder,
+  createAdyenBalanceAccount,
+  createAdyenBusinessLine,
+  createAdyenLegalEntity,
+  createOnboardingLink,
+  updateLegalEntity,
+} from "@/lib/adapters/adyen";
 import {
   checkEnvironment,
   createCheckCompany,
@@ -19,7 +26,11 @@ import {
 } from "@/lib/adapters/check";
 import { pushToHubSpot } from "@/lib/adapters/hubspot";
 import { buildCustomerSafeQuote } from "@/lib/leadQuote";
-import { validateOnboardingFields, type OnboardingFieldErrors } from "@/lib/onboardingValidation";
+import {
+  validateOnboardingFields,
+  validateOnboardingSubmission,
+  type OnboardingFieldErrors,
+} from "@/lib/onboardingValidation";
 import { usStateCode } from "@/lib/utils";
 import type {
   MerchantApplication, BusinessInfo, OwnerContact, ProcessingInfo, AgreementInfo, CustomerSafeQuote,
@@ -115,6 +126,85 @@ export async function getMyQuoteAction(id: string): Promise<CustomerSafeQuote | 
   });
 }
 
+type AdyenIds = NonNullable<MerchantApplication["adyenIds"]>;
+
+type AdyenAdvance =
+  | { ok: true; app: MerchantApplication; onboardingUrl: string }
+  | { ok: false; app: MerchantApplication; error: unknown };
+
+// Adyen's onboarding graph is four remote objects plus a link, and a failure
+// part-way through used to be unrecoverable: nothing was persisted until the
+// whole chain returned, so the customer's "Try Again" started from step one and
+// created a SECOND legal entity for the same merchant — real orphans in a live
+// account-holder graph, with the first attempt's ids lost for good.
+//
+// Each id is now written the moment its step returns, and a step whose id is
+// already on the record is skipped, so a retry resumes at the break instead of
+// duplicating everything before it. The sequencing and the persistence live
+// here rather than in the adapter: adapters/adyen.ts has no storage and no
+// callback into one, exactly like adapters/check.ts.
+//
+// The onboarding link is the one thing never resumed. It's single-use with a
+// ~4-minute expiry, so it's minted fresh on every pass — the same rule the
+// /customer/applications/[id]/continue route follows — even when all four ids
+// were already on file and no object had to be created at all.
+//
+// Returns the latest persisted row either way, so a caller reporting a failure
+// is still reporting the ids that were actually earned.
+async function advanceAdyenOnboarding(
+  userId: string,
+  id: string,
+  app: MerchantApplication
+): Promise<AdyenAdvance> {
+  let current = app;
+  const ids: AdyenIds = {
+    legalEntityId: null,
+    accountHolderId: null,
+    balanceAccountId: null,
+    merchantAccountId: null, // set to the shared POS merchant account when the store is created (tenant number known)
+    storeId: null,
+    businessLineId: null,
+    tenantNumber: null,
+    // Which Adyen environment holds these objects. On a record that already has
+    // one this is a fact about objects Adyen is holding, so the spread below
+    // carries it forward rather than re-deriving it from the current env.
+    environment: process.env.ADYEN_ENVIRONMENT === "live" ? "live" : "test",
+    ...(current.adyenIds ?? {}),
+  };
+
+  // One write per object created — the whole point of the exercise.
+  const persist = async (step: Partial<AdyenIds>) => {
+    Object.assign(ids, step);
+    current = await postgresStorage.updateApplicationAsCustomer(userId, id, { adyenIds: { ...ids } });
+  };
+
+  try {
+    let legalEntityId = ids.legalEntityId;
+    if (!legalEntityId) {
+      legalEntityId = await createAdyenLegalEntity(current);
+      await persist({ legalEntityId });
+    }
+
+    let accountHolderId = ids.accountHolderId;
+    if (!accountHolderId) {
+      accountHolderId = await createAdyenAccountHolder(current, legalEntityId);
+      await persist({ accountHolderId });
+    }
+
+    if (!ids.businessLineId) {
+      await persist({ businessLineId: await createAdyenBusinessLine(current, legalEntityId) });
+    }
+
+    if (!ids.balanceAccountId) {
+      await persist({ balanceAccountId: await createAdyenBalanceAccount(current, accountHolderId) });
+    }
+
+    return { ok: true, app: current, onboardingUrl: await createOnboardingLink(legalEntityId, id) };
+  } catch (error) {
+    return { ok: false, app: current, error };
+  }
+}
+
 // Saves the customer's self-serve business/owner/processing/agreement
 // details, then chains into Adyen (legal entity + hosted onboarding URL) and
 // HubSpot (deal sync). Both are caught independently and logged rather than
@@ -123,11 +213,18 @@ export async function getMyQuoteAction(id: string): Promise<CustomerSafeQuote | 
 // or surface a 500 to them.
 //
 // Adyen is validated against BEFORE it's called: this is the real gate, since
-// the client-side copy of the same rules is bypassable. The customer's input is
-// still saved when validation fails — losing what they typed would be worse
-// than the rejection — but the stage doesn't advance, because onboarding hasn't
-// started. `fieldErrors` (validation, the customer can fix it) and `adyenFailed`
-// (our side broke) are separate outcomes and the form renders them differently.
+// the client-side copy of the same rules is bypassable. That includes the
+// merchant's consent — the checkboxes were enforced in the browser only, so a
+// bypassed client could reach Adyen's KYC pages having agreed to nothing.
+// Missing consent is a validation failure, not an outage: it's the customer's
+// to fix, and lib/consent.ts decides what counts (a legacy agreement with no
+// recorded author is not the merchant's consent, and is refused here too).
+//
+// The customer's input is still saved when validation fails — losing what they
+// typed would be worse than the rejection — but the stage doesn't advance,
+// because onboarding hasn't started. `fieldErrors` (validation, the customer can
+// fix it) and `adyenFailed` (our side broke) are separate outcomes and the form
+// renders them differently.
 export async function saveMyApplicationOnboardingAction(
   id: string,
   fields: { business: BusinessInfo; ownerContact: OwnerContact; processing: ProcessingInfo; agreement: AgreementInfo }
@@ -141,7 +238,11 @@ export async function saveMyApplicationOnboardingAction(
   const existing = await postgresStorage.getApplicationForCustomer(userId, id);
   if (!existing) throw new Error("Application not found");
 
-  const errors = validateOnboardingFields({ business: fields.business, ownerContact: fields.ownerContact });
+  const errors = validateOnboardingSubmission({
+    business: fields.business,
+    ownerContact: fields.ownerContact,
+    agreement: fields.agreement,
+  });
   const hasFieldErrors = Object.keys(errors).length > 0;
 
   let app = await postgresStorage.updateApplicationAsCustomer(userId, id, {
@@ -155,25 +256,17 @@ export async function saveMyApplicationOnboardingAction(
   let adyenReady = false;
   let adyenFailed = false;
   if (!hasFieldErrors) {
-    try {
-      const result = await createLegalEntityAndGetOnboardingUrl(app);
+    const advanced = await advanceAdyenOnboarding(userId, id, app);
+    app = advanced.app; // whatever the chain got through, failed or not
+    if (advanced.ok) {
       app = await postgresStorage.updateApplicationAsCustomer(userId, id, {
-        adyenIds: {
-          legalEntityId: result.legalEntityId,
-          accountHolderId: result.accountHolderId,
-          balanceAccountId: result.balanceAccountId,
-          merchantAccountId: null, // set to the shared POS merchant account when the store is created (tenant number known)
-          storeId: null,
-          businessLineId: result.businessLineId,
-          tenantNumber: null,
-          environment: process.env.ADYEN_ENVIRONMENT === "live" ? "live" : "test",
-        },
-        adyenOnboardingUrl: result.onboardingUrl,
+        adyenOnboardingUrl: advanced.onboardingUrl,
         stage: "adyen_kyc_pending",
       });
-      adyenReady = Boolean(result.onboardingUrl);
+      adyenReady = Boolean(advanced.onboardingUrl);
       adyenFailed = !adyenReady;
-    } catch (err) {
+    } else {
+      const err = advanced.error;
       console.error("Adyen onboarding failed:", err instanceof Error ? err.message : err);
       adyenFailed = true;
     }
@@ -192,14 +285,34 @@ export async function saveMyApplicationOnboardingAction(
 // Edits after the first submission — e.g. after Adyen onboarding has already
 // started. Doesn't touch stage (editing shouldn't regress/advance the deal's
 // state machine) and pushes the change to Adyen/HubSpot if those already
-// have a record for this application, same fire-and-log convention as above.
+// have a record for this application.
+//
+// The edit pushes the same registeredAddress to Adyen that the first submission
+// did, so it's gated by the same server-side validator: an edit that blanks the
+// ZIP would otherwise 422 at Adyen, be swallowed to a log, and leave the record
+// here disagreeing with the one Adyen holds. Consent isn't re-demanded — this
+// path can't reach the KYC handoff, and the agreement already on the record
+// stands — so only the field rules run.
+//
+// Same three outcomes as the first submission, reported the same way: saved
+// either way, `fieldErrors` is the customer's to fix, `adyenFailed` is ours.
+// `adyenSynced` false with `adyenFailed` false just means there was no legal
+// entity to update — the common case for an edit before onboarding started.
 export async function updateMyApplicationDetailsAction(
   id: string,
   fields: { business: BusinessInfo; ownerContact: OwnerContact; processing: ProcessingInfo; agreement: AgreementInfo }
-): Promise<{ app: MerchantApplication; adyenSynced: boolean }> {
+): Promise<{
+  app: MerchantApplication;
+  adyenSynced: boolean;
+  fieldErrors: OnboardingFieldErrors | null;
+  adyenFailed: boolean;
+}> {
   const { userId } = await requireCustomer();
   const existing = await postgresStorage.getApplicationForCustomer(userId, id);
   if (!existing) throw new Error("Application not found");
+
+  const errors = validateOnboardingFields({ business: fields.business, ownerContact: fields.ownerContact });
+  const hasFieldErrors = Object.keys(errors).length > 0;
 
   let app = await postgresStorage.updateApplicationAsCustomer(userId, id, {
     business: withStateCode(fields.business),
@@ -209,12 +322,14 @@ export async function updateMyApplicationDetailsAction(
   });
 
   let adyenSynced = false;
-  if (app.adyenIds?.legalEntityId) {
+  let adyenFailed = false;
+  if (!hasFieldErrors && app.adyenIds?.legalEntityId) {
     try {
       await updateLegalEntity(app.adyenIds.legalEntityId, app);
       adyenSynced = true;
     } catch (err) {
-      console.error("Adyen legal entity update not available yet:", err instanceof Error ? err.message : err);
+      console.error("Adyen legal entity update failed:", err instanceof Error ? err.message : err);
+      adyenFailed = true;
     }
   }
 
@@ -225,7 +340,7 @@ export async function updateMyApplicationDetailsAction(
     console.error("HubSpot sync not available yet:", err instanceof Error ? err.message : err);
   }
 
-  return { app, adyenSynced };
+  return { app, adyenSynced, fieldErrors: hasFieldErrors ? errors : null, adyenFailed };
 }
 
 // ── Payroll (Check) ─────────────────────────────────────────────────────────

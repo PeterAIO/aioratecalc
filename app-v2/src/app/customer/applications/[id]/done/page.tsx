@@ -2,7 +2,7 @@ import Link from "next/link";
 import styles from "../../../customer.module.css";
 
 // Landing page for Adyen's post-KYC hosted-onboarding redirect (see
-// createLegalEntityAndGetOnboardingUrl in adyen.ts). Intentionally static —
+// createOnboardingLink in adyen.ts). Intentionally static —
 // real KYC-complete confirmation belongs in the Adyen webhook (Phase 2,
 // not yet built), not this redirect, which only means the customer finished
 // Adyen's hosted flow, not that Adyen has approved them.

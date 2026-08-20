@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { validateOnboardingFields } from "@/lib/onboardingValidation";
-import type { BusinessInfo, OwnerContact } from "@/types/merchant";
+import {
+  validateOnboardingConsent,
+  validateOnboardingFields,
+  validateOnboardingSubmission,
+} from "@/lib/onboardingValidation";
+import type { AgreementInfo, BusinessInfo, OwnerContact } from "@/types/merchant";
 
 // The set adapters/adyen.ts's legal-entity → onboarding-link chain needs:
 // organization.legalName plus a complete registeredAddress (street, city,
@@ -139,6 +143,75 @@ describe("validateOnboardingFields — present but malformed", () => {
       "business.state": expect.any(String),
       "business.zip": expect.any(String),
       "ownerContact.email": expect.any(String),
+    });
+  });
+});
+
+// The merchant's own consent, checked in the same pass as the Adyen fields so
+// the Server Action has one gate to run before the handoff. The RULE lives in
+// lib/consent.ts (and is tested there) — these are about it being asked.
+const CONSENT: AgreementInfo = {
+  sigName: "Ana Reyes", sigDate: "2026-08-19",
+  termsAccepted: true, electronicConsentAccepted: true, actor: "customer",
+};
+
+const withoutActor = (agreement: AgreementInfo): AgreementInfo => {
+  const legacy = { ...agreement };
+  delete legacy.actor;
+  return legacy;
+};
+
+describe("validateOnboardingConsent", () => {
+  it("passes the merchant's own, complete consent", () => {
+    expect(validateOnboardingConsent(CONSENT)).toEqual({});
+  });
+
+  it("rejects a missing agreement", () => {
+    for (const agreement of [null, undefined]) {
+      expect(Object.keys(validateOnboardingConsent(agreement))).toEqual(["agreement.consent"]);
+    }
+  });
+
+  it("rejects a half-ticked agreement", () => {
+    for (const consent of [
+      { termsAccepted: false, electronicConsentAccepted: true },
+      { termsAccepted: true, electronicConsentAccepted: false },
+      { termsAccepted: false, electronicConsentAccepted: false },
+    ]) {
+      expect(Object.keys(validateOnboardingConsent({ ...CONSENT, ...consent })))
+        .toEqual(["agreement.consent"]);
+    }
+  });
+
+  it("rejects consent with no recorded author", () => {
+    // Legacy JSONB rows have no `actor`, and unknown origin is not the
+    // merchant's consent — the safe direction to be wrong in.
+    expect(Object.keys(validateOnboardingConsent(withoutActor(CONSENT))))
+      .toEqual(["agreement.consent"]);
+  });
+});
+
+describe("validateOnboardingSubmission", () => {
+  it("passes a well-formed form with the merchant's consent", () => {
+    expect(validateOnboardingSubmission({
+      business: BUSINESS, ownerContact: OWNER, agreement: CONSENT,
+    })).toEqual({});
+  });
+
+  it("reports field errors and missing consent together", () => {
+    expect(validateOnboardingSubmission({
+      business: { ...BUSINESS, zip: "" },
+      ownerContact: OWNER,
+      agreement: withoutActor(CONSENT),
+    })).toEqual({
+      "business.zip": expect.any(String),
+      "agreement.consent": expect.any(String),
+    });
+  });
+
+  it("blocks on consent even when every field is perfect", () => {
+    expect(validateOnboardingSubmission({ business: BUSINESS, ownerContact: OWNER })).toEqual({
+      "agreement.consent": expect.any(String),
     });
   });
 });
