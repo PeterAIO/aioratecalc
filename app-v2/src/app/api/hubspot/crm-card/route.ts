@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyCrmCardSignature } from "@/lib/adapters/hubspotCrmCard";
+import { sql } from "drizzle-orm";
+import { db } from "@/lib/db/client";
+import { merchantApplications } from "@/lib/db/schema";
+import {
+  buildRateStoryProperties,
+  verifyCrmCardSignature,
+  type CrmCardProperty,
+} from "@/lib/adapters/hubspotCrmCard";
 
 // HubSpot Classic CRM Card data-fetch endpoint. HubSpot polls this URL (GET,
 // no body) when a rep views a Company record with this card installed, and
@@ -44,12 +51,39 @@ export async function GET(req: NextRequest) {
   const base = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
   const link = `${base}/rep/prospects/new?hubspotCompanyId=${companyId}`;
 
+  // The rate story, read live off the EasyOB application(s) linked to this
+  // company. The linkage is tenantLink.hubspotCompanyId (Phase F), a jsonb
+  // column — hence the ->> lookup rather than a typed eq(). Only the four
+  // columns buildRateStoryProperties is allowed to read are selected; see the
+  // trust-boundary note there for why nothing else may be.
+  //
+  // Best-effort: the card's job is the link, so a failed lookup logs and
+  // renders the link alone rather than 500ing HubSpot's poll.
+  let properties: CrmCardProperty[] = [];
+  try {
+    const rows = await db
+      .select({
+        updatedAt: merchantApplications.updatedAt,
+        analysis: merchantApplications.analysis,
+        proposal: merchantApplications.proposal,
+        processing: merchantApplications.processing,
+      })
+      .from(merchantApplications)
+      .where(sql`${merchantApplications.tenantLink} ->> 'hubspotCompanyId' = ${companyId}`);
+    properties = buildRateStoryProperties(rows);
+  } catch (err) {
+    console.error("crm-card: rate-story lookup failed for company", companyId, err);
+  }
+
   return NextResponse.json({
     results: [
       {
         objectId,
         title: "Open in EasyOB",
         link,
+        // Omitted entirely when there's nothing to say, so an unanalysed
+        // company shows the link rather than an empty properties block.
+        ...(properties.length > 0 ? { properties } : {}),
       },
     ],
   });
