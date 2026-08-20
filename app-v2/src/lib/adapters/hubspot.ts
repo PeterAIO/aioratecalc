@@ -1,23 +1,52 @@
 // Phase 3: HubSpot bidirectional sync via Private App Token
 // Scopes required: crm.objects.deals.read/write, crm.objects.contacts.read/write
 
-import type { BillingFrequency, CatalogProduct, MerchantApplication } from "@/types/merchant";
+import type { BillingFrequency, CatalogProduct, DealStage, MerchantApplication } from "@/types/merchant";
 
 const BASE = "https://api.hubapi.com";
 
-const STAGE_MAP: Record<string, string> = {
-  analysis: "appointmentscheduled",
-  pricing: "qualifiedtobuy",
-  quote_sent: "presentationscheduled",
-  proposal_ready: "presentationscheduled",
-  proposal_sent: "decisionmakerboughtin",
-  quote_accepted: "decisionmakerboughtin",
-  merchant_link_sent: "contractsent",
-  adyen_kyc_pending: "contractsent",
-  adyen_kyc_complete: "closedwon",
+// AIO's real sales pipeline. Its *id* is the literal string "default" but its
+// *label* is "Sales " and it carries 19 custom, mostly-numeric stage ids
+// (PAYMENT-TEST-PLAN.md §1.8, O-5, read from the live portal 2026-08-20). The
+// portal's only other deal pipeline is "Onboarding" (2329370331), which EasyOB
+// never writes to. Sent explicitly on every write so the stage ids below are
+// unambiguously scoped rather than relying on HubSpot's default.
+export const HUBSPOT_DEAL_PIPELINE_ID = "default";
+
+// EasyOB's 15 DealStage values onto that pipeline's real stage ids. `satisfies
+// Record<DealStage, string>` makes a newly added DealStage a COMPILE error
+// rather than a silent fall-through: the previous map omitted four values
+// (including `merchant_filling`, the stage set immediately before the push)
+// and fell back to the pipeline's first stage, dragging live deals backwards.
+//
+// Several EasyOB stages deliberately share one HubSpot stage: AIO's pipeline is
+// meeting- and signature-driven and has no equivalent of "waiting on the
+// merchant's statement" or "the proposal is generated but not sent yet". Two
+// real stages are deliberately left unused — `appointmentscheduled`
+// ("Appointment Scheduled") and `stage_0` ("Demo Meeting") are calendar events
+// a rep books, not states EasyOB can observe — and so is everything after
+// `closedwon` (Onboarding / Configuration / Deployment / Deal Active), which
+// AIO's ops team owns in HubSpot; pushing those from here would fight them.
+export const STAGE_MAP = {
+  prospect_created: "3262845631",      // Sales Accepted
+  lead_link_sent: "3262845631",        // Sales Accepted — nothing presented yet
+  lead_analysis_pending: "2717103849", // Discovery Meeting — merchant handed over a statement
+  analysis: "2717103849",              // Discovery Meeting
+  pricing: "2717103849",               // Discovery Meeting — internal work, nothing sent
+  proposal_ready: "2717103849",        // Discovery Meeting — generated, not sent
+  quote_sent: "3634617027",            // Quote Sent
+  proposal_sent: "3634617027",         // Quote Sent
+  quote_accepted: "2767738593",        // Signed/Awaiting Payment Info
+  merchant_link_sent: "2767738593",    // Signed/Awaiting Payment Info
+  merchant_filling: "2767738593",      // Signed/Awaiting Payment Info
+  adyen_kyc_pending: "2767738593",     // Signed/Awaiting Payment Info
+  // Finishing KYC is the merchant's side of the work, not Adyen's verdict on
+  // it — a deal isn't won until Adyen actually approves. Only adyen_approved
+  // reaches closedwon, so EasyOB never inflates the forecast.
+  adyen_kyc_complete: "2767738593", // Signed/Awaiting Payment Info
   adyen_approved: "closedwon",
   closed_lost: "closedlost",
-};
+} satisfies Record<DealStage, string>;
 
 // Two private apps, two tokens. The general CRM app is companies-read-only,
 // covering the tenant linkage lookups below; the billing app covers deals,
@@ -37,36 +66,119 @@ function billingHeaders() {
   return tokenHeaders(process.env.HUBSPOT_BILLING_PRIVATE_APP_TOKEN, "HUBSPOT_BILLING_PRIVATE_APP_TOKEN");
 }
 
-export async function pushToHubSpot(app: MerchantApplication): Promise<string> {
+// Every property this adapter reads or writes on a DEAL, and the only ones
+// that exist on the portal's DEAL object — the five the payload used to also
+// carry (`current_processor`,
+// `current_monthly_fees`, `projected_annual_savings`, `proposed_effective_rate`,
+// `mcc_code`) were never created there, and HubSpot v3 rejects the ENTIRE
+// request with 400 PROPERTY_DOESNT_EXIST when any name is unknown, so every
+// deal write failed from the day this shipped. Dropped rather than created in
+// the portal: the commercial detail a merchant actually signs is the quote's
+// line items, and the quoted side of Phase G's comparison is frozen on the
+// application itself (quoteConfig / analysis / targetMargin / quoteLines).
+// Anything added here MUST exist on DEAL first — verify with
+// GET /crm/v3/properties/deals before adding a name.
+export const DEAL_PROPERTIES = ["dealname", "pipeline", "dealstage", "amount"] as const;
+
+// HUBSPOT_DEFINED deal → company, unlabeled (PAYMENT-TEST-PLAN.md §1.1; 5 is
+// the "Primary" labelled variant of the same pair). HubSpot marks a deal's
+// first company association primary on its own, so the unlabeled id is enough
+// to put the deal on the Company record where reps work it.
+// deal → contact is typeId 3, but no contact id exists on MerchantApplication
+// yet — that association belongs with Phase E's ensureQuoteContact.
+export const DEAL_TO_COMPANY_ASSOCIATION_TYPE_ID = 341;
+
+export type HubspotAssociation = {
+  to: { id: string };
+  types: Array<{ associationCategory: "HUBSPOT_DEFINED"; associationTypeId: number }>;
+};
+
+/**
+ * Pure: the property bag for a deal write. `pipeline`/`dealstage` are omitted
+ * (rather than defaulted to the pipeline's first stage) when the row carries a
+ * stage this build doesn't know — leaving a deal where it is beats shoving it
+ * backwards through AIO's pipeline.
+ */
+export function buildDealProperties(app: MerchantApplication): Record<string, string> {
   const props: Record<string, string> = {
     dealname: app.business?.dba || app.business?.legalName || app.analysis?.merchantName || "New Deal",
-    dealstage: STAGE_MAP[app.stage] || "appointmentscheduled",
     amount: String(Math.round((parseFloat(app.processing?.monthlyVolume || "0") || app.analysis?.totalVolume || 0) * 12)),
-    current_processor: app.analysis?.currentProcessorName || "",
-    current_monthly_fees: String(app.analysis?.totalFees || 0),
-    projected_annual_savings: String(Math.round((app.proposal?.savings?.annual || 0))),
-    proposed_effective_rate: String(app.proposal?.projectedFees?.effectiveRate || 0),
-    mcc_code: app.processing?.mcc || "",
   };
+  const dealstage = (STAGE_MAP as Record<string, string | undefined>)[app.stage];
+  if (dealstage) {
+    props.pipeline = HUBSPOT_DEAL_PIPELINE_ID;
+    props.dealstage = dealstage;
+  } else {
+    console.warn(`pushToHubSpot: unmapped deal stage '${app.stage}' — leaving pipeline/dealstage untouched`);
+  }
+  return props;
+}
+
+/**
+ * Pure: v3 inline associations for a deal CREATE. Empty when the application
+ * has no tenant link yet — a prospect created without the HubSpot deep link
+ * still gets a deal, and the manual tenant-link flow can attach it later.
+ */
+export function buildDealAssociations(app: MerchantApplication): HubspotAssociation[] {
+  const companyId = clean(app.tenantLink?.hubspotCompanyId);
+  if (!companyId) return [];
+  return [{
+    to: { id: companyId },
+    types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: DEAL_TO_COMPANY_ASSOCIATION_TYPE_ID }],
+  }];
+}
+
+// Both call sites are fire-and-log (`src/lib/actions/customer.ts`), so the
+// thrown message is the only record of what went wrong — name the stage, the
+// properties and the associations that were actually sent.
+function describeDealWrite(
+  app: MerchantApplication,
+  props: Record<string, string>,
+  associations: HubspotAssociation[]
+): string {
+  const parts = [`properties ${Object.keys(props).join(", ")}`];
+  parts.push(props.dealstage
+    ? `stage '${app.stage}' → dealstage ${props.dealstage} in pipeline ${props.pipeline}`
+    : `stage '${app.stage}' unmapped, dealstage/pipeline omitted`);
+  parts.push(associations.length
+    ? `associations ${associations.map(a => `company ${a.to.id} type ${a.types.map(t => t.associationTypeId).join("/")}`).join("; ")}`
+    : "no associations (no tenantLink.hubspotCompanyId)");
+  return parts.join("; ");
+}
+
+export async function pushToHubSpot(app: MerchantApplication): Promise<string> {
+  const props = buildDealProperties(app);
 
   if (app.hubspotDealId) {
-    // Update existing deal
+    // Update existing deal. v3 PATCH takes properties only — associations are
+    // set on create (and via the v4 surface), never here.
     const res = await fetch(`${BASE}/crm/v3/objects/deals/${app.hubspotDealId}`, {
       method: "PATCH",
       headers: billingHeaders(),
       body: JSON.stringify({ properties: props }),
     });
-    if (!res.ok) throw new Error(`HubSpot PATCH deal failed: ${await res.text()}`);
+    if (!res.ok) {
+      throw hubspotErr(
+        `HubSpot deal ${app.hubspotDealId} update failed (${describeDealWrite(app, props, [])})`,
+        res.status, await res.text()
+      );
+    }
     return app.hubspotDealId;
   }
 
-  // Create deal
+  // Create deal, associated to its tenant Company when we know it.
+  const associations = buildDealAssociations(app);
   const res = await fetch(`${BASE}/crm/v3/objects/deals`, {
     method: "POST",
     headers: billingHeaders(),
-    body: JSON.stringify({ properties: props }),
+    body: JSON.stringify(associations.length ? { properties: props, associations } : { properties: props }),
   });
-  if (!res.ok) throw new Error(`HubSpot POST deal failed: ${await res.text()}`);
+  if (!res.ok) {
+    throw hubspotErr(
+      `HubSpot deal create failed (${describeDealWrite(app, props, associations)})`,
+      res.status, await res.text()
+    );
+  }
   const data = await res.json() as { id: string };
   return data.id;
 }
@@ -557,11 +669,13 @@ export async function backfillEasyobLinks(): Promise<EasyobLinkBackfillSummary> 
 }
 
 export async function pullFromHubSpot(hubspotDealId: string): Promise<Partial<MerchantApplication>> {
+  // Same DEAL_PROPERTIES list as the write path — it used to also ask for
+  // `current_processor` and `current_monthly_fees`, which don't exist on DEAL.
   const res = await fetch(
-    `${BASE}/crm/v3/objects/deals/${hubspotDealId}?properties=dealname,dealstage,amount,current_processor,current_monthly_fees`,
+    `${BASE}/crm/v3/objects/deals/${hubspotDealId}?properties=${DEAL_PROPERTIES.join(",")}`,
     { headers: billingHeaders() }
   );
-  if (!res.ok) throw new Error(`HubSpot GET deal failed: ${await res.text()}`);
+  if (!res.ok) throw hubspotErr(`HubSpot deal ${hubspotDealId} read failed`, res.status, await res.text());
   const data = await res.json() as { properties: Record<string, string> };
   const p = data.properties;
   return {
